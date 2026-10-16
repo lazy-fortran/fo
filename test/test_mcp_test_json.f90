@@ -7,6 +7,7 @@ program test_mcp_test_json
     use fo_test_harness, only: finish_assertions
     use fo_test_harness, only: make_directory, environment_value, read_text
     use fo_test_cli, only: resolve_driver, run_fo
+    use fo_fake_tool, only: fake_tool_dispatch, install_fake_tool
     use fo_test_json, only: json_value_t, json_number, json_parse, json_member, json_element
     use fo_test_json, only: json_size, json_string_value, json_number_value
     use fo_fs, only: fs_sleep_ms
@@ -43,6 +44,7 @@ program test_mcp_test_json
     logical :: seen(test_count)
     integer :: i, j, expected_index
 
+    call fake_tool_dispatch()
     call resolve_driver(driver)
     call make_scratch('fo-mcp-test-json', scratch)
     cache = join_path(scratch, 'cache')
@@ -295,10 +297,7 @@ contains
         original_path = environment_value('PATH')
         poison_dir = join_path(scratch, 'poison-path')
         call make_directory(poison_dir)
-        call write_text(poison_dir//'/fo', '#!/bin/sh'//new_line('a')// &
-            'exit 97'//new_line('a'))
-        env_status = c_chmod(poison_dir//'/fo'//c_null_char, int(o'700', c_int))
-        call assert_equal_integer(env_status, 0, 'creates hostile PATH fo oracle')
+        call install_fake_tool(poison_dir//'/fo', 'exit 97')
         env_status = c_setenv('PATH'//c_null_char, &
             poison_dir//':'//original_path//c_null_char, 1_c_int)
         call assert_equal_integer(env_status, 0, 'installs hostile PATH for MCP child')

@@ -13,16 +13,17 @@ program test_dependency_freshness
     use, intrinsic :: iso_c_binding, only: c_long_long
     use fo_test_harness, only: finish_assertions
     use fo_test_cli, only: resolve_driver, run_fo, run_external
+    use fo_fake_tool, only: fake_tool_dispatch, install_fake_tool
     implicit none
 
     character(:), allocatable :: driver, scratch, cache
-    character(len=512) :: chmod_tool, copy_tool, touch_tool
+    character(len=512) :: copy_tool, touch_tool
     character(len=1), parameter :: nl = new_line('a')
     type(process_result_t) :: result
     type(string_list_t) :: arguments, environment
 
+    call fake_tool_dispatch()
     call resolve_driver(driver)
-    call require_utility('chmod', chmod_tool)
     call require_utility('cp', copy_tool)
     call require_utility('touch', touch_tool)
     call make_scratch('fo-dependency-freshness-cli', scratch)
@@ -321,30 +322,19 @@ contains
     subroutine write_tool(path, count, value, compiler, definition, version)
         character(len=*), intent(in) :: path, count, value
         character(len=*), optional, intent(in) :: compiler, definition, version
-        character(:), allocatable :: command_name, macro, version_probe
-        type(string_list_t) :: command
-        type(process_result_t) :: child
+        character(:), allocatable :: command_name, macro, rules
 
         command_name = 'gfortran'
         macro = 'DEPENDENCY_VALUE'
         if (present(compiler)) command_name = compiler
         if (present(definition)) macro = definition
-        version_probe = ''
-        if (present(version)) version_probe = &
-            'if [ "$1" = --version ]; then printf "%s\n" "' // &
-            version // '"; exit 0; fi' // nl
-        call write_text(path, '#!/bin/sh' // nl // version_probe // &
-            'for arg in "$@"; do' // nl // &
-            '  case "$arg" in ' // &
-            '*/src/*.f90|*/app/*.f90|*/test/*.f90|*/src/*.c)' // nl // &
-            '    printf "%s\n" "$arg" >> "' // &
-            count // '" ;; esac' // nl // &
-            'done' // nl // 'exec "' // command_name // '" -D' // macro // '=' // &
-            value // ' "$@"' // nl)
-        call list_add(command, '+x')
-        call list_add(command, path)
-        call run_external(trim(chmod_tool), command, scratch, child)
-        call assert_process_ok(child, 'make compiler wrapper executable: '//path)
+        rules = ''
+        if (present(version)) rules = 'if $ARG1 = --version print "' // version // '"' // nl // &
+            'if $ARG1 = --version exit 0' // nl
+        rules = rules // 'collect "*/src/*.f90|*/app/*.f90|*/test/*.f90|*/src/*.c" "' // &
+            count // '"' // nl // 'exec "' // command_name // '" -D' // macro // '=' // &
+            value // ' $@' // nl
+        call install_fake_tool(path, rules)
     end subroutine write_tool
 
     subroutine preserve_metadata(path, reference, restore)

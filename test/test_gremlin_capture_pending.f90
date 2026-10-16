@@ -2,12 +2,18 @@ program test_gremlin_capture_pending
     use fo_util, only: temporary_root
     use, intrinsic :: iso_fortran_env, only: error_unit
     use, intrinsic :: iso_c_binding, only: c_int
+    use fo_fs, only: fs_make_dir, fs_remove_tree, fs_remove_file, fs_find_executable, &
+        fs_rename, fs_write_text
+    use fo_fake_tool, only: fake_tool_dispatch, install_fake_tool
+    use fo_test_harness, only: string_list_t, list_add, add_words, run_list, argv, &
+        spawn_list, resolve_test_executable
     implicit none
 
-    character(len=4096) :: root, fixture, state_directory, cli_file
+    character(len=4096) :: root, fixture, state_directory
+    character(len=4096) :: helper_mode, helper_label, helper_value, helper_fixture
     character(len=4096) :: driver_path, compiler_path, compiler_wrapper
     character(len=4096) :: initial_hold, initial_release, initial_entered
-    character(len=65536) :: cli_json, output
+    character(len=65536) :: cli_json
     integer :: failures, status, ios
     logical :: driver_exists, owner_started
 
@@ -19,6 +25,15 @@ program test_gremlin_capture_pending
         end function pause_microseconds
     end interface
 
+    call fake_tool_dispatch()
+    call get_command_argument(1, helper_mode)
+    if (trim(helper_mode) == '--source-writer') then
+        call get_command_argument(2, helper_label)
+        call get_command_argument(3, helper_value)
+        call get_command_argument(4, helper_fixture)
+        call run_source_writer(trim(helper_fixture), trim(helper_label), trim(helper_value))
+        stop
+    end if
     failures = 0
     owner_started = .false.
     call get_environment_variable('FO_BIN', driver_path, status=ios)
@@ -32,23 +47,18 @@ program test_gremlin_capture_pending
     call system_clock(count=ios)
     write (fixture, '(a,i0)') temporary_root()//'/fo-capture-pending-', ios
     state_directory = trim(fixture)//'-state'
-    cli_file = trim(fixture)//'-cli.json'
     initial_hold = trim(fixture)//'-initial-hold'
     initial_release = trim(fixture)//'-initial-release'
     initial_entered = trim(fixture)//'-initial-entered'
     compiler_wrapper = trim(fixture)//'-compiler-wrapper'
-    call command('mkdir -p '//quote(trim(fixture)//'/src')//' '// &
-        quote(trim(fixture)//'/test'), status)
+    call fs_make_dir(trim(fixture)//'/src', status)
+    if (status == 0) call fs_make_dir(trim(fixture)//'/test', status)
     if (status /= 0) stop 1
-    call command('command -v gfortran > '//quote(trim(cli_file)), status)
-    call read_output(cli_file, output)
-    compiler_path = trim(output)
-    call check(status == 0 .and. len_trim(compiler_path) > 0, &
+    call fs_find_executable('gfortran', compiler_path, driver_exists)
+    call check(driver_exists, &
         'real gfortran path is available for the initial-build barrier')
-    if (status /= 0 .or. len_trim(compiler_path) == 0) stop 1
+    if (.not. driver_exists) stop 1
     call write_compiler_wrapper()
-    call command('chmod +x '//quote(trim(compiler_wrapper)), status)
-    if (status /= 0) stop 1
     call touch_marker(initial_hold)
     call write_manifest()
     call write_probe_pair(1)
@@ -56,14 +66,13 @@ program test_gremlin_capture_pending
     call exercise_initial_and_active_capture()
     if (owner_started) call stop_owner()
     if (failures == 0) then
-        call command('rm -rf '//quote(trim(fixture))//' '// &
-            quote(trim(state_directory))//' '//quote(trim(cli_file)), status)
+        call fs_remove_tree(trim(fixture))
+        call fs_remove_tree(trim(state_directory))
         call remove_control_files()
     else
         write (error_unit, '(a)') 'Preserving failed capture-pending fixture:'
         write (error_unit, '(a)') 'fixture='//trim(fixture)
         write (error_unit, '(a)') 'state='//trim(state_directory)
-        write (error_unit, '(a)') 'cli='//trim(cli_file)
     end if
     if (failures > 0) stop 1
     print '(a)', 'Public capture-pending readiness oracle PASS'
@@ -221,95 +230,107 @@ contains
 
     subroutine write_probe_pair(value)
         integer, intent(in) :: value
-        integer :: file_unit, command_status
-        open (newunit=file_unit, file=trim(fixture)//'/src/fixture_probe.f90.tmp', &
-            status='replace')
-        write (file_unit, '(a)') 'module fixture_probe'
-        write (file_unit, '(a)') 'implicit none'
-        write (file_unit, '(a)') 'contains'
-        write (file_unit, '(a)') 'integer function fixture_value() result(value)'
-        write (file_unit, '(a,i0)') 'value = ', value
-        write (file_unit, '(a)') 'end function'
-        write (file_unit, '(a)') 'end module fixture_probe'
-        close (file_unit)
-        open (newunit=file_unit, file=trim(fixture)//'/test/test_case_a.f90.tmp', &
-            status='replace')
-        write (file_unit, '(a)') 'program fixture_case_a'
-        write (file_unit, '(a)') 'use fixture_probe, only: fixture_value'
-        write (file_unit, '(a)') 'implicit none'
-        write (file_unit, '(a,i0,a)') 'if (fixture_value() /= ', value, ') error stop 9'
-        write (file_unit, '(a)') 'end program fixture_case_a'
-        close (file_unit)
-        call command('mv '//quote(trim(fixture)//'/src/fixture_probe.f90.tmp')//' '// &
-            quote(trim(fixture)//'/src/fixture_probe.f90')//' && mv '// &
-            quote(trim(fixture)//'/test/test_case_a.f90.tmp')//' '// &
-            quote(trim(fixture)//'/test/test_case_a.f90'), command_status)
+        integer :: command_status
+
+        call fs_write_text(trim(fixture)//'/src/fixture_probe.f90.tmp', probe_source(value))
+        call fs_write_text(trim(fixture)//'/test/test_case_a.f90.tmp', case_source(value))
+        command_status = fs_rename(trim(fixture)//'/src/fixture_probe.f90.tmp', &
+            trim(fixture)//'/src/fixture_probe.f90')
+        if (command_status == 0) command_status = fs_rename( &
+            trim(fixture)//'/test/test_case_a.f90.tmp', &
+            trim(fixture)//'/test/test_case_a.f90')
         call check(command_status == 0, 'publishes matched provider and test sources')
     end subroutine write_probe_pair
 
     subroutine write_compiler_wrapper()
-        integer :: file_unit
-        open (newunit=file_unit, file=trim(compiler_wrapper), status='replace')
-        write (file_unit, '(a)') '#!/bin/sh'
-        write (file_unit, '(a)') 'if [ -e '//trim(initial_hold)//' ] && [ ! -e '// &
-            trim(initial_release)//' ]; then'
-        write (file_unit, '(a)') '  : > '//trim(initial_entered)
-        write (file_unit, '(a)') '  i=0; while [ ! -e '//trim(initial_release)//' ] && [ "$i" -lt 3000 ]; do'
-        write (file_unit, '(a)') '    sleep 0.01; i=$((i+1))'
-        write (file_unit, '(a)') '  done'
-        write (file_unit, '(a)') 'fi'
-        write (file_unit, '(a)') 'exec '//trim(compiler_path)//' "$@"'
-        close (file_unit)
+        character(len=1), parameter :: lf = achar(10)
+        character(len=:), allocatable :: barrier
+
+        ! While the initial hold exists and is unreleased, announce entry and wait
+        ! (bounded) for the release before running the real compiler.
+        barrier = 'ifexists '//trim(initial_hold)//' ifabsent '//trim(initial_release)//' '
+        call install_fake_tool(trim(compiler_wrapper), &
+            barrier//'touch '//trim(initial_entered)//lf// &
+            barrier//'wait-file '//trim(initial_release)//' 30000'//lf// &
+            'exec "'//trim(compiler_path)//'" $@')
     end subroutine write_compiler_wrapper
 
     subroutine start_source_writer(label, first_value)
         character(len=*), intent(in) :: label
         integer, intent(in) :: first_value
         character(len=4096) :: writer
-        integer :: file_unit, launch_status
-        logical :: started
+        character(len=32) :: first_text
+        character(len=:), allocatable :: self
+        logical :: started, resolved
+
         writer = trim(fixture)//'-writer-'//trim(label)
-        open (newunit=file_unit, file=trim(writer), status='replace')
-        write (file_unit, '(a)') '#!/bin/sh'
-        write (file_unit, '(a,i0,a)') 'n=', first_value, '; : > '//trim(writer)//'.started'
-        write (file_unit, '(a)') 'while [ ! -e '//trim(writer)//'.stop ]; do'
-        write (file_unit, '(a)') '  cat > '//trim(writer)//'.probe.tmp <<EOF'
-        write (file_unit, '(a)') 'module fixture_probe'
-        write (file_unit, '(a)') 'implicit none'
-        write (file_unit, '(a)') 'contains'
-        write (file_unit, '(a)') 'integer function fixture_value() result(value)'
-        write (file_unit, '(a)') 'value = $n'
-        write (file_unit, '(a)') 'end function'
-        write (file_unit, '(a)') 'end module fixture_probe'
-        write (file_unit, '(a)') 'EOF'
-        write (file_unit, '(a)') '  cat > '//trim(writer)//'.case.tmp <<EOF'
-        write (file_unit, '(a)') 'program fixture_case_a'
-        write (file_unit, '(a)') 'use fixture_probe, only: fixture_value'
-        write (file_unit, '(a)') 'implicit none'
-        write (file_unit, '(a)') 'if (fixture_value() /= $n) error stop 9'
-        write (file_unit, '(a)') 'end program fixture_case_a'
-        write (file_unit, '(a)') 'EOF'
-        write (file_unit, '(a)') '  mv '//trim(writer)//'.probe.tmp '// &
-            trim(fixture)//'/src/fixture_probe.f90'
-        write (file_unit, '(a)') '  mv '//trim(writer)//'.case.tmp '// &
-            trim(fixture)//'/test/test_case_a.f90'
-        write (file_unit, '(a)') '  n=$((n+1)); sleep 0.02'
-        write (file_unit, '(a)') 'done'
-        write (file_unit, '(a)') ': > '//trim(writer)//'.done'
-        close (file_unit)
-        call command('chmod +x '//quote(trim(writer)), launch_status)
-        if (launch_status == 0) call command(quote(trim(writer))//' >/dev/null 2>&1 &', &
-            launch_status)
+        write (first_text, '(i0)') first_value
+        call resolve_test_executable(self, resolved)
+        if (resolved) call spawn_list(argv(self, '--source-writer', trim(label), &
+            trim(first_text), trim(fixture)))
         started = wait_for_marker(trim(writer)//'.started', 5000)
-        call check(launch_status == 0 .and. started, &
+        call check(resolved .and. started, &
             'source writer starts for '//trim(label)//' capture')
         if (.not. started) call stop_source_writer(label)
     end subroutine start_source_writer
 
+    subroutine run_source_writer(fixture_path, label, first_text)
+        !! Helper process: republish a matched provider and test pair, with a rising
+        !! value, until the stop marker appears.
+        character(len=*), intent(in) :: fixture_path, label, first_text
+        character(len=:), allocatable :: writer
+        integer :: value, ios, status
+
+        read (first_text, *, iostat=ios) value
+        if (ios /= 0) stop 2
+        writer = fixture_path//'-writer-'//label
+        call fs_write_text(writer//'.started', '')
+        do while (.not. marker_exists(writer//'.stop'))
+            call fs_write_text(writer//'.probe.tmp', probe_source(value))
+            call fs_write_text(writer//'.case.tmp', case_source(value))
+            status = fs_rename(writer//'.probe.tmp', fixture_path//'/src/fixture_probe.f90')
+            status = fs_rename(writer//'.case.tmp', fixture_path//'/test/test_case_a.f90')
+            value = value + 1
+            status = pause_microseconds(20000_c_int)
+        end do
+        call fs_write_text(writer//'.done', '')
+    end subroutine run_source_writer
+
+    logical function marker_exists(path)
+        character(len=*), intent(in) :: path
+
+        inquire (file=path, exist=marker_exists)
+    end function marker_exists
+
+    function probe_source(value) result(text)
+        integer, intent(in) :: value
+        character(len=:), allocatable :: text
+        character(len=32) :: digits
+        character(len=1), parameter :: lf = achar(10)
+
+        write (digits, '(i0)') value
+        text = 'module fixture_probe'//lf//'implicit none'//lf//'contains'//lf// &
+            'integer function fixture_value() result(value)'//lf// &
+            'value = '//trim(digits)//lf//'end function'//lf// &
+            'end module fixture_probe'//lf
+    end function probe_source
+
+    function case_source(value) result(text)
+        integer, intent(in) :: value
+        character(len=:), allocatable :: text
+        character(len=32) :: digits
+        character(len=1), parameter :: lf = achar(10)
+
+        write (digits, '(i0)') value
+        text = 'program fixture_case_a'//lf// &
+            'use fixture_probe, only: fixture_value'//lf//'implicit none'//lf// &
+            'if (fixture_value() /= '//trim(digits)//') error stop 9'//lf// &
+            'end program fixture_case_a'//lf
+    end function case_source
+
     subroutine stop_source_writer(label)
         character(len=*), intent(in) :: label
         character(len=4096) :: writer
-        integer :: command_status
         logical :: started, done
         writer = trim(fixture)//'-writer-'//trim(label)
         call touch_marker(trim(writer)//'.stop')
@@ -318,8 +339,8 @@ contains
             done = wait_for_marker(trim(writer)//'.done', 5000)
             call check(done, 'source writer exits for '//trim(label)//' capture')
         end if
-        call command('rm -f '//quote(trim(writer)//'.probe.tmp')//' '// &
-            quote(trim(writer)//'.case.tmp'), command_status)
+        call fs_remove_file(trim(writer)//'.probe.tmp')
+        call fs_remove_file(trim(writer)//'.case.tmp')
     end subroutine stop_source_writer
 
     subroutine release_barriers()
@@ -346,47 +367,36 @@ contains
         character(len=*), intent(in) :: arguments
         character(len=*), intent(out) :: json
         integer, intent(out) :: exitcode
-        character(len=:), allocatable :: prefix, detail
+        type(string_list_t) :: invocation, environment
+        character(len=:), allocatable :: detail, standard_output, ignored_errors
+        integer :: i, used
         ! Readiness fields such as gate_token appear only in full detail.
         detail = ''
         if (index(arguments, 'status') == 1 .or. index(arguments, 'wait') == 1) &
             detail = ' --detail full'
-        prefix = 'cd '//quote(trim(root))//' && FO_JOBS=1 '// &
-            'FO_DISABLE_SELF_REFRESH=1 '// &
-            'FO_GREMLIN_STATE_DIR='//quote(trim(state_directory))//' '// &
-            'FO_FC='//quote(trim(compiler_wrapper))//' '//quote(trim(driver_path))
-        call command(prefix//' gremlin '//arguments//detail//' --dir '// &
-            quote(trim(fixture))//' --lane capture-pending > '//quote(trim(cli_file)), &
-            exitcode)
-        call read_output(cli_file, json)
-    end subroutine cli
-
-    subroutine command(text, exitcode)
-        character(len=*), intent(in) :: text
-        integer, intent(out) :: exitcode
-        integer :: launch_error
-        call execute_command_line(text, exitstat=exitcode, cmdstat=launch_error)
-        if (launch_error /= 0) exitcode = launch_error
-    end subroutine command
-
-    subroutine read_output(path, text)
-        character(len=*), intent(in) :: path
-        character(len=*), intent(out) :: text
-        character(len=65536) :: line
-        integer :: file_unit, read_status, used
-        text = ''
+        call list_add(environment, 'FO_JOBS=1')
+        call list_add(environment, 'FO_DISABLE_SELF_REFRESH=1')
+        call list_add(environment, 'FO_GREMLIN_STATE_DIR='//trim(state_directory))
+        call list_add(environment, 'FO_FC='//trim(compiler_wrapper))
+        call list_add(invocation, trim(driver_path))
+        call list_add(invocation, 'gremlin')
+        call add_words(invocation, arguments//detail)
+        call list_add(invocation, '--dir')
+        call list_add(invocation, trim(fixture))
+        call list_add(invocation, '--lane')
+        call list_add(invocation, 'capture-pending')
+        call run_list(invocation, exitcode, standard_output, errors=ignored_errors, &
+            cwd=trim(root), environment=environment, timeout_ms=-1)
+        if (exitcode < 0) exitcode = 127
+        json = ''
         used = 0
-        open (newunit=file_unit, file=trim(path), status='old', iostat=read_status)
-        if (read_status /= 0) return
-        do
-            read (file_unit, '(a)', iostat=read_status) line
-            if (read_status /= 0) exit
-            if (used + len_trim(line) > len(text)) exit
-            text(used + 1:used + len_trim(line)) = trim(line)
-            used = used + len_trim(line)
+        do i = 1, len(standard_output)
+            if (standard_output(i:i) == achar(10)) cycle
+            if (used >= len(json)) exit
+            used = used + 1
+            json(used:used) = standard_output(i:i)
         end do
-        close (file_unit)
-    end subroutine read_output
+    end subroutine cli
 
     function field(json, key) result(value)
         character(len=*), intent(in) :: json, key
@@ -418,21 +428,6 @@ contains
             cursor = cursor + 1
         end do
     end function field
-
-    function quote(text) result(quoted)
-        character(len=*), intent(in) :: text
-        character(len=:), allocatable :: quoted
-        integer :: i
-        quoted = "'"
-        do i = 1, len(text)
-            if (text(i:i) == "'") then
-                quoted = quoted//"'"//'"'//"'"//'"'//"'"
-            else
-                quoted = quoted//text(i:i)
-            end if
-        end do
-        quoted = quoted//"'"
-    end function quote
 
     subroutine check(condition, label)
         logical, intent(in) :: condition
@@ -477,21 +472,20 @@ contains
     end subroutine touch_marker
 
     subroutine remove_control_files()
-        integer :: command_status
-        call command('rm -f '//quote(trim(compiler_wrapper))//' '// &
-            quote(trim(initial_hold))//' '//quote(trim(initial_release))//' '// &
-            quote(trim(initial_entered))//' '// &
-            quote(trim(fixture)//'-writer-initial')//' '// &
-            quote(trim(fixture)//'-writer-initial.started')//' '// &
-            quote(trim(fixture)//'-writer-initial.stop')//' '// &
-            quote(trim(fixture)//'-writer-initial.done')//' '// &
-            quote(trim(fixture)//'-writer-active')//' '// &
-            quote(trim(fixture)//'-writer-active.started')//' '// &
-            quote(trim(fixture)//'-writer-active.stop')//' '// &
-            quote(trim(fixture)//'-writer-active.done')//' '// &
-            quote(trim(fixture)//'-writer-initial.probe.tmp')//' '// &
-            quote(trim(fixture)//'-writer-initial.case.tmp')//' '// &
-            quote(trim(fixture)//'-writer-active.probe.tmp')//' '// &
-            quote(trim(fixture)//'-writer-active.case.tmp'), command_status)
+        character(len=16), parameter :: labels(2) = [character(len=16) :: 'initial', 'active']
+        character(len=24), parameter :: suffixes(6) = [character(len=24) :: '', '.started', &
+            '.stop', '.done', '.probe.tmp', '.case.tmp']
+        integer :: i, j
+
+        call fs_remove_file(trim(compiler_wrapper))
+        call fs_remove_file(trim(initial_hold))
+        call fs_remove_file(trim(initial_release))
+        call fs_remove_file(trim(initial_entered))
+        do i = 1, size(labels)
+            do j = 1, size(suffixes)
+                call fs_remove_file(trim(fixture)//'-writer-'//trim(labels(i))// &
+                    trim(suffixes(j)))
+            end do
+        end do
     end subroutine remove_control_files
 end program test_gremlin_capture_pending

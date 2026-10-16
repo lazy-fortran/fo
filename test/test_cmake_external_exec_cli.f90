@@ -3,11 +3,13 @@ program test_cmake_external_exec_cli
         join_path, write_lines, write_text, list_add, remove_tree, run_process, &
         assert_process_ok, assert_true, finish_assertions
     use fo_test_cli, only: resolve_driver, run_fo
+    use fo_fake_tool, only: fake_tool_dispatch, install_fake_tool
     implicit none
     character(:), allocatable :: driver, scratch, project, external
     type(string_list_t) :: arguments, environment
     type(process_result_t) :: result
 
+    call fake_tool_dispatch()
     call resolve_driver(driver)
     call make_scratch('fo-cmake-external-exec', scratch)
     project = join_path(scratch, 'project')
@@ -103,16 +105,8 @@ program test_cmake_external_exec_cli
 contains
     subroutine write_stale(path, text)
         character(*), intent(in) :: path, text
-        type(string_list_t) :: chmod_args
-        type(process_result_t) :: chmod_result
 
-        call write_text(path, '#!/bin/sh'//new_line('a')//'echo '//text// &
-            new_line('a')//'exit 91'//new_line('a'))
-        call list_add(chmod_args, 'chmod')
-        call list_add(chmod_args, '+x')
-        call list_add(chmod_args, path)
-        call run_process(chmod_args, scratch, chmod_result)
-        call assert_process_ok(chmod_result, 'make stale candidate executable')
+        call install_fake_tool(path, 'print "'//text//'"'//new_line('a')//'exit 91')
     end subroutine write_stale
 
     subroutine numeric_ok(observed, label)

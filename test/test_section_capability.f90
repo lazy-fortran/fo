@@ -8,6 +8,7 @@ program test_section_capability
     use fo_test_native_run, only: native_test_run
     use fo_process, only: process_getpid
     use fo_util, only: make_tmpfile, temporary_root
+    use fo_fake_tool, only: fake_tool_dispatch, install_fake_tool
     implicit none
 
     character(len=512) :: compiler, old_compiler, flang_path
@@ -28,6 +29,7 @@ program test_section_capability
         end function unsetenv
     end interface
 
+    call fake_tool_dispatch()
     compiler = selected_compiler_command()
     call get_environment_variable('FO_FC', old_compiler, status=environment_status)
     call check_concurrent_section_probe()
@@ -58,7 +60,7 @@ contains
         !! ask for the same result. A published placeholder would report false.
         character(len=512) :: probe_dir, wrapper, gfortran_path
         logical :: results(8), compiler_found, old_dynamic
-        integer :: i, unit, chmod_status, count
+        integer :: i, count
 
         call fs_find_executable('gfortran', gfortran_path, compiler_found)
         if (.not. compiler_found) return
@@ -68,14 +70,8 @@ contains
             count
         call fs_make_dir(trim(probe_dir))
         wrapper = trim(probe_dir)//'/slow-gfortran'
-        open (newunit=unit, file=trim(wrapper), status='replace')
-        write (unit, '(a)') '#!/bin/sh'
-        write (unit, '(a)') 'sleep 0.5'
-        write (unit, '(a)') 'exec "'//trim(gfortran_path)//'" "$@"'
-        close (unit)
-        call execute_command_line('chmod +x "'//trim(wrapper)//'"', &
-            exitstat=chmod_status)
-        if (chmod_status /= 0) error stop 'cannot prepare section probe wrapper'
+        call install_fake_tool(trim(wrapper), 'sleep 500'//new_line('a')// &
+            'exec "'//trim(gfortran_path)//'" $@')
 
         old_dynamic = omp_get_dynamic()
         call omp_set_dynamic(.false.)

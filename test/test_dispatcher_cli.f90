@@ -7,6 +7,7 @@ program test_dispatcher_cli
     use fo_test_harness, only: assert_file_equals, assert_contains, assert_not_contains
     use fo_test_harness, only: assert_true, assert_process_ok, file_exists, read_text
     use fo_test_cli, only: resolve_driver, run_fo, run_external, parse_json_report
+    use fo_fake_tool, only: fake_tool_dispatch, install_fake_tool
     use fo_test_json, only: json_value_t, json_member, json_element, json_size
     use fo_test_json, only: json_string_value, json_number_value
     use fo_test_harness, only: finish_assertions
@@ -31,6 +32,7 @@ program test_dispatcher_cli
     type(string_list_t) :: arguments, regex_environment, listing_args, listing_env
     type(json_value_t) :: report, tests, entry, field
 
+    call fake_tool_dispatch()
     call resolve_driver(driver)
     call current_directory(project)
     call make_scratch('fo-dispatcher-cli', scratch)
@@ -116,12 +118,8 @@ program test_dispatcher_cli
 
     ! A stale private executable must not take precedence over the configured
     ! dispatcher when the public test name is selected.
-    call write_text(join_path(scratch, 'build/fo/bin/test_alpha'), &
-        '#!/bin/sh' // new_line('a') // &
-        'echo stale-private > test_alpha.receipt' // new_line('a'))
-    call run_external('/bin/chmod', words([character(len=512) :: '755', &
-        join_path(scratch, 'build/fo/bin/test_alpha')]), scratch, result)
-    call assert_process_ok(result, 'make stale private test executable runnable')
+    call install_fake_tool(join_path(scratch, 'build/fo/bin/test_alpha'), &
+        'write test_alpha.receipt "stale-private\n"')
     call expect_cases(words([character(len=32) :: 'test', 'test_alpha']), &
         [character(len=32) :: 'test_alpha'], [character(len=32) :: 'test_alpha'], &
         [character(len=64) :: 'alpha-updated'])

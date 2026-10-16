@@ -6,6 +6,7 @@ program test_harness_process_group
     use fo_test_harness, only: spawn_unowned_process, start_sentinel, stop_sentinel, process_alive
     use fo_fs, only: fs_is_windows
     use fo_test_harness, only: resolve_test_executable
+    use fo_fake_tool, only: fake_tool_dispatch, install_fake_tool
     use fo_process, only: process_getpid, process_exit
     use fo_test_process_identity, only: mcp_process_start_time, mcp_process_identity_running, mcp_kill_owned_tree
     use fo_test_os_link, only: test_os_initialize
@@ -32,6 +33,7 @@ program test_harness_process_group
         end function c_ignore_term
     end interface
 
+    call fake_tool_dispatch()
     call get_command_argument(1, mode)
     call resolve_test_executable(executable, resolved)
     if (.not. resolved) error stop 'cannot resolve native boundary oracle'
@@ -121,18 +123,16 @@ program test_harness_process_group
 
     do i = 1, 32
         command = string_list_t()
-        call list_add(command, '/bin/sh')
-        call list_add(command, '-c')
-        call list_add(command, 'set -- $(/bin/ps -o pgid= -p $$); test "$1" -eq "$$"')
+        call install_fake_tool(join_path(scratch, 'group-check'), 'if $PGID != $PID exit 1')
+        call list_add(command, join_path(scratch, 'group-check'))
         call run_process(command, scratch, result)
         call assert_process_ok(result, 'launched child owns its process group')
     end do
 
     if (host == 'Darwin') then
         command = string_list_t()
-        call list_add(command, '/bin/sh')
-        call list_add(command, '-c')
-        call list_add(command, 'echo should-not-execute')
+        call install_fake_tool(join_path(scratch, 'pre-group'), 'print should-not-execute')
+        call list_add(command, join_path(scratch, 'pre-group'))
         call run_process(command, scratch, result, timeout_ms=100, child_start_delay_ms=2000)
         call assert_true(result%timed_out .and. result%reaped, &
             'timeout reaps a child before it establishes its group')
@@ -143,13 +143,12 @@ program test_harness_process_group
 
     heartbeat = join_path(scratch, 'grandchild-heartbeat')
     command = string_list_t()
-    call list_add(command, '/bin/sh')
-    call list_add(command, '-c')
-    call list_add(command, 'trap "" TERM; /bin/sh -c ' // &
-        '''while :; do echo tick >> "$1"; sleep 0.02; done'' child "$1" & wait')
-    call list_add(command, 'launcher')
+    call install_fake_tool(join_path(scratch, 'ticker'), 'heartbeat $ARG1 20')
+    call install_fake_tool(join_path(scratch, 'launcher'), 'ignore-term' // new_line('a') // &
+        'spawn /dev/null ' // join_path(scratch, 'ticker') // ' $ARG1' // new_line('a') // 'wait')
+    call list_add(command, join_path(scratch, 'launcher'))
     call list_add(command, heartbeat)
-    call run_process(command, scratch, result, timeout_ms=200)
+    call run_process(command, scratch, result, timeout_ms=1500)
     call assert_true(result%timed_out .and. result%reaped .and. .not. result%runner_failed, &
         'timeout kills and reaps a TERM-ignoring launcher')
     call assert_true(file_exists(heartbeat), 'grandchild ran before timeout')

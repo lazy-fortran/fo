@@ -4,6 +4,8 @@ program test_ffc_native
     use fo_ffc_native, only: ffc_native_build, ffc_native_run
     use fo_process, only: process_getpid
     use fo_util, only: read_text_file
+    use fo_fs, only: fs_make_dir, fs_remove_tree
+    use fo_fake_tool, only: fake_tool_dispatch, install_fake_tool
     implicit none
 
     interface
@@ -19,11 +21,12 @@ program test_ffc_native
     character(len=4096) :: original_path
     character(len=512) :: test_dir
 
+    call fake_tool_dispatch()
     n_fail = 0
     n_pass = 0
     call get_environment_variable('PATH', original_path)
     write (test_dir, '(a,i0)') '/tmp/fo_ffc_native_', process_getpid()
-    call execute_command_line('/bin/mkdir -p "'//trim(test_dir)//'"')
+    call fs_make_dir(trim(test_dir))
     call write_fake_ffc()
 
     call test_missing_ffc()
@@ -33,7 +36,7 @@ program test_ffc_native
     call test_run_exit_status()
 
     call set_env('PATH', trim(original_path))
-    call execute_command_line('/bin/rm -rf "'//trim(test_dir)//'"')
+    call fs_remove_tree(trim(test_dir))
     write (output_unit, '(a,i0,a,i0)') 'ffc_native: ', n_pass, ' pass, ', n_fail
     if (n_fail > 0) stop 1
 
@@ -157,42 +160,21 @@ contains
     end subroutine use_fake_ffc
 
     subroutine write_fake_ffc()
-        integer :: u
-        character(len=512) :: path
+        character(len=1), parameter :: lf = achar(10)
 
-        path = trim(test_dir)//'/ffc'
-        open (newunit=u, file=trim(path), status='replace')
-        write (u, '(a)') '#!/bin/sh'
-        write (u, '(a)') 'if [ "$1" = "--version" ]; then'
-        write (u, '(a)') '  if [ "$FFC_FAKE_VERSION_NOISE" = "1" ]; then'
-        write (u, '(a)') '    printf "STOP 0\n" >&2'
-        write (u, '(a)') '  fi'
-        write (u, '(a)') '  printf "%s\n" "${FFC_FAKE_VERSION:-ffc 0.1.0}"'
-        write (u, '(a)') '  exit "${FFC_FAKE_VERSION_EXIT:-0}"'
-        write (u, '(a)') 'fi'
-        write (u, '(a)') 'printf "CALL\n" >> "$FFC_FAKE_LOG"'
-        write (u, '(a)') 'out='
-        write (u, '(a)') 'compile=0'
-        write (u, '(a)') 'previous='
-        write (u, '(a)') 'for arg in "$@"; do'
-        write (u, '(a)') '  printf "ARG=%s\n" "$arg" >> "$FFC_FAKE_LOG"'
-        write (u, '(a)') '  if [ "$previous" = "-o" ]; then out=$arg; fi'
-        write (u, '(a)') '  if [ "$arg" = "-c" ]; then compile=1; fi'
-        write (u, '(a)') '  previous=$arg'
-        write (u, '(a)') 'done'
-        write (u, '(a)') 'if [ "${FFC_FAKE_MODE:-ok}" = "bad" ]; then'
-        write (u, '(a)') '  printf "%s\n" "$FFC_FAKE_DIAGNOSTIC" >&2'
-        write (u, '(a)') '  exit 9'
-        write (u, '(a)') 'fi'
-        write (u, '(a)') 'if [ "$compile" -eq 1 ]; then : > "$out"; exit 0; fi'
-        write (u, '(a)') 'printf "#!/bin/sh\n" > "$out"'
-        write (u, '(a)') 'printf ''%s\n'' ''printf "RUN_ARG=%s\n" '// &
-            '"$@" > "$FFC_FAKE_RUN_LOG"'' >> "$out"'
-        write (u, '(a)') 'printf "exit %s\n" '// &
-            '"${FFC_FAKE_PROGRAM_EXIT:-0}" >> "$out"'
-        write (u, '(a)') '/bin/chmod +x "$out"'
-        close (u)
-        call execute_command_line('/bin/chmod +x "'//trim(path)//'"')
+        call install_fake_tool(trim(test_dir)//'/ffc', &
+            'if $ARG1 = --version if ${FFC_FAKE_VERSION_NOISE:-0} = 1 eprint "STOP 0"'//lf// &
+            'if $ARG1 = --version print "${FFC_FAKE_VERSION:-ffc 0.1.0}"'//lf// &
+            'if $ARG1 = --version exit ${FFC_FAKE_VERSION_EXIT:-0}'//lf// &
+            'append $FFC_FAKE_LOG "CALL\n"'//lf// &
+            'collect "*" $FFC_FAKE_LOG ARG='//lf// &
+            'if ${FFC_FAKE_MODE:-ok} = bad eprint "$FFC_FAKE_DIAGNOSTIC"'//lf// &
+            'if ${FFC_FAKE_MODE:-ok} = bad exit 9'//lf// &
+            'if " $ARGS " ~ " -c " write $OUT ""'//lf// &
+            'if " $ARGS " ~ " -c " exit 0'//lf// &
+            '# a link produces a program that records its arguments and exits'//lf// &
+            'install $OUT "write \$FFC_FAKE_RUN_LOG \"\"\ncollect \"*\" '// &
+            '\$FFC_FAKE_RUN_LOG RUN_ARG=\nexit ${FFC_FAKE_PROGRAM_EXIT:-0}"')
     end subroutine write_fake_ffc
 
     subroutine set_env(name, value)

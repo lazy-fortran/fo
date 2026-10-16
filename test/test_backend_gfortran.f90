@@ -12,14 +12,21 @@ program test_backend_gfortran
         HASH_LEN
     use fo_process, only: process_getpid, process_getcwd, &
         process_run_argv_logged, argv_push
-    use fo_fs, only: fs_find_executable, fs_remove_file, fs_identity, fs_stat
+    use fo_fs, only: fs_find_executable, fs_remove_file, fs_identity, fs_stat, &
+        fs_remove_tree, fs_make_dir, fs_copy_exec, fs_collect_files, &
+        fs_dir_entry_count
+    use fo_test_harness, only: string_list_t, list_add, spawn_process, &
+        poll_process, sleep_ms, run_git, start_sentinel
     use fo_compiler_flags, only: append_array_temporary_warning_flag, append_pipe_flag
     use fo_linker_policy, only: linker_should_try_lld
     use fx_dag, only: MAX_NODES
+    use fo_fs, only: fs_collect_files, fs_copy_exec, fs_dir_entry_count, fs_make_dir, fs_remove_tree
+    use fo_fake_tool, only: fake_tool_dispatch, install_fake_tool
     implicit none
     integer :: n_pass, n_fail, n_args
     character(len=64) :: selector
 
+    call fake_tool_dispatch()
     n_pass = 0
     n_fail = 0
     n_args = command_argument_count()
@@ -247,8 +254,8 @@ contains
         call gfortran_build(project_dir, log_file, exitcode, n_first)
         call assert(exitcode == 0 .and. n_first == 13, &
             'parallel warm restore fixture compiles all sources once')
-        call execute_command_line('rm -rf "'//trim(project_dir)// &
-            '/build/fo/obj" "'//trim(project_dir)//'/build/fo/mod"')
+        call fs_remove_tree(trim(project_dir)//'/build/fo/obj')
+        call fs_remove_tree(trim(project_dir)//'/build/fo/mod')
         call gfortran_build(project_dir, log_file, exitcode, n_restore)
         restore_exit = exitcode
         if (restore_exit /= 0 .or. n_restore /= 0) then
@@ -262,8 +269,7 @@ contains
             'parallel warm restore reuses all cached actions')
         binary = trim(project_dir)//'/build/fo/bin/parallel_warm_restore'
         output = trim(project_dir)//'.out'
-        call execute_command_line('"'//trim(binary)//'" > "'// &
-            trim(output)//'"', exitstat=exitcode)
+        call run_backend_argv(trim(binary), [character(len=1) ::], trim(output), exitcode)
         call assert(exitcode == 0 .and. file_contains(output, '78'), &
             'dependent app executes with restored provider modules')
 
@@ -274,8 +280,8 @@ contains
         end if
         if (restore_exit == 0 .and. n_restore == 0) then
             call remove_tree(project_dir)
-            call execute_command_line('rm -f "'//trim(log_file)//'" "'// &
-                trim(output)//'"')
+            call fs_remove_file(trim(log_file))
+            call fs_remove_file(trim(output))
         end if
     end subroutine test_gfortran_parallel_warm_restore
 
@@ -671,38 +677,15 @@ contains
         write (u, '(a)') 'main = "test_process_tree.f90"'
         close (u)
         open (newunit=u, file=trim(source), status='replace')
-        write (u, '(a)') 'program test_process_tree'
-        write (u, '(a)') 'implicit none'
-        write (u, '(a)') 'character(len=16) :: mode'
-        write (u, '(a)') 'character(len=512) :: pid_file, command'
-        write (u, '(a)') 'integer :: status, env_status'
-        write (u, '(a)') 'call get_environment_variable(''FO_TEST_CHILD_MODE'', mode, status=env_status)'
-        write (u, '(a)') 'if (env_status /= 0) error stop ''missing child mode'''
-        write (u, '(a)') 'call get_environment_variable(''FO_TEST_CHILD_PID_FILE'', pid_file, status=env_status)'
-        write (u, '(a)') 'if (env_status /= 0) error stop ''missing child PID path'''
-        write (u, '(a)') 'select case (trim(mode))'
-        write (u, '(a)') 'case (''busy'')'
-        write (u, '(a)') 'command = "sh -c ''echo $$ > "//trim(pid_file)// &'
-        write (u, '(a)') '    "; while :; do :; done''"'
-        write (u, '(a)') 'case (''blocked'')'
-        write (u, '(a)') 'command = "sh -c ''sleep 30 & echo $! > "//trim(pid_file)// &'
-        write (u, '(a)') '    "; wait''"'
-        write (u, '(a)') 'case (''complete'')'
-        write (u, '(a)') 'command = "sh -c ''sleep 30 & echo $! > "//trim(pid_file)//"''"'
-        write (u, '(a)') 'case default'
-        write (u, '(a)') 'error stop ''invalid child mode'''
-        write (u, '(a)') 'end select'
-        write (u, '(a)') 'call execute_command_line(trim(command), exitstat=status)'
-        write (u, '(a)') 'if (status /= 0) error stop ''child command failed'''
-        write (u, '(a)') 'write (*, ''(a)'') ''PARENT_COMPLETE'''
-        write (u, '(a)') 'end program test_process_tree'
+        call write_tree_fixture_program(u)
         close (u)
 
         pid_file = trim(project_dir)//'/sentinel.pid'
-        call execute_command_line("sh -c 'sleep 60 & echo $! > "// &
-            trim(pid_file)//"'", exitstat=exitcode)
-        call assert(exitcode == 0, 'starts an unrelated process sentinel')
-        sentinel_pid = read_process_id(pid_file)
+        call start_sentinel(sentinel_pid)
+        open (newunit=u, file=trim(pid_file), status='replace')
+        write (u, '(i0)') sentinel_pid
+        close (u)
+        call install_tree_tools(project_dir)
         call assert(sentinel_pid > 0, 'records the unrelated sentinel PID')
         alive = process_is_alive(sentinel_pid)
         call assert(alive, 'unrelated sentinel is running before the fixture')
@@ -732,6 +715,85 @@ contains
         call remove_tree(trim(project_dir))
     end subroutine test_process_tree_supervision
 
+    subroutine install_tree_tools(project_dir)
+        !! Children for the supervision fixture: a busy process, a launcher that
+        !! blocks on a sleeping descendant, and one that leaves it behind.
+        character(len=*), intent(in) :: project_dir
+        character(len=1), parameter :: lf = achar(10)
+
+        call install_fake_tool(trim(project_dir)//'/tool-sleeper', 'sleep 30000')
+        call install_fake_tool(trim(project_dir)//'/tool-busy', &
+            'write $ARG1 "$PID\n"'//lf//'spin')
+        call install_fake_tool(trim(project_dir)//'/tool-blocked', &
+            'spawn $ARG1 '//trim(project_dir)//'/tool-sleeper'//lf//'wait')
+        call install_fake_tool(trim(project_dir)//'/tool-complete', &
+            'spawn $ARG1 '//trim(project_dir)//'/tool-sleeper')
+    end subroutine install_tree_tools
+
+    subroutine write_tree_fixture_program(u)
+        !! The fixture test starts the mode's child and waits for it, like a test
+        !! that runs a helper program.
+        integer, intent(in) :: u
+
+        write (u, '(a)') 'program test_process_tree'
+        write (u, '(a)') 'use, intrinsic :: iso_c_binding'
+        write (u, '(a)') 'implicit none'
+        write (u, '(a)') 'interface'
+        write (u, '(a)') 'function c_fork() bind(C, name="fork") result(pid)'
+        write (u, '(a)') 'import :: c_int'
+        write (u, '(a)') 'integer(c_int) :: pid'
+        write (u, '(a)') 'end function c_fork'
+        write (u, '(a)') 'function c_execv(path, argv) bind(C, name="execv") result(rc)'
+        write (u, '(a)') 'import :: c_char, c_int, c_ptr'
+        write (u, '(a)') 'character(kind=c_char), intent(in) :: path(*)'
+        write (u, '(a)') 'type(c_ptr), intent(in) :: argv(*)'
+        write (u, '(a)') 'integer(c_int) :: rc'
+        write (u, '(a)') 'end function c_execv'
+        write (u, '(a)') 'function c_waitpid(pid, status, options) bind(C, name="waitpid") result(rc)'
+        write (u, '(a)') 'import :: c_int'
+        write (u, '(a)') 'integer(c_int), value :: pid, options'
+        write (u, '(a)') 'integer(c_int), intent(out) :: status'
+        write (u, '(a)') 'integer(c_int) :: rc'
+        write (u, '(a)') 'end function c_waitpid'
+        write (u, '(a)') 'subroutine c_exit(code) bind(C, name="_exit")'
+        write (u, '(a)') 'import :: c_int'
+        write (u, '(a)') 'integer(c_int), value :: code'
+        write (u, '(a)') 'end subroutine c_exit'
+        write (u, '(a)') 'end interface'
+        write (u, '(a)') 'character(len=512) :: mode, pid_file, tool'
+        write (u, '(a)') 'character(kind=c_char), target :: tool_c(513), pid_c(513)'
+        write (u, '(a)') 'type(c_ptr) :: argv(3)'
+        write (u, '(a)') 'integer(c_int) :: child, status, rc'
+        write (u, '(a)') 'integer :: env_status, i'
+        write (u, '(a)') 'call get_environment_variable(''FO_TEST_CHILD_MODE'', mode, status=env_status)'
+        write (u, '(a)') 'if (env_status /= 0) error stop ''missing child mode'''
+        write (u, '(a)') 'call get_environment_variable(''FO_TEST_CHILD_PID_FILE'', pid_file, status=env_status)'
+        write (u, '(a)') 'if (env_status /= 0) error stop ''missing child PID path'''
+        write (u, '(a)') 'call get_environment_variable(''FO_TEST_CHILD_TOOL'', tool, status=env_status)'
+        write (u, '(a)') 'if (env_status /= 0) error stop ''missing child tool'''
+        write (u, '(a)') 'tool_c = c_null_char'
+        write (u, '(a)') 'pid_c = c_null_char'
+        write (u, '(a)') 'do i = 1, len_trim(tool)'
+        write (u, '(a)') 'tool_c(i) = tool(i:i)'
+        write (u, '(a)') 'end do'
+        write (u, '(a)') 'do i = 1, len_trim(pid_file)'
+        write (u, '(a)') 'pid_c(i) = pid_file(i:i)'
+        write (u, '(a)') 'end do'
+        write (u, '(a)') 'argv(1) = c_loc(tool_c)'
+        write (u, '(a)') 'argv(2) = c_loc(pid_c)'
+        write (u, '(a)') 'argv(3) = c_null_ptr'
+        write (u, '(a)') 'child = c_fork()'
+        write (u, '(a)') 'if (child < 0) error stop ''cannot start child'''
+        write (u, '(a)') 'if (child == 0) then'
+        write (u, '(a)') 'rc = c_execv(tool_c, argv)'
+        write (u, '(a)') 'call c_exit(127_c_int)'
+        write (u, '(a)') 'end if'
+        write (u, '(a)') 'rc = c_waitpid(child, status, 0_c_int)'
+        write (u, '(a)') 'if (rc /= child .or. status /= 0) error stop ''child command failed'''
+        write (u, '(a)') 'write (*, ''(a)'') ''PARENT_COMPLETE'''
+        write (u, '(a)') 'end program test_process_tree'
+    end subroutine write_tree_fixture_program
+
     subroutine run_process_tree_case(project_dir, log_file, selected, mode, named, &
             expect_timeout, sentinel_pid)
         use, intrinsic :: iso_c_binding, only: c_int
@@ -752,6 +814,7 @@ contains
 
         call system_clock(clock)
         write (pid_file, '(a,a,a,i0)') trim(project_dir), '/child-', trim(mode), clock
+        call set_env('FO_TEST_CHILD_TOOL', trim(project_dir)//'/tool-'//trim(mode))
         call fs_remove_file(trim(pid_file))
         call fs_remove_file(trim(log_file))
         call set_env('FO_TEST_CHILD_MODE', trim(mode))

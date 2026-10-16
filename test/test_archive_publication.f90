@@ -11,6 +11,8 @@ program test_archive_publication
     use fo_test_cli, only: resolve_driver, run_fo, run_external, parse_json_report
     use fo_test_json, only: json_value_t, json_member, json_element, json_size
     use fo_test_json, only: json_string_value
+    use fo_fs, only: fs_make_dir, fs_find_executable
+    use fo_fake_tool, only: fake_tool_dispatch, install_fake_tool
     implicit none
 
     character(:), allocatable :: driver, scratch, project, cache, fake_bin, real_ar
@@ -24,6 +26,7 @@ program test_archive_publication
     integer :: child = -1, status, count, before_calls, timed_child, sentinel
     logical :: found, macos
 
+    call fake_tool_dispatch()
     call resolve_driver(driver)
     call make_scratch('fo-archive-publication-fortran', scratch)
     call run_external('/usr/bin/uname', words([character(len=8) :: '-s']), &
@@ -298,28 +301,25 @@ contains
 
     subroutine make_directory(path)
         character(len=*), intent(in) :: path
-        call run_external('/bin/mkdir', words([character(len=512) :: '-p', path]), &
-            scratch, external)
-        call assert_process_ok(external, 'create fixture directory')
+        integer :: status
+
+        call fs_make_dir(path, status)
+        call assert_equal_integer(status, 0, 'create fixture directory')
     end subroutine make_directory
 
     function locate(name) result(path)
         character(len=*), intent(in) :: name
         character(:), allocatable :: path
-        type(process_result_t) :: located
+        character(len=4096) :: found_path
+        logical :: located
 
         select case (name)
         case ('ar')
             path = '/usr/bin/ar'
         case ('gfortran')
-            call run_external('/bin/sh', &
-                words([character(len=64) :: '-c', 'command -v gfortran']), &
-                scratch, located)
-            call assert_process_ok(located, 'locate actual Fortran compiler')
-            path = trim(located%stdout)
-            if (len(path) > 0) then
-                if (path(len(path):) == new_line('a')) path = path(:len(path)-1)
-            end if
+            call fs_find_executable('gfortran', found_path, located)
+            call assert_true(located, 'locate actual Fortran compiler')
+            path = trim(found_path)
         case ('gcc')
             path = '/usr/bin/gcc'
         case default
@@ -447,87 +447,81 @@ contains
     end function shared_manifest
 
     subroutine install_wrappers()
-        call write_text(join_path(fake_bin, 'ar'), ar_wrapper())
-        call write_text(join_path(fake_bin, 'gfortran'), fc_wrapper())
-        call write_text(join_path(fake_bin, 'gcc'), gcc_wrapper())
-        call chmod_executable(join_path(fake_bin, 'ar'))
-        call chmod_executable(join_path(fake_bin, 'gfortran'))
-        call chmod_executable(join_path(fake_bin, 'gcc'))
+        call install_fake_tool(join_path(fake_bin, 'ar'), ar_wrapper())
+        call install_fake_tool(join_path(fake_bin, 'gfortran'), fc_wrapper())
+        call install_fake_tool(join_path(fake_bin, 'gcc'), gcc_wrapper())
     end subroutine install_wrappers
 
     function ar_wrapper() result(text)
         character(:), allocatable :: text
-        text = '#!/bin/sh' // new_line('a') // &
-            'echo "$FO_TEST_AR_MODE $PPID $*" >> "$FO_TEST_AR_LOG"' // new_line('a') // &
-            'if [ "$1" = rcs ]; then' // new_line('a') // &
-            ' case "$FO_TEST_AR_MODE" in' // new_line('a') // &
-            ' fail) echo partial > "$2"; exit 37 ;;' // new_line('a') // &
-            ' omit) exec "$FO_TEST_REAL_AR" rcs "$2" ;;' // new_line('a') // &
-            ' delay) echo partial > "$2"; : > "$FO_TEST_MARKER"; sleep 1; rm -f "$2" ;;' // new_line('a') // &
-            ' esac' // new_line('a') // 'fi' // new_line('a') // &
-            'exec "$FO_TEST_REAL_AR" "$@"' // new_line('a')
+        character(len=*), parameter :: when_rcs = 'if $ARG1 = rcs if $FO_TEST_AR_MODE = '
+        character(len=1), parameter :: lf = achar(10)
+
+        text = 'append $FO_TEST_AR_LOG "$FO_TEST_AR_MODE $PPID $ARGS\n"' // lf // &
+            when_rcs // 'fail write $ARG2 "partial\n"' // lf // &
+            when_rcs // 'fail exit 37' // lf // &
+            when_rcs // 'omit exec $FO_TEST_REAL_AR rcs $ARG2' // lf // &
+            when_rcs // 'delay write $ARG2 "partial\n"' // lf // &
+            when_rcs // 'delay touch $FO_TEST_MARKER' // lf // &
+            when_rcs // 'delay sleep 1000' // lf // &
+            when_rcs // 'delay remove $ARG2' // lf // &
+            'exec $FO_TEST_REAL_AR $@' // lf
     end function ar_wrapper
 
     function fc_wrapper() result(text)
         character(:), allocatable :: text
-        text = '#!/bin/sh' // new_line('a') // &
-            'out=; next=no; compile=no; shared=no; test_link=no' // new_line('a') // &
-            'for arg in "$@"; do' // new_line('a') // &
-            ' if [ "$next" = yes ]; then out=$arg; next=no; fi' // new_line('a') // &
-            ' if [ "$arg" = -o ]; then next=yes; fi' // new_line('a') // &
-            ' if [ "$arg" = -c ]; then compile=yes; fi' // new_line('a') // &
-            ' if [ "$arg" = -dynamiclib ]; then shared=yes; fi' // new_line('a') // &
-            ' if [ "$arg" = -shared ]; then shared=yes; fi' // new_line('a') // &
-            'done' // new_line('a') // &
-            'case "$out" in */.fo-shared.tmp-*/*) shared=yes ;; esac' // new_line('a') // &
-            'echo "$FO_TEST_LINK_MODE $PPID $out" >> "$FO_TEST_FC_LOG"' // new_line('a') // &
-            'case "$out" in */build/fo/bin/*) test_link=yes ;; esac' // new_line('a') // &
-            'if [ "$test_link" = yes ]; then echo start >> "$FO_TEST_FC_LOG"; fi' // &
-            new_line('a') // 'case "$out" in */build/fo/bin/*)' // new_line('a') // &
-            ' if [ "$FO_TEST_LINK_MODE" = fail ]; then echo broken > "$out"; exit 41; fi' // &
-            new_line('a') // ' if [ "$FO_TEST_LINK_MODE" = truncated ]; then ' // &
-            'cp "$FO_TEST_TRUNCATED_IMAGE" "$out"; exit 0; fi' // &
-            new_line('a') // 'esac' // new_line('a') // &
-            'if [ "$shared" = yes ]; then' // new_line('a') // &
-            ' echo "$FO_TEST_SHARED_MODE $PPID $out" >> "$FO_TEST_SHARED_LOG"' // new_line('a') // &
-            ' case "$FO_TEST_SHARED_MODE" in' // new_line('a') // &
-            ' fail) echo broken > "$out"; exit 39 ;;' // new_line('a') // &
-            ' truncated) cp "$FO_TEST_TRUNCATED_IMAGE" "$out"; exit 0 ;;' // &
-            new_line('a') // &
-            ' delay) echo partial > "$out"; : > "$FO_TEST_MARKER"; sleep 1; rm -f "$out" ;;' // new_line('a') // &
-            ' esac' // new_line('a') // 'fi' // new_line('a') // &
-            'result=0; "$FO_TEST_REAL_FC" "$@" || result=$?' // new_line('a') // &
-            'if [ "$test_link" = yes ]; then echo done >> "$FO_TEST_FC_LOG"; fi' // &
-            new_line('a') // 'exit "$result"' // new_line('a')
+        character(len=*), parameter :: when_link = &
+            'if $TESTLINK = yes if $FO_TEST_LINK_MODE = '
+        character(len=1), parameter :: lf = achar(10)
+
+        text = 'set SHARED no' // lf // 'set TESTLINK no' // lf // &
+            'if " $ARGS " ~ " -dynamiclib " set SHARED yes' // lf // &
+            'if " $ARGS " ~ " -shared " set SHARED yes' // lf // &
+            'if $OUT glob "*/.fo-shared.tmp-*/*" set SHARED yes' // lf // &
+            'append $FO_TEST_FC_LOG "$FO_TEST_LINK_MODE $PPID $OUT\n"' // lf // &
+            'if $OUT glob "*/build/fo/bin/*" set TESTLINK yes' // lf // &
+            'if $TESTLINK = yes append $FO_TEST_FC_LOG "start\n"' // lf // &
+            when_link // 'fail write $OUT "broken\n"' // lf // &
+            when_link // 'fail exit 41' // lf // &
+            when_link // 'truncated copy $FO_TEST_TRUNCATED_IMAGE $OUT' // lf // &
+            when_link // 'truncated exit 0' // lf // shared_rules('FO_TEST_SHARED_LOG') // &
+            'run $FO_TEST_REAL_FC $@' // lf // &
+            'if $TESTLINK = yes append $FO_TEST_FC_LOG "done\n"' // lf // &
+            'exit $?' // lf
     end function fc_wrapper
 
     function gcc_wrapper() result(text)
         character(:), allocatable :: text
-        text = '#!/bin/sh' // new_line('a') // &
-            'out=; next=no; shared=no' // new_line('a') // &
-            'for arg in "$@"; do' // new_line('a') // &
-            ' if [ "$next" = yes ]; then out=$arg; next=no; fi' // new_line('a') // &
-            ' if [ "$arg" = -o ]; then next=yes; fi' // new_line('a') // &
-            ' if [ "$arg" = -shared ] || [ "$arg" = -dynamiclib ]; then shared=yes; fi' // &
-            new_line('a') // 'done' // new_line('a') // &
-            'case "$out" in */.fo-shared.tmp-*/*) shared=yes ;; esac' // new_line('a') // &
-            'echo "$FO_TEST_SHARED_MODE $PPID $out" >> "$FO_TEST_GCC_LOG"' // new_line('a') // &
-            'if [ "$shared" = yes ]; then' // new_line('a') // &
-            ' case "$FO_TEST_SHARED_MODE" in' // new_line('a') // &
-            ' fail) echo broken > "$out"; exit 39 ;;' // new_line('a') // &
-            ' truncated) cp "$FO_TEST_TRUNCATED_IMAGE" "$out"; exit 0 ;;' // &
-            new_line('a') // &
-            ' delay) echo partial > "$out"; : > "$FO_TEST_MARKER"; sleep 1; rm -f "$out" ;;' // &
-            new_line('a') // ' esac' // new_line('a') // 'fi' // new_line('a') // &
-            'exec "$FO_TEST_REAL_GCC" "$@"' // new_line('a')
+        character(len=1), parameter :: lf = achar(10)
+
+        text = 'set SHARED no' // lf // &
+            'if " $ARGS " ~ " -shared " set SHARED yes' // lf // &
+            'if " $ARGS " ~ " -dynamiclib " set SHARED yes' // lf // &
+            'if $OUT glob "*/.fo-shared.tmp-*/*" set SHARED yes' // lf // &
+            'append $FO_TEST_GCC_LOG "$FO_TEST_SHARED_MODE $PPID $OUT\n"' // lf // &
+            shared_rules('') // 'exec $FO_TEST_REAL_GCC $@' // lf
     end function gcc_wrapper
 
-    subroutine chmod_executable(path)
-        character(len=*), intent(in) :: path
-        call run_external('/bin/chmod', words([character(len=512) :: '755', path]), &
-            scratch, external)
-        call assert_process_ok(external, 'mark wrapper executable')
-    end subroutine chmod_executable
+    function shared_rules(log_variable) result(text)
+        !! Failure injection for a shared-library output, selected by the mode.
+        character(len=*), intent(in) :: log_variable
+        character(:), allocatable :: text
+        character(len=*), parameter :: when_shared = &
+            'if $SHARED = yes if $FO_TEST_SHARED_MODE = '
+        character(len=1), parameter :: lf = achar(10)
+
+        text = ''
+        if (len(log_variable) > 0) text = 'if $SHARED = yes append $' // log_variable // &
+            ' "$FO_TEST_SHARED_MODE $PPID $OUT\n"' // lf
+        text = text // when_shared // 'fail write $OUT "broken\n"' // lf // &
+            when_shared // 'fail exit 39' // lf // &
+            when_shared // 'truncated copy $FO_TEST_TRUNCATED_IMAGE $OUT' // lf // &
+            when_shared // 'truncated exit 0' // lf // &
+            when_shared // 'delay write $OUT "partial\n"' // lf // &
+            when_shared // 'delay touch $FO_TEST_MARKER' // lf // &
+            when_shared // 'delay sleep 1000' // lf // &
+            when_shared // 'delay remove $OUT' // lf
+    end function shared_rules
 
     function base_environment(ar_mode, link_mode, shared_mode) result(environment)
         character(len=*), intent(in) :: ar_mode, link_mode, shared_mode
@@ -957,8 +951,8 @@ contains
         call assert_equal_string(file_digest(archive_path), expected_digest, &
             'warm archive reuse leaves its complete bytes unchanged')
 
-        call write_text(join_path(fake_bin, 'ar'), ar_wrapper()//nl//'# revised archiver image'//nl)
-        call chmod_executable(join_path(fake_bin, 'ar'))
+        call install_fake_tool(join_path(fake_bin, 'ar'), &
+            ar_wrapper()//'# revised archiver image'//nl)
         call write_text(join_path(project, 'test/test_alpha.f90'), source//'! new tool action'//nl)
         call invoke(words([character(len=32) :: 'test', 'test_alpha', '--json=full']), &
             'fail', 'normal', 'normal', result)
@@ -966,8 +960,7 @@ contains
             'a changed archiver image invalidates the receipt and exposes actual archiver failure')
         call assert_equal_string(file_digest(archive_path), expected_digest, &
             'failed replacement under a new archiver preserves the published archive')
-        call write_text(join_path(fake_bin, 'ar'), ar_wrapper())
-        call chmod_executable(join_path(fake_bin, 'ar'))
+        call install_fake_tool(join_path(fake_bin, 'ar'), ar_wrapper())
         call remove_path(execution_marker)
         call invoke(words([character(len=32) :: 'test', 'test_alpha', '--json=full']), &
             'normal', 'normal', 'normal', result)

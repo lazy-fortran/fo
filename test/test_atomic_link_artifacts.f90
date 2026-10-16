@@ -7,6 +7,7 @@ program test_atomic_link_artifacts
     use fo_test_harness, only: finish_assertions, spawn_process, poll_process
     use fo_test_harness, only: terminate_process_group
     use fo_test_cli, only: resolve_driver, run_fo, run_external
+    use fo_fake_tool, only: fake_tool_dispatch, install_fake_tool
     implicit none
 
     character(:), allocatable :: driver, scratch, project, fake_bin, fake_ar
@@ -18,6 +19,7 @@ program test_atomic_link_artifacts
     integer :: child = -1, status, archive_count, exec_attempt = 0
     logical :: found, macos
 
+    call fake_tool_dispatch()
     call resolve_driver(driver)
     call make_scratch('fo-atomic-link-fortran', scratch)
     call run_external('/usr/bin/uname', words([character(len=8) :: '-s']), &
@@ -185,28 +187,22 @@ contains
     end function app_source
 
     subroutine install_archiver()
-        call write_text(fake_ar, '#!/bin/sh' // new_line('a') // &
-            'if [ "$1" = rcs ]; then' // new_line('a') // &
-            '  echo "$FO_TEST_AR_MODE $PPID $2" >> "$FO_TEST_AR_LOG"' // new_line('a') // &
-            '  case "$FO_TEST_AR_MODE" in' // new_line('a') // &
-            '    delay) : > "$FO_TEST_MARKER"; sleep 1 ;;' // &
-            new_line('a') // '    hold) echo partial > "$2"; : > "$FO_TEST_MARKER"; exec sleep 60 ;;' // &
-            new_line('a') // '    fail) echo partial > "$2"; exit 37 ;;' // new_line('a') // &
-            '    omit) exec "$FO_TEST_REAL_AR" rcs "$2" ;;' // new_line('a') // &
-            '  esac' // new_line('a') // 'fi' // new_line('a') // &
-            'exec "$FO_TEST_REAL_AR" "$@"' // new_line('a'))
-        call make_executable(fake_ar)
+        character(len=*), parameter :: when_rcs = 'if $ARG1 = rcs if $FO_TEST_AR_MODE = '
+        character(len=1), parameter :: lf = achar(10)
+
+        call install_fake_tool(fake_ar, &
+            'if $ARG1 = rcs append $FO_TEST_AR_LOG "$FO_TEST_AR_MODE $PPID $ARG2\n"' // lf // &
+            when_rcs // 'delay touch $FO_TEST_MARKER' // lf // &
+            when_rcs // 'delay sleep 1000' // lf // &
+            when_rcs // 'hold write $ARG2 "partial\n"' // lf // &
+            when_rcs // 'hold touch $FO_TEST_MARKER' // lf // &
+            when_rcs // 'hold sleep 60000' // lf // &
+            when_rcs // 'hold exit 0' // lf // &
+            when_rcs // 'fail write $ARG2 "partial\n"' // lf // &
+            when_rcs // 'fail exit 37' // lf // &
+            when_rcs // 'omit exec $FO_TEST_REAL_AR rcs $ARG2' // lf // &
+            'exec $FO_TEST_REAL_AR $@' // lf)
     end subroutine install_archiver
-
-    subroutine make_executable(path)
-        character(len=*), intent(in) :: path
-        type(string_list_t) :: command
-
-        call list_add(command, '755')
-        call list_add(command, path)
-        call run_external('/bin/chmod', command, scratch, external)
-        call assert_process_ok(external, 'mark compiler wrapper executable')
-    end subroutine make_executable
 
     function build_environment(mode) result(environment)
         character(len=*), intent(in) :: mode

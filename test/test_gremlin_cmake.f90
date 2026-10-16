@@ -7,6 +7,8 @@ program test_gremlin_cmake
                                finish_assertions, run_process, assert_process_ok
     use fo_test_gremlin_oracle, only: gremlin_setup, gremlin_json, &
                    gremlin_start_args, gremlin_wait_ms, gremlin_field, gremlin_stop_lane
+    use fo_fs, only: fs_find_executable
+    use fo_fake_tool, only: fake_tool_dispatch, install_fake_tool
     use fo_test_json, only: json_value_t, json_member, json_boolean_value, &
         json_string_value, json_size, json_element, json_number_value
     implicit none
@@ -35,6 +37,7 @@ program test_gremlin_cmake
         end function c_symlink
     end interface
 
+    call fake_tool_dispatch()
     call gremlin_setup(driver, scratch, project, cache, state)
     provider = scratch//'/provider-build'
     provider_source = scratch//'/provider-source'
@@ -257,41 +260,29 @@ contains
         integer :: k
         character(len=5), parameter :: tools(2) = ['cmake', 'ctest']
         character(:), allocatable :: real_tool, body
+        character(:), allocatable :: when_traced
+        character(len=4096) :: found_tool
+        logical :: located
         shadow = scratch//'/shadow'
         child_builds = scratch//'/child-cmake-build.log'
         generation_builds = scratch//'/generation-cmake-build.log'
         child_runs = scratch//'/child-ctest.log'
         call make_directory(shadow)
         do k = 1, 2
-            command = string_list_t()
-            call list_add(command, 'sh')
-            call list_add(command, '-c')
-            call list_add(command, 'command -v '//trim(tools(k)))
-            call run_process(command, project, observed)
-            call assert_process_ok(observed, 'real '//trim(tools(k))//' is on PATH')
-            real_tool = trim(observed%stdout)
-            if (index(real_tool, new_line('a')) > 0) &
-                real_tool = real_tool(:index(real_tool, new_line('a')) - 1)
+            call fs_find_executable(trim(tools(k)), found_tool, located)
+            call assert_true(located, 'real '//trim(tools(k))//' is on PATH')
+            real_tool = trim(found_tool)
+            when_traced = 'if ${FO_GREMLIN_EXECUTION_CWD:-} != "" '
             if (k == 1) then
-                body = 'if [ "$1" = "--build" ]; then'//new_line('a')// &
-                    '  if [ -n "$FO_GREMLIN_EXECUTION_CWD" ]; then'//new_line('a')// &
-                    '    echo "$*" >> "'//child_builds//'"'//new_line('a')// &
-                    '  else'//new_line('a')// &
-                    '    echo "$*" >> "'//generation_builds//'"'//new_line('a')// &
-                    '  fi'//new_line('a')//'fi'//new_line('a')
+                body = 'if $ARG1 = --build '//when_traced//'append "'//child_builds// &
+                    '" "$ARGS\n"'//new_line('a')// &
+                    'if $ARG1 = --build if ${FO_GREMLIN_EXECUTION_CWD:-} = "" append "'// &
+                    generation_builds//'" "$ARGS\n"'//new_line('a')
             else
-                body = 'if [ -n "$FO_GREMLIN_EXECUTION_CWD" ]; then'//new_line('a')// &
-                    '  echo "$*" >> "'//child_runs//'"'//new_line('a')// &
-                    'fi'//new_line('a')
+                body = when_traced//'append "'//child_runs//'" "$ARGS\n"'//new_line('a')
             end if
-            call write_text(shadow//'/'//trim(tools(k)), '#!/bin/sh'//new_line('a')// &
-                body//'exec "'//real_tool//'" "$@"'//new_line('a'))
-            command = string_list_t()
-            call list_add(command, 'chmod')
-            call list_add(command, '+x')
-            call list_add(command, shadow//'/'//trim(tools(k)))
-            call run_process(command, project, observed)
-            call assert_process_ok(observed, 'tool trap is executable')
+            call install_fake_tool(shadow//'/'//trim(tools(k)), &
+                body//'exec "'//real_tool//'" $@'//new_line('a'))
         end do
         call get_environment_variable('PATH', path_value)
         rc = c_setenv('PATH'//c_null_char, shadow//':'//trim(path_value)//c_null_char, &

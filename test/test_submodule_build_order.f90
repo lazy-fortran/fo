@@ -5,6 +5,7 @@ program test_submodule_build_order
     use fo_fs, only: fs_make_dir, fs_remove_file, fs_remove_tree
     use fo_test_native_run, only: native_test_run
     use fo_process, only: process_getpid
+    use fo_fake_tool, only: fake_tool_dispatch, install_fake_tool
     implicit none
 
     integer :: exitcode, n_fail, n_pass, cold_count, warm_count, changed_count
@@ -20,14 +21,9 @@ program test_submodule_build_order
             character(kind=c_char), intent(in) :: name(*), value(*)
             integer(c_int), value :: overwrite
         end function c_setenv
-
-        integer(c_int) function c_chmod(path, mode) bind(C, name='chmod')
-            import :: c_char, c_int
-            character(kind=c_char), intent(in) :: path(*)
-            integer(c_int), value :: mode
-        end function c_chmod
     end interface
 
+    call fake_tool_dispatch()
     n_fail = 0
     n_pass = 0
     call make_scratch_paths(project_dir, log_file)
@@ -234,21 +230,9 @@ contains
 
     subroutine write_compiler_script(path, count_path)
         character(len=*), intent(in) :: path, count_path
-        integer :: unit
-        integer(c_int) :: status
 
-        open (newunit=unit, file=trim(path), status='replace')
-        write (unit, '(a)') '#!/bin/sh'
-        write (unit, '(a)') 'for arg in "$@"; do'
-        write (unit, '(a)') '  case "$arg" in'
-        write (unit, '(a)') '    */src/*.f90) printf "%s\n" "$arg" >> "'// &
-            trim(count_path)//'" ;;'
-        write (unit, '(a)') '  esac'
-        write (unit, '(a)') 'done'
-        write (unit, '(a)') 'exec gfortran "$@"'
-        close (unit)
-        status = c_chmod(trim(path)//c_null_char, 493_c_int)
-        if (status /= 0) error stop 'cannot make compiler wrapper executable'
+        call install_fake_tool(path, 'collect "*/src/*.f90" "'//trim(count_path)//'"'// &
+            new_line('a')//'exec gfortran $@')
     end subroutine write_compiler_script
 
     integer function line_count(path) result(n)
