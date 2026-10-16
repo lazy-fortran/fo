@@ -838,8 +838,9 @@ static int admission_guard_start(const char *scope, const int *fds, int weight,
                    not yet locked its slot. Revoke under the same gate before
                    checking drainage, keeping upstream capacity throughout. */
                 if (!alive) {
+                    /* A scope already collected needs no revocation. */
                     gate = admission_gate(scope, 0);
-                    if (gate < 0) e = errno;
+                    if (gate < 0) e = errno == ENOENT ? 0 : errno;
                     else if (unlink(authority) != 0 && errno != ENOENT) e = errno;
                 }
                 if (!e) e = admission_children_busy(scope, weight);
