@@ -2521,7 +2521,7 @@ contains
             branch='stdlib-fpm')
         call add_git_dependency(config%dev_deps, config%n_dev_deps, 'test-drive', &
             'https://github.com/fortran-lang/test-drive', config%manifest_parse_error, &
-            branch='v0.4.0')
+            tag='v0.4.0')
         if (config%blas) then
             call append_config_flag('-DSTDLIB_EXTERNAL_BLAS', config)
             call append_config_flag('-DSTDLIB_EXTERNAL_LAPACK', config)

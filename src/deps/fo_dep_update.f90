@@ -314,7 +314,7 @@ contains
 
         ref = 'HEAD'
         if (len_trim(dep%branch) > 0) ref = 'refs/remotes/origin/'//trim(dep%branch)
-        if (len_trim(dep%tag) > 0) ref = trim(dep%tag)
+        if (len_trim(dep%tag) > 0) ref = 'refs/tags/'//trim(dep%tag)//'^{commit}'
         if (allocated(dep%rev)) then
             if (len_trim(dep%rev) > 0) ref = trim(dep%rev)
         end if
