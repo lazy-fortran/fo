@@ -377,6 +377,8 @@ contains
         call list_add(environment, 'FO_JOBS=1')
         call list_add(environment, 'FO_DISABLE_SELF_REFRESH=1')
         call list_add(environment, 'FO_GREMLIN_STATE_DIR='//trim(state_directory))
+        call list_add(environment, &
+            'FO_GREMLIN_ADMISSION_DIR='//trim(state_directory)//'/admission')
         call list_add(environment, 'FO_FC='//trim(compiler_wrapper))
         call list_add(invocation, trim(driver_path))
         call list_add(invocation, 'gremlin')

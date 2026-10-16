@@ -55,6 +55,8 @@ program test_gremlin_public_readiness
     call list_add(fo_environment, 'FO_JOBS=1')
     call list_add(fo_environment, 'FO_DISABLE_SELF_REFRESH=1')
     call list_add(fo_environment, 'FO_GREMLIN_STATE_DIR='//trim(state_directory))
+    call list_add(fo_environment, &
+        'FO_GREMLIN_ADMISSION_DIR='//trim(state_directory)//'/admission')
     stop_signal = 19_c_int
     continue_signal = 18_c_int
     call run_list(argv('uname', '-s'), status, tool_text)

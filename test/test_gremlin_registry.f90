@@ -58,6 +58,7 @@ program test_gremlin_registry
     call make_directory(state//'/tmp')
     call set_env('FO_FPM_CONFIG_FILE', config)
     call set_env('FO_GREMLIN_STATE_DIR', state)
+    call set_env('FO_GREMLIN_ADMISSION_DIR', scratch//'/admission')
     call set_env('FO_CACHE_DIR', cache)
     call set_env('FO_PREFIX', scratch//'/prefix')
     call set_env('TMPDIR', state//'/tmp')
