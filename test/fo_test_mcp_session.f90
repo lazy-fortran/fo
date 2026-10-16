@@ -11,6 +11,7 @@ module fo_test_mcp_session
 
     public :: mcp_session_t, mcp_session_start, mcp_session_request
     public :: mcp_session_call, mcp_session_notify, mcp_session_shutdown
+    public :: mcp_session_send, mcp_session_receive
     public :: mcp_session_terminate
 
     type :: mcp_session_t
@@ -82,18 +83,30 @@ contains
         character(len=*), intent(in) :: method, params
         type(json_value_t), intent(out) :: response
         integer, intent(in), optional :: timeout_ms
-        character(:), allocatable :: request, raw, message
-        character(kind=c_char), allocatable :: bytes(:), output(:)
-        integer(c_int) :: result
-        integer :: limit, length, i
-        logical :: valid
+        integer :: id
+        logical :: sent
 
-        limit = 15000
-        if (present(timeout_ms)) limit = timeout_ms
+        call mcp_session_send(session, method, params, id, sent)
+        if (sent) call mcp_session_receive(session, response, timeout_ms)
+    end subroutine mcp_session_request
+
+    subroutine mcp_session_send(session, method, params, id, sent)
+        !! Write one request without waiting for its response; id is its
+        !! JSON-RPC id.
+        type(mcp_session_t), intent(inout) :: session
+        character(len=*), intent(in) :: method, params
+        integer, intent(out) :: id
+        logical, intent(out) :: sent
+        character(:), allocatable :: request
+        character(kind=c_char), allocatable :: bytes(:)
+        integer(c_int) :: result
+        integer :: i
+
+        id = session%next_id
         if (len_trim(params) > 0) then
-            request = mcp_request(session%next_id, trim(method), trim(params))
+            request = mcp_request(id, trim(method), trim(params))
         else
-            request = mcp_request(session%next_id, trim(method))
+            request = mcp_request(id, trim(method))
         end if
         request = request//new_line('a')
         allocate(bytes(len(request)))
@@ -102,8 +115,24 @@ contains
         end do
         result = c_mcp_write(int(session%handle, c_int), bytes, &
             int(len(request), c_size_t))
-        call assert_true(result == 0, 'writes one bounded MCP JSON-RPC request')
-        if (result /= 0) return
+        sent = result == 0
+        call assert_true(sent, 'writes one bounded MCP JSON-RPC request')
+        if (sent) session%next_id = session%next_id + 1
+    end subroutine mcp_session_send
+
+    subroutine mcp_session_receive(session, response, timeout_ms)
+        !! Read the next complete response line, whatever request it answers.
+        type(mcp_session_t), intent(inout) :: session
+        type(json_value_t), intent(out) :: response
+        integer, intent(in), optional :: timeout_ms
+        character(:), allocatable :: raw, message
+        character(kind=c_char), allocatable :: output(:)
+        integer(c_int) :: result
+        integer :: limit, length, i
+        logical :: valid
+
+        limit = 15000
+        if (present(timeout_ms)) limit = timeout_ms
         allocate(output(1048577))
         result = c_mcp_read_line(int(session%handle, c_int), output, &
             int(size(output), c_size_t), int(limit, c_int))
@@ -117,9 +146,7 @@ contains
         end do
         call json_parse(raw, response, valid, message)
         call assert_true(valid, 'independent Fortran JSON parser accepts MCP response')
-        if (.not. valid) return
-        session%next_id = session%next_id + 1
-    end subroutine mcp_session_request
+    end subroutine mcp_session_receive
 
     subroutine mcp_session_call(session, arguments, response, timeout_ms)
         type(mcp_session_t), intent(inout) :: session

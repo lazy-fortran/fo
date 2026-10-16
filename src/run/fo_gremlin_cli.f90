@@ -6,6 +6,7 @@ module fo_gremlin_cli
     use fo_gremlin_supervisor, only: gremlin_handle
     use fo_json_object, only: json_value_raw
     use fo_process, only: process_exit
+    use fo_util, only: read_text_file_alloc
     use fx_json_build, only: json_builder_t, json_new, json_object_start, &
         json_object_end, json_array_start, json_array_end, json_key, &
         json_value_string, json_value_bool, json_to_string
@@ -33,6 +34,15 @@ contains
             call get_command_argument(i + 1, tokens(i))
         end do
 
+        if (n_tokens == 7) then
+            ! Internal adapter form of an asynchronous MCP request:
+            ! ACTION --request-file REQUEST --response-file RESPONSE --dir DIR.
+            if (tokens(2) == '--request-file' .and. tokens(4) == '--response-file' &
+                .and. tokens(6) == '--dir') then
+                call run_request_file(tokens(1), tokens(3), tokens(5), tokens(7))
+                return
+            end if
+        end if
         call parse_cli(tokens, n_tokens, action, project_dir, request_json, &
             show_help)
         if (show_help) then
@@ -46,6 +56,24 @@ contains
         write (output_unit, '(a)') response_json
         if (exitcode /= 0) call process_exit(exitcode)
     end subroutine gremlin_cli_run
+
+    subroutine run_request_file(action, request_file, response_file, project_dir)
+        !! Handle one normalized request JSON and write its response JSON.
+        character(len=*), intent(in) :: action, request_file, response_file, project_dir
+        character(len=:), allocatable :: request_json, response_json
+        integer :: exitcode, ierr, unit
+
+        call read_text_file_alloc(trim(request_file), request_json, ierr)
+        if (ierr /= 0) call process_exit(2)
+        call gremlin_handle(trim(action), trim(project_dir), request_json, &
+            response_json, exitcode)
+        open (newunit=unit, file=trim(response_file), access='stream', &
+            form='unformatted', status='replace', action='write', iostat=ierr)
+        if (ierr == 0) write (unit, iostat=ierr) response_json
+        if (ierr == 0) close (unit, iostat=ierr)
+        if (ierr /= 0) call process_exit(2)
+        if (exitcode /= 0) call process_exit(exitcode)
+    end subroutine run_request_file
 
     subroutine parse_cli(tokens, n_tokens, action, project_dir, request_json, &
             show_help)

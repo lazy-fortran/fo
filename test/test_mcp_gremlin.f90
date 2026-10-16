@@ -12,6 +12,7 @@ program test_mcp_gremlin
     use fo_test_mcp_session, only: mcp_session_t, mcp_session_start
     use fo_test_mcp_session, only: mcp_session_call, mcp_session_request
     use fo_test_mcp_session, only: mcp_session_notify, mcp_session_shutdown
+    use fo_test_mcp_session, only: mcp_session_send, mcp_session_receive
     use fo_test_mcp, only: mcp_quote, mcp_call, mcp_encode, mcp_exchange
     use fo_test_json, only: json_value_t, json_parse, json_member, json_element
     use fo_test_json, only: json_size, json_string_value, json_number_value
@@ -168,6 +169,7 @@ program test_mcp_gremlin
         'reproduced failing code reports FAIL and MCP isError')
     call assert_true(count_lines(read_text(failure_marker)) > before, &
         'reproduce executes the captured failed test again')
+    call reproduce_keeps_server_responsive()
     call call_tool('{"action":"gremlin_stop"'//identity//'}', document)
     call assert_equal_string(gremlin_field(document, 'state'), 'stopping', &
         'scoped MCP stop acknowledges the stopping owner')
@@ -184,6 +186,46 @@ program test_mcp_gremlin
     call finish_assertions(retain_failed_scratch=.true.)
 
 contains
+
+    subroutine reproduce_keeps_server_responsive()
+        !! While a reproduction blocks inside its case, the server answers
+        !! other requests; notifications/cancelled ends the reproduction and
+        !! its request never gets a response.
+        type(json_value_t) :: answer
+        integer :: reproduce_id, request_id, blocked_before, attempt
+        logical :: sent
+
+        blocked_before = count_lines(read_text(blocked))
+        call mcp_session_send(server, 'tools/call', '{"name":"fo","arguments":'// &
+            '{"action":"gremlin_reproduce"'//identity// &
+            ',"case_id":"test_mcp_blocked"}}', reproduce_id, sent)
+        do attempt = 1, 1200
+            if (count_lines(read_text(blocked)) > blocked_before) exit
+            call gremlin_wait_ms(100)
+        end do
+        call assert_true(count_lines(read_text(blocked)) > blocked_before, &
+            'reproduction enters the blocked case')
+        call mcp_session_send(server, 'tools/call', '{"name":"fo","arguments":'// &
+            '{"action":"gremlin_status"'//identity//'}}', request_id, sent)
+        call mcp_session_receive(server, answer, 10000)
+        call assert_equal_integer(int(json_number_value(json_member(answer, 'id'))), &
+            request_id, 'MCP answers status while a reproduction is running')
+        call mcp_session_notify(server, 'notifications/cancelled', &
+            '{"requestId":'//integer_text(reproduce_id)//'}')
+        call mcp_session_send(server, 'tools/list', '', request_id, sent)
+        call mcp_session_receive(server, answer, 10000)
+        call assert_equal_integer(int(json_number_value(json_member(answer, 'id'))), &
+            request_id, 'a cancelled reproduction sends no response')
+    end subroutine reproduce_keeps_server_responsive
+
+    function integer_text(value) result(text)
+        integer, intent(in) :: value
+        character(len=:), allocatable :: text
+        character(len=16) :: buffer
+
+        write (buffer, '(i0)') value
+        text = trim(buffer)
+    end function integer_text
 
     function marker_body(path, declared) result(body)
         character(len=*), intent(in) :: path

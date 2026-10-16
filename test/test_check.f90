@@ -6,7 +6,7 @@ program test_check
         check_result_full_json
     use fo_diagnostics, only: diagnostic_t, diagnostic_from_log, &
         array_temporary_warnings_from_log
-    use fo_run_queue, only: run_queue_t, RUN_IDLE, RUN_RUNNING, &
+    use fo_exec_service, only: run_queue_t => exec_queue_t, RUN_IDLE, RUN_RUNNING, &
         RUN_RERUN_PENDING, RUN_FINISHED
     use fo_capabilities, only: capabilities_t, detect_capabilities, &
         capabilities_text, capabilities_json

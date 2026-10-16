@@ -7,7 +7,7 @@ module fo_process
     public :: process_setenv_default, process_export_self_driver, process_self_executable
     public :: process_scan_sources
     public :: process_has_fortran_source_ext
-    public :: process_start_fo_check, process_start_argv_logged
+    public :: process_start_argv_logged
     public :: process_set_async_scope, process_reap_adopted_scope_zombies
     public :: process_scope_t, process_scope_begin, process_scope_end
     public :: process_poll_pid, process_cancel_pid
@@ -124,14 +124,6 @@ module fo_process
             character(kind=c_char), intent(in) :: path(*)
             integer(c_int) :: yes
         end function fo_c_has_fortran_source_ext
-
-        subroutine fo_c_start_fo_check(project_dir, mode, output_file, pid, &
-                exitcode) bind(C, name='fo_c_start_fo_check')
-            import :: c_char, c_int
-            character(kind=c_char), intent(in) :: project_dir(*), mode(*)
-            character(kind=c_char), intent(in) :: output_file(*)
-            integer(c_int), intent(out) :: pid, exitcode
-        end subroutine fo_c_start_fo_check
 
         subroutine fo_c_start_argv_logged(cwd, args, args_len, n_args, &
                 log_file, env_extra, pid, exitcode) &
@@ -534,24 +526,6 @@ contains
         c_path = trim(path)//c_null_char
         yes = fo_c_has_fortran_source_ext(c_path) /= 0_c_int
     end function process_has_fortran_source_ext
-
-    subroutine process_start_fo_check(project_dir, mode, output_file, pid, &
-            exitcode)
-        !! Start an asynchronous check in a process session owned by fo.
-        character(len=*), intent(in) :: project_dir, mode, output_file
-        integer, intent(out) :: pid, exitcode
-
-        character(kind=c_char) :: c_project(C_PATH_LEN), c_mode(C_ARG_LEN)
-        character(kind=c_char) :: c_output(C_PATH_LEN)
-        integer(c_int) :: c_pid, c_exit
-
-        call to_c_string(project_dir, c_project)
-        call to_c_string(mode, c_mode)
-        call to_c_string(output_file, c_output)
-        call fo_c_start_fo_check(c_project, c_mode, c_output, c_pid, c_exit)
-        pid = int(c_pid)
-        exitcode = int(c_exit)
-    end subroutine process_start_fo_check
 
     subroutine process_start_argv_logged(cwd, packed_args, n_args, log_file, &
             pid, exitcode, env_extra)

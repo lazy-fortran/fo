@@ -578,21 +578,6 @@ void fo_c_getcwd(char *path, int capacity, int *exitcode) {
     if (*exitcode && path && capacity > 0) path[0] = 0;
     free(directory);
 }
-void fo_c_start_fo_check(const char *project, const char *mode, const char *output,
-    int *pid, int *exitcode) {
-    char image[32768], packed[32832];
-    *pid = 0;
-    if (!project || !*project || !output || !*output || fo_c_self_executable(image, sizeof(image))) {
-        *exitcode = EINVAL; return;
-    }
-    const char *detail = mode && !strcmp(mode, "full") ? "--json=full" : "--json=compact";
-    size_t first = strlen(image) + 1, last = strlen(detail) + 1;
-    memcpy(packed, image, first);
-    memcpy(packed + first, "check", 6);
-    memcpy(packed + first + 6, detail, last);
-    fo_c_start_argv_logged(project, packed, (int)(first + 6 + last), 3,
-        output, NULL, pid, exitcode);
-}
 int fo_c_isatty(int fd) { return _isatty(fd) ? 1 : 0; }
 void fo_c_write_stderr(const char *buffer, int count) {
     if (!buffer || count <= 0) return;

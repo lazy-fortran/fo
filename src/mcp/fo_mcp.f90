@@ -22,13 +22,15 @@ module fo_mcp
     use fo_fmt, only: fmt_sources, FMT_SELECT_ALL
     use fo_gremlin_request, only: GREMLIN_OPTIONS, N_GREMLIN_OPTIONS, &
         gremlin_apply_adapter_defaults
-    use fo_process, only: process_start_fo_check, process_poll_pid, &
-        process_cancel_pid, process_suppress_heartbeats
+    use fo_process, only: argv_push, process_self_executable, process_suppress_heartbeats
     use fo_version_info, only: FO_VERSION
-    use fo_run_queue, only: run_queue_t, RUN_IDLE, RUN_RUNNING
+    use fo_exec_service, only: exec_job_t, exec_queue_t, exec_start, exec_poll, &
+        exec_cancel, RUN_RUNNING
     use fo_build_backend, only: backend_t, detect_backend, BACKEND_NONE
     use fo_fs, only: fs_sleep_ms, fs_canonical_path
+    use fo_gremlin_status_json, only: gremlin_error_response
     use fo_gremlin_supervisor, only: gremlin_handle
+    use fx_string, only: string_t
     implicit none
     private
     public :: mcp_serve
@@ -37,16 +39,27 @@ module fo_mcp
     integer, parameter :: CANCEL_RETRY_INITIAL_DELAY_MS = 100
     integer, parameter :: CANCEL_RETRY_MAX_DELAY_MS = 5000
 
+    type :: mcp_deferred_t
+        !! A Gremlin request running in an owned `fo gremlin` child; its
+        !! response goes to every waiting JSON-RPC id when the child ends.
+        !! An identical request arriving meanwhile waits for the same child.
+        type(exec_job_t) :: job
+        character(len=:), allocatable :: action, key, request_file, response_file
+        type(string_t), allocatable :: ids(:)
+    end type mcp_deferred_t
+
     type :: mcp_async_state_t
-        type(run_queue_t) :: queue
-        integer :: active_pid = 0
+        !! The asynchronous check run (one active, newest request pending)
+        !! and the asynchronous Gremlin requests of this server.
+        type(exec_queue_t) :: queue
+        type(exec_job_t) :: check
         integer :: active_run_id = 0
         integer :: pending_run_id = 0
         integer :: last_run_id = 0
         integer :: last_exitcode = 0
         integer :: next_run_id = 0
-        character(len=512) :: active_output = ''
         character(len=512) :: last_output = ''
+        type(mcp_deferred_t), allocatable :: deferred(:)
     end type mcp_async_state_t
 
 contains
@@ -65,9 +78,11 @@ contains
         call process_suppress_heartbeats(.true.)
         call progress_mute()
         framing = MCP_FRAME_UNKNOWN
+        allocate (async_state%deferred(0))
         do
             call async_poll(async_state)
-            if (async_state%active_pid > 0) then
+            call deferred_poll(async_state, framing)
+            if (async_state%check%pid > 0 .or. size(async_state%deferred) > 0) then
                 call mcp_read_message(line, MAX_LINE, framing, eof_flag, read_status, &
                     timeout_ms=100)
             else
@@ -141,7 +156,14 @@ contains
             case ('tools/list')
                 call make_tools_list_response(id_str, response)
             case ('tools/call')
-                call handle_tools_call(params_json, id_str, response, async_state)
+                call handle_tools_call(params_json, id_str, request_has_id, response, &
+                    async_state)
+            case ('notifications/cancelled')
+                call json_object_member(params_json, 'requestId', raw_value, &
+                    property_count, parse_status)
+                if (parse_status == 0 .and. property_count == 1) &
+                    call deferred_cancel(async_state, raw_value)
+                cycle
             case ('resources/list')
                 call make_resources_list_response(id_str, response)
             case ('resources/read')
@@ -160,7 +182,9 @@ contains
                     call rpc_error(id_str, -32601, 'method not found', response)
                 end if
             end select
-            if (request_has_id) call mcp_send_response(response, framing)
+            ! A deferred request (no response yet) is answered by deferred_poll.
+            if (request_has_id .and. allocated(response)) &
+                call mcp_send_response(response, framing)
             if (stop_requested) exit
         end do
         cancel_retry_delay_ms = CANCEL_RETRY_INITIAL_DELAY_MS
@@ -258,8 +282,10 @@ contains
         call command_response(id_str, output_text, '', exitcode, response)
     end subroutine make_tool_text_response
 
-    subroutine handle_tools_call(params_json, id_str, response, async_state)
+    subroutine handle_tools_call(params_json, id_str, has_id, response, async_state)
+        !! response stays unallocated for a deferred (asynchronous) request.
         character(len=*), intent(in) :: params_json, id_str
+        logical, intent(in) :: has_id
         character(len=:), allocatable, intent(out) :: response
         type(mcp_async_state_t), intent(inout) :: async_state
 
@@ -290,7 +316,7 @@ contains
         case ('gremlin_start', 'gremlin_status', 'gremlin_wait', &
                 'gremlin_events', 'gremlin_failures', 'gremlin_reproduce', &
                 'gremlin_stop')
-            call handle_gremlin_action(arguments, id_str, response)
+            call handle_gremlin_action(arguments, id_str, has_id, response, async_state)
             return
         end select
         call json_object_member(arguments, 'dir', raw_value, property_count, &
@@ -375,9 +401,13 @@ contains
         call delete_tmpfile(tmpfile)
     end subroutine handle_tools_call
 
-    subroutine handle_gremlin_action(arguments, id_str, response)
+    subroutine handle_gremlin_action(arguments, id_str, has_id, response, async_state)
+        !! A reproduction runs in an owned child so the request loop stays
+        !! responsive; the other Gremlin actions answer at once.
         character(len=*), intent(in) :: arguments, id_str
+        logical, intent(in) :: has_id
         character(len=:), allocatable, intent(out) :: response
+        type(mcp_async_state_t), intent(inout) :: async_state
 
         character(len=4096) :: project_dir
         character(len=64) :: public_action, core_action
@@ -396,11 +426,148 @@ contains
             call make_tool_text_response(id_str, json_to_string(jb), 2, response)
             return
         end if
-
+        if (trim(core_action) == 'reproduce') then
+            call deferred_start(async_state, trim(core_action), &
+                fs_canonical_path(trim(project_dir)), trim(request_json), id_str, &
+                has_id, ierr)
+            if (ierr == 0) return
+            call gremlin_error_response(trim(core_action), &
+                'cannot start the Gremlin request process', result_json)
+            call make_tool_text_response(id_str, result_json, 2, response)
+            return
+        end if
         call gremlin_handle(trim(core_action), fs_canonical_path(trim(project_dir)), &
             trim(request_json), result_json, exitcode)
         call make_tool_text_response(id_str, result_json, exitcode, response)
     end subroutine handle_gremlin_action
+
+    subroutine self_command(packed, n_args, ierr)
+        !! argv of this server's own fo image, never a PATH fo.
+        character(len=:), allocatable, intent(out) :: packed
+        integer, intent(out) :: n_args, ierr
+        character(len=4096) :: image
+        logical :: found
+
+        n_args = 0
+        call process_self_executable(image, found)
+        ierr = merge(0, 1, found)
+        if (found) call argv_push(packed, n_args, trim(image))
+    end subroutine self_command
+
+    subroutine deferred_start(state, action, project_dir, request_json, id_str, &
+            has_id, ierr)
+        !! Run `fo gremlin ACTION` for the normalized request in an owned child,
+        !! or join an identical request that is still running.
+        type(mcp_async_state_t), intent(inout) :: state
+        character(len=*), intent(in) :: action, project_dir, request_json, id_str
+        logical, intent(in) :: has_id
+        integer, intent(out) :: ierr
+        type(mcp_deferred_t) :: entry
+        type(mcp_deferred_t), allocatable :: grown(:)
+        character(len=512) :: path
+        character(len=:), allocatable :: packed
+        integer :: i, n_args, unit
+
+        ierr = 0
+        entry%key = action//achar(0)//project_dir//achar(0)//request_json
+        do i = 1, size(state%deferred)
+            if (state%deferred(i)%key /= entry%key .or. &
+                state%deferred(i)%job%pid <= 0) cycle
+            if (has_id) state%deferred(i)%ids = [state%deferred(i)%ids, string_t(id_str)]
+            return
+        end do
+        entry%action = action
+        call make_tmpfile('fo_mcp_request', path)
+        entry%request_file = trim(path)
+        call make_tmpfile('fo_mcp_response', path)
+        entry%response_file = trim(path)
+        open (newunit=unit, file=entry%request_file, access='stream', &
+            form='unformatted', status='replace', action='write', iostat=ierr)
+        if (ierr == 0) write (unit, iostat=ierr) request_json
+        if (ierr == 0) close (unit, iostat=ierr)
+        if (ierr == 0) call self_command(packed, n_args, ierr)
+        if (ierr == 0) then
+            call argv_push(packed, n_args, 'gremlin')
+            call argv_push(packed, n_args, action)
+            call argv_push(packed, n_args, '--request-file')
+            call argv_push(packed, n_args, entry%request_file)
+            call argv_push(packed, n_args, '--response-file')
+            call argv_push(packed, n_args, entry%response_file)
+            call argv_push(packed, n_args, '--dir')
+            call argv_push(packed, n_args, project_dir)
+            call make_tmpfile('fo_mcp_gremlin', path)
+            call exec_start(entry%job, project_dir, packed, n_args, trim(path), ierr)
+        end if
+        if (ierr /= 0) then
+            call delete_tmpfile(entry%request_file)
+            return
+        end if
+        allocate (entry%ids(0))
+        if (has_id) entry%ids = [string_t(id_str)]
+        allocate (grown(size(state%deferred) + 1))
+        grown(:size(state%deferred)) = state%deferred
+        grown(size(grown)) = entry
+        call move_alloc(grown, state%deferred)
+    end subroutine deferred_start
+
+    subroutine deferred_poll(state, framing)
+        !! Answer every waiting id of each finished deferred request.
+        type(mcp_async_state_t), intent(inout) :: state
+        integer, intent(in) :: framing
+        character(len=:), allocatable :: result_json, response
+        integer :: i, k, ierr, exitcode
+        logical :: done
+
+        do i = size(state%deferred), 1, -1
+            call exec_poll(state%deferred(i)%job, done, ierr)
+            if (.not. done) cycle
+            exitcode = state%deferred(i)%job%exitcode
+            call read_text_file_alloc(state%deferred(i)%response_file, result_json, ierr)
+            if (ierr /= 0 .or. len(result_json) == 0) then
+                call gremlin_error_response(state%deferred(i)%action, &
+                    'the Gremlin request process ended without a response', result_json)
+                exitcode = 2
+            end if
+            do k = 1, size(state%deferred(i)%ids)
+                call make_tool_text_response(state%deferred(i)%ids(k)%s, result_json, &
+                    exitcode, response)
+                call mcp_send_response(response, framing)
+            end do
+            call deferred_drop(state, i)
+        end do
+    end subroutine deferred_poll
+
+    subroutine deferred_cancel(state, request_id)
+        !! notifications/cancelled: the id gets no response; a request no id
+        !! waits for any more is cancelled with its whole process tree.
+        type(mcp_async_state_t), intent(inout) :: state
+        character(len=*), intent(in) :: request_id
+        integer :: i, k, status
+
+        do i = 1, size(state%deferred)
+            do k = 1, size(state%deferred(i)%ids)
+                if (state%deferred(i)%ids(k)%s /= request_id) cycle
+                state%deferred(i)%ids = [state%deferred(i)%ids(:k - 1), &
+                    state%deferred(i)%ids(k + 1:)]
+                if (size(state%deferred(i)%ids) > 0) return
+                call exec_cancel(state%deferred(i)%job, status)
+                if (status == 0) call deferred_drop(state, i)
+                return
+            end do
+        end do
+    end subroutine deferred_cancel
+
+    subroutine deferred_drop(state, i)
+        type(mcp_async_state_t), intent(inout) :: state
+        integer, intent(in) :: i
+        type(mcp_deferred_t), allocatable :: kept(:)
+
+        call delete_tmpfile(state%deferred(i)%request_file)
+        call delete_tmpfile(state%deferred(i)%response_file)
+        call delete_tmpfile(state%deferred(i)%job%log_file)
+        kept = [state%deferred(:i - 1), state%deferred(i + 1:)]
+        call move_alloc(kept, state%deferred)
+    end subroutine deferred_drop
 
     subroutine extract_json_string_member(object_json, property, value, count, ierr)
         character(len=*), intent(in) :: object_json, property
@@ -1015,7 +1182,7 @@ contains
 
         jb = json_new()
         call json_object_start(jb)
-        if (async_state%active_pid > 0) then
+        if (async_state%check%pid > 0) then
             call json_key_string(jb, 'state', 'running')
             call json_key_int(jb, 'run_id', async_state%active_run_id)
         else if (async_state%pending_run_id > 0) then
@@ -1071,33 +1238,24 @@ contains
         type(mcp_async_state_t), intent(inout) :: async_state
 
         type(json_builder_t) :: jb
-        integer :: run_id, ierr, exitcode
+        integer :: run_id, ierr
 
         call requested_run_id(line, async_state, run_id, ierr)
         if (ierr /= 0) then
             call rpc_error(id_str, -32602, 'unknown run_id', response)
             return
         end if
-        if (run_id /= async_state%active_run_id .or. async_state%active_pid <= 0) then
+        if (run_id /= async_state%active_run_id .or. async_state%check%pid <= 0) then
             call rpc_error(id_str, -32602, 'run is not active', response)
             return
         end if
-
-        call process_cancel_pid(async_state%active_pid, exitcode)
-        if (exitcode /= 0) then
+        call exec_cancel(async_state%check, ierr)
+        if (ierr /= 0) then
             call rpc_error(id_str, -32603, &
                 'failed to cancel active run; ownership remains active', response)
             return
         end if
-        async_state%active_pid = 0
-        call async_state%queue%finish(130)
-        async_state%last_run_id = run_id
-        async_state%last_exitcode = 130
-        async_state%last_output = async_state%active_output
-        async_state%active_output = ''
-        async_state%active_run_id = 0
-        call async_start_pending_if_ready(async_state)
-
+        call check_finished(async_state)
         jb = json_new()
         call json_object_start(jb)
         call json_key_bool(jb, 'cancelled', .true.)
@@ -1107,104 +1265,81 @@ contains
     end subroutine handle_async_cancel
 
     subroutine async_poll(async_state)
+        !! Complete a finished check run and start the pending rerun.
         type(mcp_async_state_t), intent(inout) :: async_state
-
         logical :: done
-        integer :: exitcode
+        integer :: ierr
 
-        if (async_state%active_pid <= 0) then
-            call async_start_pending_if_ready(async_state)
-            return
+        if (async_state%check%pid > 0) then
+            call exec_poll(async_state%check, done, ierr)
+            if (.not. done) return
+            call check_finished(async_state)
         end if
-
-        call process_poll_pid(async_state%active_pid, done, exitcode)
-        if (.not. done) return
-
-        async_state%last_run_id = async_state%active_run_id
-        async_state%last_exitcode = exitcode
-        async_state%last_output = async_state%active_output
-        async_state%active_pid = 0
-        async_state%active_run_id = 0
-        async_state%active_output = ''
-        call async_state%queue%finish(exitcode)
-        call async_start_pending_if_ready(async_state)
+        if (async_state%queue%state /= RUN_RUNNING) return
+        call async_start_current(async_state, async_state%pending_run_id, ierr)
+        async_state%pending_run_id = 0
     end subroutine async_poll
 
-    subroutine async_start_pending_if_ready(async_state)
+    subroutine check_finished(async_state)
+        !! The active check run ended (or was cancelled): it becomes the last
+        !! run and the queue moves on.
         type(mcp_async_state_t), intent(inout) :: async_state
 
-        integer :: ierr, run_id
-
-        if (async_state%active_pid > 0) return
-        if (async_state%queue%state /= RUN_RUNNING) return
-
-        run_id = async_state%pending_run_id
-        async_state%pending_run_id = 0
-        call async_start_current(async_state, run_id, ierr)
-    end subroutine async_start_pending_if_ready
+        async_state%last_run_id = async_state%active_run_id
+        async_state%last_exitcode = async_state%check%exitcode
+        async_state%last_output = async_state%check%log_file
+        async_state%active_run_id = 0
+        call async_state%queue%finish(async_state%check%exitcode)
+    end subroutine check_finished
 
     subroutine async_start_current(async_state, requested_id, ierr)
+        !! Start `fo check --json=MODE` of the queue's current root with this
+        !! server's own fo image.
         type(mcp_async_state_t), intent(inout) :: async_state
         integer, intent(in) :: requested_id
         integer, intent(out) :: ierr
-
-        integer :: pid, exitcode, run_id
+        character(len=:), allocatable :: packed
         character(len=512) :: output_file
+        integer :: n_args
 
-        ierr = 0
-        run_id = requested_id
-        if (run_id <= 0) then
-            async_state%next_run_id = async_state%next_run_id + 1
-            run_id = async_state%next_run_id
+        call self_command(packed, n_args, ierr)
+        if (ierr /= 0) return
+        call argv_push(packed, n_args, 'check')
+        if (trim(async_state%queue%current_mode) == 'full') then
+            call argv_push(packed, n_args, '--json=full')
+        else
+            call argv_push(packed, n_args, '--json=compact')
         end if
-
         call make_tmpfile('fo_mcp_async', output_file)
-        call process_start_fo_check(async_state%queue%current_root, &
-            async_state%queue%current_mode, output_file, &
-            pid, exitcode)
-        if (exitcode /= 0 .or. pid <= 0) then
-            ierr = 1
-            return
+        call exec_start(async_state%check, trim(async_state%queue%current_root), &
+            packed, n_args, trim(output_file), ierr)
+        if (ierr /= 0) return
+        async_state%active_run_id = requested_id
+        if (requested_id <= 0) then
+            async_state%next_run_id = async_state%next_run_id + 1
+            async_state%active_run_id = async_state%next_run_id
         end if
-
-        async_state%active_pid = pid
-        async_state%active_run_id = run_id
-        async_state%active_output = output_file
     end subroutine async_start_current
 
     subroutine async_cancel_all(async_state, cancel_status)
+        !! Cancel the check run and every deferred Gremlin request; a tree
+        !! that cannot be cancelled stays owned and reports its error.
         type(mcp_async_state_t), intent(inout) :: async_state
         integer, intent(out) :: cancel_status
+        integer :: i, status
 
-        integer :: exitcode, attempt
-
-        cancel_status = 0
-        if (async_state%active_pid > 0) then
-            exitcode = 1
-            do attempt = 1, 3
-                call process_cancel_pid(async_state%active_pid, exitcode)
-                if (exitcode == 0) exit
-                if (attempt < 3) call fs_sleep_ms(25*attempt)
-            end do
-            if (exitcode /= 0) then
-                cancel_status = exitcode
-                return
-            end if
-            async_state%active_pid = 0
-            async_state%last_run_id = async_state%active_run_id
-            async_state%last_exitcode = 130
-            async_state%last_output = async_state%active_output
-        end if
-        async_state%active_run_id = 0
+        call exec_cancel(async_state%check, cancel_status)
+        if (cancel_status /= 0) return
+        if (async_state%active_run_id > 0) call check_finished(async_state)
         async_state%pending_run_id = 0
-        async_state%active_output = ''
-        async_state%queue%state = RUN_IDLE
-        async_state%queue%rerun_pending = .false.
-        async_state%queue%current_root = ''
-        async_state%queue%current_mode = ''
-        async_state%queue%pending_root = ''
-        async_state%queue%pending_mode = ''
+        call async_state%queue%clear()
+        do i = size(async_state%deferred), 1, -1
+            call exec_cancel(async_state%deferred(i)%job, status)
+            if (status == 0) call deferred_drop(async_state, i)
+            if (status /= 0) cancel_status = status
+        end do
     end subroutine async_cancel_all
+
 
     subroutine requested_run_id(line, async_state, run_id, ierr)
         character(len=*), intent(in) :: line
