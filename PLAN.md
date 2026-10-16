@@ -168,6 +168,20 @@ packages are on main:
   builds and passes all four affected resident gates, then stops normally.
   This is focused consumer evidence, not full FortSym-suite qualification.
 
+### Header-only native CMake correction (2026-10-17)
+
+- Native action arrays now retain only compiled sources. Declared
+  `HEADER_FILE_ONLY` inputs remain available for dependency tracking without
+  leaving unused actions that attempted to archive a nonexistent `.o`.
+- The maintained mixed C/Fortran CLI oracle fails on the prior `ed54363c`
+  driver and passes on candidate SHA256
+  `454c93dffd513b85bc8274c262a2d5364b20e4acf24c45f6ecd55de1769f2daf`.
+  It covers headers in static libraries and executables, include-only edits,
+  warm rebuilds, native/reference agreement and existing delegation controls.
+- The original GLISS consumer at `8e51c65` passes its isolated optimized
+  audit: clean lint, Release array-temporary errors and all 178 default tests.
+  Candidate dependencies remain FortFront `07bfbb4` and Fx `eda9d6e`.
+
 ## Stage 1: fix every known bug
 
 All audit bugs are fixed. Each repair started with an independent negative oracle

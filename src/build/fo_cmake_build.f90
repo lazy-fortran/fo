@@ -220,6 +220,8 @@ contains
                 reason = 'no compiled sources'
                 return
             end if
+            built%a = built%a(:n)
+            built%source = built%source(:n)
             if (tgt%type == 'EXECUTABLE') then
                 if (len(tool(plan, tgt%link_language)) == 0) &
                     reason = 'no toolchain compiler for link language '// &

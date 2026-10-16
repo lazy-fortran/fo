@@ -9,7 +9,8 @@ program test_cmake_native_build_cli
     !!    module directories, a static library and an executable) produces the
     !!    output of the cmake-built reference, without `cmake --build` (a
     !!    compiled Fortran `cmake` shim on PATH records and refuses it), and a
-    !!    header edit reaches the C object;
+    !!    declared header-only inputs are not compiled and header/include edits
+    !!    reach their C and Fortran objects;
     !!  - a target with a generated source is delegated, built before its
     !!    dependents, and only that target reaches `cmake --build`;
     !!  - interface cutoff, observed with a compiler shim that records every
@@ -185,12 +186,15 @@ contains
     subroutine write_mixed(dir)
         character(len=*), intent(in) :: dir
 
-        call write_lines(join_path(dir, 'CMakeLists.txt'), [character(len=120) :: &
+        call write_lines(join_path(dir, 'CMakeLists.txt'), [character(len=180) :: &
             'cmake_minimum_required(VERSION 3.20)', &
             'project(mixed C Fortran)', &
             'enable_testing()', &
             'add_library(core STATIC core/core.F90 core/gate.f90 core/gate_alt.f90 '// &
-            'core/cyc_x.F90 core/cyc_a.f90 core/scale.c)', &
+            'core/include/offset.inc core/cyc_x.F90 core/cyc_a.f90 core/scale.c '// &
+            'core/include/scale.h)', &
+            'set_source_files_properties(core/include/offset.inc core/include/scale.h '// &
+            'PROPERTIES HEADER_FILE_ONLY TRUE)', &
             'set_target_properties(core PROPERTIES Fortran_MODULE_DIRECTORY '// &
             '${CMAKE_BINARY_DIR}/mod_core)', &
             'target_include_directories(core PUBLIC core/include '// &
@@ -202,7 +206,9 @@ contains
             '${CMAKE_BINARY_DIR}/mod_util)', &
             'target_include_directories(util PUBLIC ${CMAKE_BINARY_DIR}/mod_util)', &
             'target_link_libraries(util PUBLIC core)', &
-            'add_executable(app app/main.f90)', &
+            'add_executable(app app/banner.inc app/main.f90)', &
+            'set_source_files_properties(app/banner.inc PROPERTIES HEADER_FILE_ONLY TRUE)', &
+            'target_include_directories(app PRIVATE app)', &
             'target_link_libraries(app PRIVATE util)', &
             'add_test(NAME app_runs COMMAND app)', &
             'set_tests_properties(app_runs PROPERTIES PASS_REGULAR_EXPRESSION '// &
@@ -221,29 +227,34 @@ contains
         call write_lines(join_path(dir, 'core/cyc_a.f90'), [character(len=60) :: &
             'module cyc_a', 'use cyc_x, only: cyc_base', 'implicit none', &
             'integer, parameter :: cyc_a_value = cyc_base + 3', 'end module'])
-        call write_lines(join_path(dir, 'core/core.F90'), [character(len=70) :: &
+        call write_lines(join_path(dir, 'core/core.F90'), [character(len=100) :: &
             'module core_mod', '#ifdef GATE_ALT', 'use gate_alt, only: gate_offset', &
             '#else', 'use gate_mod, only: gate_offset', '#endif', &
             'use, intrinsic :: iso_c_binding, only: c_int', 'implicit none', &
+            'include "offset.inc"', &
             'interface', '  integer(c_int) function core_scale(x) bind(C, name="core_scale")', &
             '    import :: c_int', '    integer(c_int), value :: x', &
             '  end function', 'end interface', 'contains', &
             'integer function core_value(x)', '  integer, intent(in) :: x', &
-            '  core_value = int(core_scale(int(x, c_int))) + gate_offset()', &
+            '  core_value = int(core_scale(int(x, c_int))) + gate_offset() + header_offset', &
             'end function', 'end module'])
         call write_lines(join_path(dir, 'core/scale.c'), [character(len=60) :: &
             '#include "scale.h"', 'int core_scale(int x) {', &
             '  return x * CORE_SCALE + SCALE_BASE;', '}'])
         call write_lines(join_path(dir, 'core/include/scale.h'), [character(len=40) :: &
             '#define SCALE_BASE 5'])
+        call write_lines(join_path(dir, 'core/include/offset.inc'), [character(len=50) :: &
+            'integer, parameter :: header_offset = 0'])
+        call write_lines(join_path(dir, 'app/banner.inc'), [character(len=50) :: &
+            'integer, parameter :: banner_offset = 0'])
         call write_lines(join_path(dir, 'util/util.f90'), [character(len=60) :: &
             'module util_mod', 'use core_mod, only: core_value', 'implicit none', &
             'contains', 'integer function util_value()', &
             '  util_value = core_value(2) * 2', 'end function', 'end module'])
-        call write_lines(join_path(dir, 'app/main.f90'), [character(len=70) :: &
+        call write_lines(join_path(dir, 'app/main.f90'), [character(len=100) :: &
             'program app', 'use util_mod, only: util_value', &
-            'use cyc_a, only: cyc_a_value', 'implicit none', &
-            'print "(a,i0,1x,i0)", "mixed: ", util_value(), cyc_a_value', &
+            'use cyc_a, only: cyc_a_value', 'implicit none', 'include "banner.inc"', &
+            'print "(a,i0,1x,i0)", "mixed: ", util_value(), cyc_a_value + banner_offset', &
             'end program'])
     end subroutine write_mixed
 
@@ -300,10 +311,16 @@ contains
         call assert_process_ok(observed, 'rebuild after the header edit')
         call assert_equal_string(run_text(join_path(source, 'build/app')), &
             'mixed: 230 7'//nl, 'the header edit changed the C object')
+        call write_lines(join_path(source, 'core/include/offset.inc'), [character(len=50) :: &
+            'integer, parameter :: header_offset = 2'])
+        call run_fo(driver, args, source, cache, observed, environment)
+        call assert_process_ok(observed, 'rebuild after the Fortran include edit')
+        call assert_equal_string(run_text(join_path(source, 'build/app')), &
+            'mixed: 234 7'//nl, 'the include edit changed the Fortran object')
         call run_fo(driver, args, source, cache, observed, environment)
         call assert_process_ok(observed, 'warm rebuild')
         call assert_equal_string(run_text(join_path(source, 'build/app')), &
-            'mixed: 230 7'//nl, 'warm rebuild keeps the output')
+            'mixed: 234 7'//nl, 'warm rebuild keeps the output')
 
         ! Positive control: the trap sees the delegated route.
         environment = fo_environment(.true., .true.)
