@@ -28,10 +28,7 @@ module fo_gremlin_supervisor
     use fo_gremlin_log_text, only: gremlin_retain_build_log, gremlin_log_tail
     use fo_gremlin_owner, only: run_owner
     use fo_gremlin_readiness, only: gremlin_readiness_t, gremlin_wait_satisfied, &
-        gremlin_wait_code, GREMLIN_PHASE_STARTING, GREMLIN_PHASE_BUILDING, &
-        GREMLIN_PHASE_TESTING, GREMLIN_PHASE_QUIESCENT, GREMLIN_PHASE_STOPPED, &
-        GREMLIN_PHASE_FAILED, GREMLIN_HEALTH_FAILURE, GREMLIN_VERIFY_ORDINARY, &
-        GREMLIN_VERIFY_FULL
+        gremlin_wait_code, GREMLIN_PHASE_QUIESCENT, GREMLIN_HEALTH_FAILURE
     use fo_gremlin_receipts, only: NAME_LEN, PATH_LEN, record_receipt, &
         compute_readiness, lifecycle_path_for_session, status_is_failure, &
         runner_case_outcome
@@ -54,7 +51,7 @@ module fo_gremlin_supervisor
         process_scope_begin, process_scope_end
     use fo_util, only: int_text
     use fx_dag, only: MAX_NODES
-    use fx_json_build, only: json_builder_t, json_new, json_escape_string, &
+    use fx_json_build, only: json_builder_t, json_new, &
         array_open => json_array_start, array_close => json_array_end
     implicit none
     private
@@ -73,6 +70,7 @@ contains
         character(len=PATH_LEN) :: error_message, owner_start
         character(len=GREMLIN_STATE_TEXT_MAX) :: status_text
         character(len=128) :: session_id
+        character(len=16) :: state
         integer :: ierr, owner_pid
 
         response_json = ''
@@ -96,9 +94,9 @@ contains
         case ('run')
             call run_owner(project_dir, request, response_json, exitcode)
         case ('status')
-            call handle_status(project_dir, request, response_json, exitcode)
+            call handle_status('status', project_dir, request, response_json, exitcode)
         case ('events')
-            call handle_events(project_dir, request, response_json, exitcode)
+            call handle_status('events', project_dir, request, response_json, exitcode)
         case ('wait')
             call handle_wait(project_dir, request, response_json, exitcode)
         case ('failures')
@@ -106,40 +104,29 @@ contains
         case ('reproduce')
             call handle_reproduce(project_dir, request, response_json, exitcode)
         case ('stop')
+            ! The live owner (the default session) is asked to stop; another
+            ! named session is already stopped once its terminal record loads.
             call gremlin_session_read(project_dir, trim(request%lane_id), &
                 session_id, owner_pid, owner_start, status_text, ierr, error_message)
-            if (len_trim(request%session_id) == 0 .and. ierr == 0) then
+            if (len_trim(request%session_id) == 0 .and. ierr == 0) &
                 request%session_id = trim(session_id)
-            end if
-            if (len_trim(request%session_id) > 0 .and. ierr == 0) then
-                if (trim(request%session_id) == trim(session_id)) then
-                    call gremlin_session_request_stop(project_dir, &
-                        trim(request%lane_id), trim(request%session_id), &
-                        ierr, error_message)
-                else
-                    call gremlin_load_terminal_session(project_dir, request%lane_id, &
-                        trim(request%session_id), session, status_text, ierr, error_message)
-                    if (ierr == 0) then
-                        call simple_response(action, request%lane_id, &
-                            request%session_id, 'stopped', response_json)
-                        return
-                    end if
-                end if
-            else if (len_trim(request%session_id) > 0) then
+            state = 'stopping'
+            if (len_trim(request%session_id) == 0) then
+                continue
+            else if (ierr == 0 .and. trim(request%session_id) == trim(session_id)) then
+                call gremlin_session_request_stop(project_dir, trim(request%lane_id), &
+                    trim(request%session_id), ierr, error_message)
+            else
                 call gremlin_load_terminal_session(project_dir, request%lane_id, &
                     trim(request%session_id), session, status_text, ierr, error_message)
-                if (ierr == 0) then
-                    call simple_response(action, request%lane_id, &
-                        request%session_id, 'stopped', response_json)
-                    return
-                end if
+                state = 'stopped'
             end if
             if (ierr /= 0) then
                 call error_response(action, trim(error_message), response_json)
                 exitcode = 2
             else
                 call simple_response(action, request%lane_id, request%session_id, &
-                    'stopping', response_json)
+                    trim(state), response_json)
             end if
         case default
             call error_response(action, 'unknown Gremlin action', response_json)
@@ -296,126 +283,108 @@ contains
         call simple_response('start', request%lane_id, trim(session_id), 'running', response)
     end subroutine handle_start
 
-    subroutine handle_status(project_dir, request, response, exitcode)
-        character(len=*), intent(in) :: project_dir
+    subroutine handle_status(action, project_dir, request, response, exitcode)
+        !! status and events: the summary, or the full state with an event page.
+        character(len=*), intent(in) :: action, project_dir
         type(gremlin_request_t), intent(in) :: request
         character(len=:), allocatable, intent(out) :: response
         integer, intent(out) :: exitcode
-
-        character(len=65536) :: status_text
-        character(len=PATH_LEN) :: message
         type(gremlin_session_t) :: session
-        type(gremlin_coverage_view_t) :: coverage_view
         type(gremlin_readiness_t) :: readiness
-        character(len=HASH_LEN) :: generation_id
-        character(len=PATH_LEN) :: coverage_path, coverage_state_dir
-        character(len=:), allocatable :: enriched_status
-        integer :: owner_pid, ierr
-        logical :: is_live, have_coverage, freshness_verified
-        character(len=PATH_LEN) :: freshness_path, owner_start
-        character(len=65536) :: fresh_status
-        character(len=128) :: fresh_session
+        character(len=:), allocatable :: enriched
+        character(len=PATH_LEN) :: message
+        integer :: ierr
 
         exitcode = 0
+        call status_snapshot(project_dir, request, session, enriched, readiness, ierr, &
+            message)
+        if (ierr == 0) then
+            if (trim(request%detail) == 'summary') then
+                call compact_summary(enriched, session, action, response, ierr, message)
+            else
+                call response_with_events(action, enriched, session, request, .false., &
+                    response, ierr, message)
+            end if
+        end if
+        if (ierr /= 0) then
+            call error_response('status', trim(message), response)
+            exitcode = 2
+        end if
+    end subroutine handle_status
+
+    subroutine status_snapshot(project_dir, request, session, enriched, readiness, &
+            ierr, message)
+        !! The published lane state enriched with coverage and readiness. A live
+        !! lane that looks green or quiescent first confirms through the
+        !! freshness handshake that its owner has seen every input event.
+        character(len=*), intent(in) :: project_dir
+        type(gremlin_request_t), intent(in) :: request
+        type(gremlin_session_t), intent(out) :: session
+        character(len=:), allocatable, intent(out) :: enriched
+        type(gremlin_readiness_t), intent(out) :: readiness
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+        character(len=GREMLIN_STATE_TEXT_MAX) :: status_text, fresh_status
+        character(len=PATH_LEN) :: state_dir, owner_start
+        character(len=HASH_LEN) :: generation_id
+        character(len=128) :: fresh_session
+        type(gremlin_coverage_view_t) :: coverage_view
+        integer :: owner_pid
+        logical :: is_live, have_coverage, fresh
+
         call gremlin_resolve_read_session(project_dir, request, session, status_text, &
             owner_pid, is_live, ierr, message)
-        if (ierr /= 0) then
-            call error_response('status', trim(message), response)
-            exitcode = 2
-            return
-        end if
+        if (ierr /= 0) return
         if (is_live) call poll_launcher(owner_pid)
-        generation_id = ''
-        coverage_view = gremlin_coverage_view_t()
-        have_coverage = .false.
-        call gremlin_json_field(status_text, 'active_generation', generation_id)
-        if (len_trim(generation_id) == HASH_LEN) then
-            call gremlin_session_state_dir(project_dir, request%lane_id, &
-                coverage_state_dir, ierr, message)
-            if (ierr /= 0) then
-                call error_response('status', trim(message), response)
-                exitcode = 2
-                return
-            end if
-            coverage_path = trim(coverage_state_dir)//'/coverage-'// &
-                generation_id//'.state'
-            call coverage_read_view_path(trim(coverage_path), generation_id, &
-                coverage_view, ierr, message)
-            if (ierr == COVERAGE_OK) then
-                have_coverage = .true.
-            else if (ierr /= COVERAGE_NOT_FOUND) then
-                call error_response('status', trim(message), response)
-                exitcode = 2
-                return
-            end if
-        end if
-        call compute_readiness(session, trim(status_text), coverage_view, &
+        state_dir = ''
+        call read_coverage()
+        if (ierr == 0) call compute_readiness(session, trim(status_text), coverage_view, &
             have_coverage, readiness, ierr, message)
-        if (ierr /= 0) then
-            call error_response('status', trim(message), response)
-            exitcode = 2
-            return
-        end if
+        if (ierr /= 0) return
         if (is_live .and. (readiness%local_gate_green .or. &
-            (readiness%phase == GREMLIN_PHASE_QUIESCENT .and. &
-            .not. readiness%dirty))) then
-            freshness_path = trim(coverage_state_dir)//'/freshness-'// &
-                trim(session%session_id)
-            call gremlin_freshness_check(trim(freshness_path), freshness_verified)
-            if (freshness_verified) then
+            (readiness%phase == GREMLIN_PHASE_QUIESCENT .and. .not. readiness%dirty))) then
+            call gremlin_freshness_check(trim(state_dir)//'/freshness-'// &
+                trim(session%session_id), fresh)
+            if (fresh) then
                 call gremlin_session_read(project_dir, request%lane_id, fresh_session, &
                     owner_pid, owner_start, fresh_status, ierr, message)
-                freshness_verified = ierr == 0 .and. &
-                    trim(fresh_session) == trim(session%session_id)
-                if (freshness_verified) then
+                fresh = ierr == 0 .and. trim(fresh_session) == trim(session%session_id)
+                if (fresh) then
+                    ! The handshake can advance the owner from testing to
+                    ! quiescence, possibly activating a new generation: its
+                    ! refreshed status needs refreshed coverage.
                     status_text = fresh_status
-                    ! The freshness handshake can advance the owner from testing
-                    ! to quiescence. Its refreshed status needs refreshed coverage,
-                    ! including the new generation if activation occurred meanwhile.
-                    generation_id = ''
-                    coverage_view = gremlin_coverage_view_t()
-                    have_coverage = .false.
-                    call gremlin_json_field(status_text, 'active_generation', &
-                        generation_id)
-                    if (len_trim(generation_id) == HASH_LEN) then
-                        coverage_path = trim(coverage_state_dir)//'/coverage-'// &
-                            generation_id//'.state'
-                        call coverage_read_view_path(trim(coverage_path), generation_id, &
-                            coverage_view, ierr, message)
-                        if (ierr == COVERAGE_OK) then
-                            have_coverage = .true.
-                        else if (ierr /= COVERAGE_NOT_FOUND) then
-                            call error_response('status', trim(message), response)
-                            exitcode = 2
-                            return
-                        end if
-                    end if
+                    call read_coverage()
+                    if (ierr /= 0) return
                 end if
             end if
             call compute_readiness(session, trim(status_text), coverage_view, &
-                have_coverage, readiness, ierr, message, freshness_verified)
-            if (ierr /= 0) then
-                call error_response('status', trim(message), response)
-                exitcode = 2
-                return
-            end if
+                have_coverage, readiness, ierr, message, fresh)
+            if (ierr /= 0) return
         end if
-        enriched_status = gremlin_status_enrich(trim(status_text), coverage_view, &
-            readiness, have_coverage)
-        if (trim(request%detail) == 'summary') then
-            call compact_summary(enriched_status, session, 'status', &
-                response, ierr, message)
-        else
-            call response_with_events('status', enriched_status, session, request, &
-                .false., response, ierr, message)
-        end if
-        if (ierr /= 0) then
-            call error_response('status', trim(message), response)
-            exitcode = 2
-            return
-        end if
-        exitcode = 0
-    end subroutine handle_status
+        enriched = gremlin_status_enrich(trim(status_text), coverage_view, readiness, &
+            have_coverage)
+
+    contains
+
+        subroutine read_coverage()
+            !! Coverage of the status's active generation, when it has any.
+            coverage_view = gremlin_coverage_view_t()
+            have_coverage = .false.
+            ierr = 0
+            call gremlin_json_field(status_text, 'active_generation', generation_id)
+            if (len_trim(generation_id) /= HASH_LEN) return
+            if (len_trim(state_dir) == 0) call gremlin_session_state_dir(project_dir, &
+                request%lane_id, state_dir, ierr, message)
+            if (ierr /= 0) return
+            call coverage_read_view_path(trim(state_dir)//'/coverage-'// &
+                generation_id//'.state', generation_id, coverage_view, ierr, message)
+            have_coverage = ierr == COVERAGE_OK
+            if (ierr == COVERAGE_NOT_FOUND) ierr = 0
+        end subroutine read_coverage
+
+    end subroutine status_snapshot
+
 
     subroutine compact_summary(status_text, session, action, response, &
             ierr, message)
@@ -482,122 +451,60 @@ contains
     end subroutine compact_summary
 
 
-    subroutine handle_events(project_dir, request, response, exitcode)
-        character(len=*), intent(in) :: project_dir
-        type(gremlin_request_t), intent(in) :: request
-        character(len=:), allocatable, intent(out) :: response
-        integer, intent(out) :: exitcode
-
-        call handle_status(project_dir, request, response, exitcode)
-        if (exitcode == 0) call replace_action(response, 'events')
-    end subroutine handle_events
-
     subroutine handle_wait(project_dir, request, response, exitcode)
+        !! Poll the lane state until the typed condition (or, untyped, a new
+        !! event) holds, the lane is terminal or wait_ms passed.
         character(len=*), intent(in) :: project_dir
         type(gremlin_request_t), intent(in) :: request
         character(len=:), allocatable, intent(out) :: response
         integer, intent(out) :: exitcode
 
         character(len=PATH_LEN) :: message
-        character(len=GREMLIN_STATE_TEXT_MAX) :: status_text
-        character(len=32) :: state_name, health, phase_name, verification, fact
-        character(len=:), allocatable :: status_json, wait_name, decorated
+        character(len=32) :: state_name
+        character(len=:), allocatable :: enriched, status_json, wait_name, decorated
         character(len=:), allocatable :: durable_failure_report
         type(gremlin_readiness_t) :: readiness
         type(gremlin_request_t) :: poll_request, failure_request
         type(gremlin_session_t) :: session
-        integer :: ierr, until_kind, elapsed, sleep_ms, failure_exitcode
-        integer :: owner_pid
-        integer(int64) :: started_ms, now_ms, next_cursor, next_lifecycle_cursor
-        logical :: satisfied, failed, timed_out, terminal, has_events
-        logical :: is_live
+        integer :: ierr, until_kind, elapsed, failure_exitcode
+        integer(int64) :: started_ms, next_cursor, next_lifecycle_cursor
+        logical :: satisfied, failed, timed_out, terminal
 
+        exitcode = 2
         poll_request = request
         poll_request%detail = 'full'
         until_kind = gremlin_wait_code(request%wait_until)
         wait_name = trim(request%wait_until)
         if (until_kind == 0) wait_name = 'events'
-        satisfied = .false.
-        failed = .false.
         timed_out = .false.
-        terminal = .false.
-        elapsed = 0
         started_ms = exec_clock_ms()
         do
-            call handle_status(project_dir, poll_request, status_json, ierr)
+            call status_snapshot(project_dir, poll_request, session, enriched, &
+                readiness, ierr, message)
+            if (ierr == 0) call response_with_events('wait', enriched, session, &
+                poll_request, .false., status_json, ierr, message, next_cursor, &
+                next_lifecycle_cursor)
             if (ierr /= 0) then
-                response = status_json
-                exitcode = ierr
+                call error_response('status', trim(message), response)
                 return
             end if
-            call gremlin_json_field(status_json, 'health', health)
-            call gremlin_json_field(status_json, 'phase', phase_name)
-            call gremlin_json_field(status_json, 'state', state_name)
-            readiness = gremlin_readiness_t()
-            if (trim(health) == 'failure') readiness%health = GREMLIN_HEALTH_FAILURE
-            select case (trim(phase_name))
-            case ('starting')
-                readiness%phase = GREMLIN_PHASE_STARTING
-            case ('building')
-                readiness%phase = GREMLIN_PHASE_BUILDING
-            case ('testing')
-                readiness%phase = GREMLIN_PHASE_TESTING
-            case ('quiescent')
-                readiness%phase = GREMLIN_PHASE_QUIESCENT
-            case ('stopped')
-                readiness%phase = GREMLIN_PHASE_STOPPED
-            case ('failed')
-                readiness%phase = GREMLIN_PHASE_FAILED
-            end select
-            call gremlin_json_field(status_json, 'local_gate_green', fact)
-            readiness%local_gate_green = trim(fact) == 'true'
-            call gremlin_json_field(status_json, 'fully_verified', fact)
-            readiness%fully_verified = trim(fact) == 'true'
-            call gremlin_json_field(status_json, 'dirty', fact)
-            readiness%dirty = trim(fact) == 'true'
-            call gremlin_json_field(status_json, 'verification_level', verification)
-            select case (trim(verification))
-            case ('ordinary')
-                readiness%verification_level = GREMLIN_VERIFY_ORDINARY
-            case ('full')
-                readiness%verification_level = GREMLIN_VERIFY_FULL
-            end select
             failed = readiness%health == GREMLIN_HEALTH_FAILURE
-            call read_json_cursor(status_json, 'next_cursor', next_cursor, ierr)
-            call read_json_cursor(status_json, 'next_lifecycle_cursor', &
-                next_lifecycle_cursor, ierr)
-            if (ierr /= 0) then
-                response = '{"error":"malformed cursor in Gremlin status"}'
-                exitcode = 1
-                return
-            end if
-            has_events = next_cursor > poll_request%cursor .or. &
-                next_lifecycle_cursor > poll_request%lifecycle_cursor
-
             if (until_kind > 0) then
                 satisfied = gremlin_wait_satisfied(until_kind, readiness)
             else
-                satisfied = has_events
+                satisfied = next_cursor > poll_request%cursor .or. &
+                    next_lifecycle_cursor > poll_request%lifecycle_cursor
             end if
+            call gremlin_json_field(enriched, 'state', state_name)
             terminal = trim(state_name) == 'stopped' .or. trim(state_name) == 'error'
             if (satisfied .or. terminal) exit
-
-            now_ms = exec_clock_ms()
-            elapsed = int(max(0_int64, now_ms - started_ms))
+            elapsed = int(max(0_int64, exec_clock_ms() - started_ms))
             if (elapsed >= request%wait_ms) then
                 timed_out = .true.
                 exit
             end if
-            sleep_ms = min(100, request%wait_ms - elapsed)
-            if (sleep_ms > 0) call fs_sleep_ms(sleep_ms)
+            call fs_sleep_ms(min(100, request%wait_ms - elapsed))
         end do
-
-        call replace_action(status_json, 'wait')
-        if (len(status_json) < 2) then
-            call error_response('wait', 'status query returned an empty response', response)
-            exitcode = 2
-            return
-        end if
         durable_failure_report = ''
         if (failed .and. trim(request%detail) == 'full') then
             failure_request = request
@@ -610,44 +517,18 @@ contains
         end if
         decorated = gremlin_wait_decorate(status_json, wait_name, satisfied, &
             timed_out, terminal, failed, durable_failure_report)
-        if (trim(request%detail) == 'summary') then
-            call gremlin_resolve_read_session(project_dir, request, session, &
-                status_text, owner_pid, is_live, ierr, message)
-            if (ierr /= 0) then
-                call error_response('wait', trim(message), response)
-                exitcode = 2
-                return
-            end if
-            call compact_summary(decorated, session, 'wait', response, &
-                ierr, message)
-            if (ierr /= 0) then
-                call error_response('wait', trim(message), response)
-                exitcode = 2
-                return
-            end if
-        else
-            response = decorated
-        end if
         exitcode = 0
+        if (trim(request%detail) /= 'summary') then
+            response = decorated
+            return
+        end if
+        call compact_summary(decorated, session, 'wait', response, ierr, message)
+        if (ierr /= 0) then
+            call error_response('wait', trim(message), response)
+            exitcode = 2
+        end if
     end subroutine handle_wait
 
-    subroutine read_json_cursor(json, name, value, ierr)
-        !! An absent cursor is 0; a malformed, negative or oversized one sets ierr.
-        character(len=*), intent(in) :: json, name
-        integer(int64), intent(out) :: value
-        integer, intent(inout) :: ierr
-        character(len=64) :: raw
-        integer :: ios, status
-
-        value = 0_int64
-        call gremlin_json_field(json, name, raw, status=status)
-        if (status == 1) return
-        read(raw, *, iostat=ios) value
-        if (status /= 0 .or. ios /= 0 .or. value < 0_int64) then
-            value = 0_int64
-            ierr = 1
-        end if
-    end subroutine read_json_cursor
 
     subroutine handle_failures(project_dir, request, response, exitcode)
         character(len=*), intent(in) :: project_dir
@@ -856,9 +737,7 @@ contains
         end if
         ! Build the generation once here; the case child never builds, so
         ! a build failure is reported once and no case runs.
-        call build_command(pin%path, build_view, packed, n_args, env)
-        call argv_push(packed, n_args, '--case')
-        call argv_push(packed, n_args, trim(request%case_id))
+        call build_command(pin%path, build_view, packed, n_args, env, [request%case_id])
         call exec_start(job, trim(build_view%cwd), packed, n_args, trim(build_log), &
             ierr, env, timeout)
         if (ierr /= 0) then
@@ -988,7 +867,9 @@ contains
     end subroutine wait_job
 
     subroutine response_with_events(action, status_text, session, request, failures_only, &
-            response, ierr, message)
+            response, ierr, message, receipt_cursor, lifecycle_cursor)
+        !! The status with one page of receipts (or only failures) and of
+        !! lifecycle events; the cursors continue both pages.
         character(len=*), intent(in) :: action, status_text
         type(gremlin_session_t), intent(in) :: session
         type(gremlin_request_t), intent(in) :: request
@@ -996,6 +877,7 @@ contains
         character(len=:), allocatable, intent(out) :: response
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
+        integer(int64), intent(out), optional :: receipt_cursor, lifecycle_cursor
 
         type(journal_record_t), allocatable :: records(:)
         type(gremlin_lifecycle_event_t), allocatable :: lifecycle_events(:)
@@ -1044,23 +926,11 @@ contains
         response = gremlin_events_json(action, status_text, session%session_id, &
             request%lane_id, events, next_cursor, has_more, lifecycle, &
             next_lifecycle_cursor, lifecycle_has_more)
+        if (present(receipt_cursor)) receipt_cursor = next_cursor
+        if (present(lifecycle_cursor)) lifecycle_cursor = next_lifecycle_cursor
         ierr = 0
         message = ''
     end subroutine response_with_events
-
-    subroutine replace_action(response, action)
-        character(len=:), allocatable, intent(inout) :: response
-        character(len=*), intent(in) :: action
-
-        character(len=:), allocatable :: needle
-        integer :: position
-
-        needle = '"action":"status"'
-        position = index(response, needle)
-        if (position == 0) return
-        response = response(:position - 1)//'"action":"'// &
-            trim(json_escape_string(action))//'"'//response(position + len(needle):)
-    end subroutine replace_action
 
     subroutine release_if_owner(session, ierr, message)
         type(gremlin_session_t), intent(inout) :: session

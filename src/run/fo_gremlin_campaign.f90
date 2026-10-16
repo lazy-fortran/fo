@@ -96,18 +96,26 @@ contains
         end if
     end subroutine gremlin_attach_response
 
-    subroutine build_command(driver, view, packed, n_args, env)
-        !! `fo build --tests` of a frozen generation in its writable view; the
-        !! caller appends the case and scope arguments.
+    subroutine build_command(driver, view, packed, n_args, env, cases)
+        !! `fo build --tests` of a frozen generation in its writable view, for
+        !! the given cases only (absent: every case).
         character(len=*), intent(in) :: driver
         type(execution_view_t), intent(in) :: view
         character(len=:), allocatable, intent(out) :: packed, env
         integer, intent(out) :: n_args
+        character(len=*), intent(in), optional :: cases(:)
+        integer :: i
 
         n_args = 0
         call argv_push(packed, n_args, trim(driver))
         call argv_push(packed, n_args, 'build')
         call argv_push(packed, n_args, '--tests')
+        if (present(cases)) then
+            do i = 1, size(cases)
+                call argv_push(packed, n_args, '--case')
+                call argv_push(packed, n_args, trim(cases(i)))
+            end do
+        end if
         env = 'FO_DISABLE_SELF_REFRESH=1;FO_SELF_REFRESH=0;FO_GREMLIN_FROZEN_ROOT='// &
             trim(view%cwd)//';TMPDIR='//trim(view%tmpdir)
     end subroutine build_command

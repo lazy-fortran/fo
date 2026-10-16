@@ -350,7 +350,7 @@ contains
         integer, intent(out) :: ierr
         character(len=PATH_LEN) :: log_file, detail
         character(len=:), allocatable :: packed, env
-        integer :: n_args, i, status
+        integer :: n_args, status
         logical :: exists
 
         o%build = child_t()
@@ -376,12 +376,12 @@ contains
         end if
         o%candidate%build_project_root = o%build%execution_view%cwd
         call log_path(o%session, 'build-'//o%candidate%identity(1:16), log_file)
-        call build_command(o%session%driver_path, o%build%execution_view, packed, &
-            n_args, env)
         if (o%request%random_count == 0) then
-            do i = 1, o%request%n_targets
-                call argv_case(packed, n_args, o%request%targets(i))
-            end do
+            call build_command(o%session%driver_path, o%build%execution_view, packed, &
+                n_args, env, o%request%targets(:o%request%n_targets))
+        else
+            call build_command(o%session%driver_path, o%build%execution_view, packed, &
+                n_args, env)
         end if
         ! A scoped lane builds the plan targets of its scope only.
         call push_scope_args(packed, n_args, o%request)
@@ -393,16 +393,6 @@ contains
             o%candidate%build_project_root = ''
         end if
     end subroutine start_build
-
-    subroutine argv_case(packed, n_args, name)
-        use fo_process, only: argv_push
-        character(len=:), allocatable, intent(inout) :: packed
-        integer, intent(inout) :: n_args
-        character(len=*), intent(in) :: name
-
-        call argv_push(packed, n_args, '--case')
-        call argv_push(packed, n_args, trim(name))
-    end subroutine argv_case
 
     subroutine maintain_idle(o)
         !! With no child running: reap adopted zombies and tick the cache.
