@@ -444,6 +444,14 @@ void fo_c_run_argv_budget(const char *cwd, const char *args, int args_len, int n
     *exitcode = run_windows(cwd, args, args_len, n_args, log, append, cpu_budget_s,
         timeout_s, heartbeat_s, environment, timeout_kind, cpu_ms, wall_ms);
 }
+void fo_c_run_argv_slow(const char *cwd, const char *args, int args_len, int n_args,
+    const char *log, int append, int cpu_budget_s, int timeout_s, int slow_period_s,
+    const char *slow_label, const char *environment, int *exitcode, int *timeout_kind,
+    long long *cpu_ms, long long *wall_ms) {
+    (void)slow_label;
+    fo_c_run_argv_budget(cwd, args, args_len, n_args, log, append, cpu_budget_s,
+        timeout_s, slow_period_s, environment, exitcode, timeout_kind, cpu_ms, wall_ms);
+}
 void fo_c_run_argv_logged(const char *cwd, const char *args, int args_len, int n_args,
     const char *log, int append, int timeout_s, int heartbeat_s, const char *environment,
     int *exitcode) {

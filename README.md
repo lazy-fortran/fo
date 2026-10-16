@@ -92,6 +92,31 @@ test-wall-timeout = 900  # wall-clock cap per test
 CPU time is read from `/proc` on Linux. Elsewhere the budget stays a
 wall-clock limit.
 
+### Cases, retries and SLOW
+
+An executable that implements the fo listing protocol is run case by case:
+`FO_TEST_LIST=1` makes it print one `fo-case NAME` line per case (an optional
+TAB and `;`-separated project sources narrow the case's input closure), and
+`FO_TEST_CASE=NAME` runs one case. test-drive executables with the standard
+driver (`exe SUITE TEST`) are adapted without changes; other frameworks stay one
+case. Cases are named `exe::case` and selected like tests
+(`fo test exe::two`, `'exe::*slow*'`); `fo test --list` shows the cases of built
+executables. A test that fails and passes on a retry is FLAKY, never PASS.
+
+```toml
+[extra.fo]
+test-retries = 1                                   # default: one isolated retry
+slow-timeout = { period = 60, terminate-after = 3 } # SLOW line, then TIMEOUT
+
+[extra.fo.test-groups]
+network = { tests = ["test/test_net*"], retries = 3 }
+```
+
+`fo test --retries N` overrides the retries and `--strict-flaky` makes a FLAKY
+verdict fail the run. For CMake, the CTest properties `FO_RETRIES`,
+`FO_SLOW_PERIOD` and `FO_SLOW_TERMINATE_AFTER` and the label `flaky` (two
+retries) play the same role; `TIMEOUT` stays the terminate bound.
+
 Builds with requested flags (`--flag`, `--profile NAME`, `--release`) keep
 their executables apart from the default build, under
 `build/fo/profiles/<flags>/`. `fo exec` and `fo test` pick the tree by the

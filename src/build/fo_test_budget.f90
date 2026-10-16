@@ -9,6 +9,7 @@ module fo_test_budget
     !! Precedence for each limit: environment variable, then fpm.toml
     !! [extra.fo], then the default.
     use fo_fpm_config, only: fpm_config_t
+    use fo_pattern, only: pattern_glob
     use fo_process, only: TIMEOUT_CPU, TIMEOUT_WALL, TIMEOUT_UNMEASURED
     implicit none
     private
@@ -16,10 +17,17 @@ module fo_test_budget
     public :: test_timeout_seconds, slow_test_timeout_seconds
     public :: test_budget_seconds, test_wall_cap_seconds
     public :: timeout_detail
+    public :: test_policy, test_strict_flaky, test_retries_override
+    public :: test_set_retry_options
 
     integer, parameter :: DEFAULT_TEST_TIMEOUT = 10
     integer, parameter :: DEFAULT_SLOW_TEST_TIMEOUT = 300
     integer, parameter :: WALL_CAP_FACTOR = 10
+    !! The isolated rerun fo always did for a failure: one retry.
+    integer, parameter, public :: DEFAULT_TEST_RETRIES = 1
+    !! `fo test --retries N` and `--strict-flaky` of this process.
+    integer, save :: cli_retries = -1
+    logical, save :: cli_strict_flaky = .false.
 
 contains
 
@@ -73,6 +81,85 @@ contains
         if (t <= 0) t = WALL_CAP_FACTOR * budget
         t = max(t, budget)
     end function test_wall_cap_seconds
+
+    subroutine test_policy(config, name, source, retries, slow_period, slow_after)
+        !! Retries after a failure and the SLOW period and terminate-after
+        !! count of one test (#217). Retries: FO_TEST_RETRIES (`--retries`),
+        !! the first matching [extra.fo.test-groups] entry that sets them,
+        !! [extra.fo] test-retries, then one retry. The SLOW bounds: the
+        !! first matching group entry that sets slow-timeout, then [extra.fo]
+        !! slow-timeout; period 0 means no SLOW bound.
+        type(fpm_config_t), intent(in) :: config
+        character(len=*), intent(in) :: name, source
+        integer, intent(out) :: retries, slow_period, slow_after
+        integer :: g, k
+        logical :: hit
+        integer :: value
+        logical :: retries_set, slow_set
+
+        retries = DEFAULT_TEST_RETRIES
+        if (config%test_retries >= 0) retries = config%test_retries
+        slow_period = config%slow_period
+        slow_after = config%slow_after
+        retries_set = .false.
+        slow_set = .false.
+        do g = 1, config%n_test_groups
+            hit = .false.
+            do k = 1, size(config%test_groups(g)%tests)
+                if (pattern_glob(config%test_groups(g)%tests(k)%s, name) .or. &
+                    pattern_glob(config%test_groups(g)%tests(k)%s, source)) then
+                    hit = .true.
+                    exit
+                end if
+            end do
+            if (.not. hit) cycle
+            if (config%test_groups(g)%retries >= 0 .and. .not. retries_set) then
+                retries = config%test_groups(g)%retries
+                retries_set = .true.
+            end if
+            if (config%test_groups(g)%slow_period > 0 .and. .not. slow_set) then
+                slow_period = config%test_groups(g)%slow_period
+                slow_after = config%test_groups(g)%slow_after
+                slow_set = .true.
+            end if
+        end do
+        value = test_retries_override()
+        if (value >= 0) retries = value
+    end subroutine test_policy
+
+    integer function test_retries_override() result(value)
+        !! FO_TEST_RETRIES (`--retries N`), or -1 when unset or invalid.
+        character(len=16) :: buf
+        integer :: status, ios
+
+        value = cli_retries
+        if (value >= 0) return
+        call get_environment_variable('FO_TEST_RETRIES', buf, status=status)
+        if (status /= 0 .or. len_trim(buf) == 0) return
+        read (buf, *, iostat=ios) value
+        if (ios /= 0 .or. value < 0) value = -1
+    end function test_retries_override
+
+    subroutine test_set_retry_options(retries, strict_flaky)
+        !! The command line's `--retries N` (negative: not given) and
+        !! `--strict-flaky`; they win over the environment and the manifest.
+        integer, intent(in) :: retries
+        logical, intent(in) :: strict_flaky
+
+        cli_retries = retries
+        cli_strict_flaky = strict_flaky
+    end subroutine test_set_retry_options
+
+    logical function test_strict_flaky() result(strict)
+        !! FO_TEST_STRICT_FLAKY (`--strict-flaky`): a FLAKY verdict fails the run.
+        character(len=8) :: buf
+        integer :: status
+
+        strict = cli_strict_flaky
+        if (strict) return
+        call get_environment_variable('FO_TEST_STRICT_FLAKY', buf, status=status)
+        strict = status == 0 .and. len_trim(buf) > 0 .and. buf(1:1) /= '0'
+    end function test_strict_flaky
 
     function timeout_detail(kind, budget, wall_cap, cpu_seconds, wall_seconds) &
             result(text)

@@ -19,7 +19,9 @@ module fo_gfortran_build
         native_record_profile
     use fo_gremlin_execution_view, only: execution_view_copy_app_outputs
     use fo_test_budget, only: test_timeout_seconds, test_budget_seconds, &
-        test_wall_cap_seconds, timeout_detail
+        test_wall_cap_seconds, timeout_detail, test_policy, test_strict_flaky
+    use fo_test_cases, only: CASE_SEP, case_listing_t, case_list, &
+        case_matches, case_run_setup, case_filter_add, NO_PROTOCOL_REASON
     use fx_action_cache, only: cache_set_file_hash_hook
     use fo_compdb, only: compdb_write
     use fx_dag, only: dag_t, dag_find_node, dag_topo_sort, dag_levels, MAX_NODES
@@ -87,6 +89,15 @@ module fo_gfortran_build
         real :: cpu_secs = -1.0
         logical :: flaky = .false.
         logical :: ran = .false.
+        !! Project-relative source, for the test-group match of its policy.
+        character(len=MAX_PATH) :: source = ''
+        !! One listed case of the executable (expand_current_cases): the
+        !! adapter's per-process environment, `;`-prefixed.
+        character(len=:), allocatable :: case_env
+        !! Retries after a failure, and the SLOW bounds (test_policy).
+        integer :: retries = 0
+        integer :: slow_period = 0
+        integer :: slow_after = 0
     end type current_test_t
 
     public :: gfortran_build, gfortran_test
@@ -1130,6 +1141,8 @@ contains
         end if
         call prepare_test_app_outputs(project_dir, execution_cwd, bin_dir, exitcode)
         if (exitcode /= 0) return
+        call prepare_current_cases(execution_cwd, config, selected_names, &
+            n_selected, tests, n_tests)
         call system_clock(wall0, wall_rate)
         call run_current_team(project_dir, execution_cwd, config, tests, n_tests)
         call system_clock(wall1)
@@ -1423,6 +1436,7 @@ contains
             end if
             n_tests = n_tests + 1
             tests(n_tests)%name = name
+            tests(n_tests)%source = units(i)%filename
             tests(n_tests)%bin = trim(bin_dir)//'/'//trim(name)
             tests(n_tests)%args = manifest_test_args(config, name)
             if (has_dispatcher .and. &
@@ -1434,6 +1448,123 @@ contains
             call make_tmpfile('fo_test_case', tests(n_tests)%log)
         end do
     end subroutine select_current_tests
+
+    subroutine prepare_current_cases(execution_cwd, config, selected_names, &
+            n_selected, tests, n_tests)
+        !! Retry and SLOW policy of every selected test, then each executable
+        !! that lists its cases (fo_test_cases) becomes one test per case,
+        !! `exe::case`, filtered by the `exe::glob` names selected. An
+        !! executable run with arguments, or without a listing, stays one test.
+        !! A filter that cannot be applied is a failed test with the reason.
+        character(len=*), intent(in) :: execution_cwd, selected_names(:)
+        type(fpm_config_t), intent(in) :: config
+        integer, intent(in) :: n_selected
+        type(current_test_t), allocatable, intent(inout) :: tests(:)
+        integer, intent(inout) :: n_tests
+
+        type(current_test_t), allocatable :: out(:)
+        type(case_listing_t) :: listing
+        character(len=:), allocatable :: filter, args, env
+        integer :: i, k, n
+        logical :: any_case
+
+        allocate (out(max(1, n_tests)))
+        n = 0
+        do i = 1, n_tests
+            call test_policy(config, trim(tests(i)%name), trim(tests(i)%source), &
+                tests(i)%retries, tests(i)%slow_period, tests(i)%slow_after)
+            filter = selected_filter(tests(i)%name, selected_names, n_selected)
+            if (len_trim(tests(i)%args) > 0) then
+                if (len(filter) > 0) then
+                    call fail_test(tests(i), 'cannot select cases of '// &
+                        trim(tests(i)%name)//': it runs with arguments')
+                end if
+                call append_test(tests(i))
+                cycle
+            end if
+            call case_list(trim(tests(i)%bin), execution_cwd, listing)
+            if (size(listing%names) == 0) then
+                if (len(filter) > 0) then
+                    call fail_test(tests(i), 'cannot select cases of '// &
+                        trim(tests(i)%name)//': '//listing%reason)
+                else if (listing%reason /= NO_PROTOCOL_REASON .and. &
+                    listing%reason /= 'cannot read the executable') then
+                    call progress_note('fo: '//trim(tests(i)%name)// &
+                        ' runs as one case: '//listing%reason)
+                end if
+                call append_test(tests(i))
+                cycle
+            end if
+            any_case = .false.
+            do k = 1, size(listing%names)
+                if (.not. case_matches(filter, listing%names(k)%s)) cycle
+                any_case = .true.
+                call case_run_setup(listing%adapter, listing%names(k)%s, args, env)
+                call append_test(tests(i))
+                out(n)%name = trim(tests(i)%name)//CASE_SEP//listing%names(k)%s
+                out(n)%args = args
+                if (len(env) > 0) out(n)%case_env = ';'//env
+                call make_tmpfile('fo_test_case', out(n)%log)
+                call test_policy(config, trim(out(n)%name), trim(out(n)%source), &
+                    out(n)%retries, out(n)%slow_period, out(n)%slow_after)
+            end do
+            if (.not. any_case) then
+                call fail_test(tests(i), 'no case of '//trim(tests(i)%name)// &
+                    ' matches '//filter)
+                call append_test(tests(i))
+            end if
+        end do
+        call move_alloc(out, tests)
+        n_tests = n
+
+    contains
+
+        subroutine append_test(test)
+            type(current_test_t), intent(in) :: test
+            type(current_test_t), allocatable :: grown(:)
+
+            if (n >= size(out)) then
+                allocate (grown(2*size(out)))
+                grown(1:n) = out(1:n)
+                call move_alloc(grown, out)
+            end if
+            n = n + 1
+            out(n) = test
+        end subroutine append_test
+
+    end subroutine prepare_current_cases
+
+    subroutine fail_test(test, message)
+        !! A test that cannot run: failed with the message as its output.
+        type(current_test_t), intent(inout) :: test
+        character(len=*), intent(in) :: message
+        integer :: u, ios
+
+        test%ran = .true.
+        test%exit = 1
+        test%retries = 0
+        open (newunit=u, file=trim(test%log), status='replace', action='write', &
+            iostat=ios)
+        if (ios /= 0) return
+        write (u, '(a)') 'fo: '//message
+        close (u)
+    end subroutine fail_test
+
+    function selected_filter(name, selected_names, n_selected) result(filter)
+        !! The newline-joined case globs of the `name::glob` selections.
+        character(len=*), intent(in) :: name, selected_names(:)
+        integer, intent(in) :: n_selected
+        character(len=:), allocatable :: filter
+        integer :: i, p
+
+        filter = ''
+        do i = 1, n_selected
+            p = index(selected_names(i), CASE_SEP)
+            if (p < 2) cycle
+            if (trim(name) /= selected_names(i)(1:p - 1)) cycle
+            call case_filter_add(filter, trim(selected_names(i)(p + len(CASE_SEP):)))
+        end do
+    end function selected_filter
 
     subroutine run_current_team(project_dir, execution_cwd, config, tests, n_tests)
         !! Run independent test executables as an OpenMP team, `FO_JOBS`-wide.
@@ -1521,24 +1652,32 @@ contains
     end subroutine run_current_team
 
     subroutine rerun_failed_current_test(execution_cwd, config, test)
+        !! Retry a failed test alone, up to its retries times: a pass after a
+        !! failure is FLAKY, never PASS. A timeout is not retried.
         character(len=*), intent(in) :: execution_cwd
         type(fpm_config_t), intent(in) :: config
         type(current_test_t), intent(inout) :: test
 
         character(len=512) :: rerun_log
+        integer :: attempt
 
         if (.not. test%ran) return
         if (test%exit == 0 .or. test%exit == 124) return
-        call make_tmpfile('fo_test_rerun', rerun_log)
-        call run_test_binary(execution_cwd, test%bin, test%args, &
-            rerun_log, config, is_slow_test(test%name), test%rerun_exit)
-        call delete_tmpfile(rerun_log)
-        if (test%rerun_exit == 0) then
-            test%flaky = .true.
-            test%exit = 0
-        else
+        do attempt = 1, test%retries
+            call make_tmpfile('fo_test_rerun', rerun_log)
+            call run_test_binary(execution_cwd, test%bin, test%args, &
+                rerun_log, config, is_slow_test(test%name), test%rerun_exit, &
+                case_env=test%case_env, slow_period=test%slow_period, &
+                slow_after=test%slow_after, label=trim(test%name))
+            call delete_tmpfile(rerun_log)
+            if (test%rerun_exit == 0) then
+                test%flaky = .true.
+                test%exit = 0
+                return
+            end if
             test%exit = test%rerun_exit
-        end if
+            if (test%exit == 124) return
+        end do
     end subroutine rerun_failed_current_test
 
     subroutine run_one_current_test(project_dir, execution_cwd, config, test, &
@@ -1557,8 +1696,11 @@ contains
         character(len=24) :: secs_text
 
         call system_clock(clk0, clk_rate)
+        if (test%ran) return
         call run_test_binary(execution_cwd, test%bin, test%args, &
-            test%log, config, is_slow_test(test%name), test%exit, test%cpu_secs)
+            test%log, config, is_slow_test(test%name), test%exit, test%cpu_secs, &
+            case_env=test%case_env, slow_period=test%slow_period, &
+            slow_after=test%slow_after, label=trim(test%name))
         call system_clock(clk1, clk_rate)
         test%ran = .true.
         if (clk_rate > 0) test%secs = real(clk1 - clk0) / real(clk_rate)
@@ -1619,6 +1761,9 @@ contains
                     call append_test_status(log_file, tests(i)%name, tests(i)%exit)
                 end if
                 if (exitcode == 0) exitcode = tests(i)%exit
+            end if
+            if (tests(i)%flaky .and. test_strict_flaky()) then
+                if (exitcode == 0) exitcode = 1
             end if
             if (tests(i)%flaky) then
                 call append_flaky_status(log_file, tests(i)%name)
@@ -3667,20 +3812,26 @@ contains
     end function team_openmp_env
 
     subroutine run_test_binary(execution_cwd, bin_path, arg_lines, log_file, &
-            config, slow, exitcode, cpu_seconds)
+            config, slow, exitcode, cpu_seconds, case_env, slow_period, &
+            slow_after, label)
         !! Run one test binary under its CPU budget and wall-clock cap (see
         !! fo_test_budget). A timeout returns 124 and appends a line naming the
         !! limit that fired to the test's own log. cpu_seconds is the CPU time
-        !! the test used, negative when unknown.
+        !! the test used, negative when unknown. case_env: extra per-process
+        !! environment (`;`-prefixed assignments) that selects one listed case.
+        !! slow_period > 0: a SLOW progress line every slow_period seconds,
+        !! and termination (124) after slow_after periods.
         character(len=*), intent(in) :: execution_cwd, bin_path, arg_lines, log_file
         type(fpm_config_t), intent(in) :: config
         logical, intent(in) :: slow
         integer, intent(out) :: exitcode
         real, intent(out), optional :: cpu_seconds
+        character(len=*), intent(in), optional :: case_env, label
+        integer, intent(in), optional :: slow_period, slow_after
 
-        character(len=:), allocatable :: packed
+        character(len=:), allocatable :: packed, extra_env
         character(len=512) :: test_tmp
-        integer :: n_args, budget, wall_cap, kind, u, ios
+        integer :: n_args, budget, wall_cap, kind, u, ios, period
         real :: cpu_s, wall_s
 
         packed = ''
@@ -3689,16 +3840,32 @@ contains
         call argv_push_split_nl(packed, n_args, arg_lines)
         budget = test_budget_seconds(config, slow)
         wall_cap = test_wall_cap_seconds(config, budget)
+        period = 0
+        if (present(slow_period)) period = slow_period
+        if (period > 0) then
+            wall_cap = min(wall_cap, period*max(1, slow_after))
+            budget = min(budget, wall_cap)
+        end if
+        extra_env = ''
+        if (present(case_env)) extra_env = case_env
         ! A private TMPDIR per run: scratch the test leaves behind, including
         ! logs nested fo commands keep for failures, is removed when the run
         ! passes and kept as evidence when it fails.
         call make_tmpfile('fo-test-tmp', test_tmp)
         call fs_make_dir(trim(test_tmp))
-        call process_run_argv_logged(execution_cwd, packed, n_args, log_file, .true., &
-            wall_cap, exitcode, env_extra='TMPDIR='//trim(test_tmp)// &
-            team_openmp_env(), &
-            cpu_budget_s=budget, timeout_kind=kind, cpu_seconds=cpu_s, &
-            wall_seconds=wall_s)
+        if (period > 0 .and. present(label)) then
+            call process_run_argv_logged(execution_cwd, packed, n_args, log_file, &
+                .true., wall_cap, exitcode, env_extra='TMPDIR='//trim(test_tmp)// &
+                team_openmp_env()//extra_env, cpu_budget_s=budget, &
+                timeout_kind=kind, cpu_seconds=cpu_s, wall_seconds=wall_s, &
+                slow_period_s=period, slow_label=label)
+        else
+            call process_run_argv_logged(execution_cwd, packed, n_args, log_file, &
+                .true., wall_cap, exitcode, env_extra='TMPDIR='//trim(test_tmp)// &
+                team_openmp_env()//extra_env, &
+                cpu_budget_s=budget, timeout_kind=kind, cpu_seconds=cpu_s, &
+                wall_seconds=wall_s)
+        end if
         if (exitcode == 0) call fs_remove_tree(trim(test_tmp))
         if (present(cpu_seconds)) cpu_seconds = cpu_s
         if (exitcode /= 124) return
@@ -4531,12 +4698,27 @@ contains
 
         found = .false.
         do i = 1, n_selected
-            if (trim(name) == trim(selected_names(i))) then
+            ! `exe::case` selects the executable; the runner filters its cases.
+            if (trim(name) == trim(selected_exe(selected_names(i)))) then
                 found = .true.
                 return
             end if
         end do
     end function selected_test
+
+    function selected_exe(selected) result(exe)
+        !! The executable part of a selected name, which may be `exe::case`.
+        character(len=*), intent(in) :: selected
+        character(len=:), allocatable :: exe
+        integer :: p
+
+        p = index(selected, CASE_SEP)
+        if (p > 1) then
+            exe = trim(selected(1:p - 1))
+        else
+            exe = trim(selected)
+        end if
+    end function selected_exe
 
     subroutine collect_current_lib_objs(project_dir, config, obj_dir, dep_includes, &
             n_dep_includes, dep_objs, n_dep_objs, lib_objs, n_lib_objs)

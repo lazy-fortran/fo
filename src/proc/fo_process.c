@@ -87,17 +87,23 @@ static int timespec_at_or_after(const struct timespec *lhs,
            (lhs->tv_sec == rhs->tv_sec && lhs->tv_nsec >= rhs->tv_nsec);
 }
 
-static void emit_heartbeat(const char *log_file) {
-    static const char message[] =
-        "fo: command still running; output is captured\n";
+static void emit_heartbeat_text(const char *log_file, const char *message,
+                                size_t length) {
     int fd;
 
-    write(STDERR_FILENO, message, sizeof(message) - 1);
+    write(STDERR_FILENO, message, length);
     if (!has_text(log_file) || strcmp(log_file, "/dev/null") == 0) return;
     fd = open(log_file, O_WRONLY | O_CREAT | O_APPEND, 0666);
     if (fd < 0) return;
-    write(fd, message, sizeof(message) - 1);
+    write(fd, message, length);
     close(fd);
+}
+
+static void emit_heartbeat(const char *log_file) {
+    static const char message[] =
+        "fo: command still running; output is captured\n";
+
+    emit_heartbeat_text(log_file, message, sizeof(message) - 1);
 }
 
 static void emit_spawn_error(const char *log_file, const char *operation,
@@ -619,6 +625,7 @@ struct run_budget {
     int kind;          /* out: 0 none, 1 CPU, 2 wall cap, 3 CPU unmeasurable */
     long long cpu_ms;  /* out: child CPU time at exit or kill, -1 if unknown */
     long long wall_ms; /* out: wall time at the kill */
+    const char *slow_label; /* in: SLOW progress line label, NULL for none */
 };
 
 /* User CPU time of a live (or zombie) child over all of its threads, in
@@ -1241,7 +1248,17 @@ static int run_argv(const char *cwd, char *const argv[], const char *log_file,
             }
             if (heartbeat_s > 0 &&
                 timespec_at_or_after(&now, &next_heartbeat)) {
-                emit_heartbeat(log_file);
+                if (budget != NULL && has_text(budget->slow_label)) {
+                    char message[512];
+                    int n = snprintf(message, sizeof(message),
+                                     "fo: SLOW %.400s running for %lds\n",
+                                     budget->slow_label,
+                                     (long)(now.tv_sec - start.tv_sec));
+                    if (n > 0 && n < (int)sizeof(message))
+                        emit_heartbeat_text(log_file, message, (size_t)n);
+                } else {
+                    emit_heartbeat(log_file);
+                }
                 do {
                     add_seconds(&next_heartbeat, heartbeat_s);
                 } while (timespec_at_or_after(&now, &next_heartbeat));
@@ -1478,10 +1495,28 @@ void fo_c_run_argv_budget(const char *cwd, const char *args, int args_len,
                           const char *env_extra, int *exitcode,
                           int *timeout_kind, long long *cpu_ms,
                           long long *wall_ms) {
-    struct run_budget budget = {cpu_budget_s, 0, -1, 0};
+    struct run_budget budget = {cpu_budget_s, 0, -1, 0, NULL};
 
     run_packed_argv(cwd, args, args_len, n_args, log_file, append, timeout_s,
                     heartbeat_s, env_extra, &budget, exitcode);
+    *timeout_kind = budget.kind;
+    *cpu_ms = budget.cpu_ms;
+    *wall_ms = budget.wall_ms;
+}
+
+/* As fo_c_run_argv_budget, with a SLOW progress line "fo: SLOW <label>
+   running for Ns" on standard error and in the log every slow_period_s
+   seconds the child runs (#217). */
+void fo_c_run_argv_slow(const char *cwd, const char *args, int args_len,
+                        int n_args, const char *log_file, int append,
+                        int cpu_budget_s, int timeout_s, int slow_period_s,
+                        const char *slow_label, const char *env_extra,
+                        int *exitcode, int *timeout_kind, long long *cpu_ms,
+                        long long *wall_ms) {
+    struct run_budget budget = {cpu_budget_s, 0, -1, 0, slow_label};
+
+    run_packed_argv(cwd, args, args_len, n_args, log_file, append, timeout_s,
+                    slow_period_s, env_extra, &budget, exitcode);
     *timeout_kind = budget.kind;
     *cpu_ms = budget.cpu_ms;
     *wall_ms = budget.wall_ms;

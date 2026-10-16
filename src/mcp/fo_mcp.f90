@@ -792,7 +792,7 @@ contains
             end if
             call progress_suppress(.true.)
             call project_run_cases(b, model, selection%cases, '', .false., &
-                tmpfile, exitcode)
+                tmpfile, exitcode, selection)
             call progress_suppress(.false.)
         end if
 

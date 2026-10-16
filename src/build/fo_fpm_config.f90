@@ -101,6 +101,11 @@ module fo_fpm_config
         character(len=:), allocatable :: name
         type(fpm_string_t), allocatable :: tests(:)
         type(fpm_string_t), allocatable :: inputs(:)
+        !> Retries after a failure (-1: the [extra.fo] value), and the SLOW
+        !> warning period and terminate-after count (0: unset).
+        integer :: retries = -1
+        integer :: slow_period = 0
+        integer :: slow_after = 0
     end type fpm_test_group_t
 
     type :: fpm_config_t
@@ -164,6 +169,11 @@ module fo_fpm_config
         integer :: test_timeout = 0
         integer :: slow_test_timeout = 0
         integer :: test_wall_timeout = 0
+        ! [extra.fo] test-retries and slow-timeout = { period, terminate-after }
+        ! (#217); -1 / 0 leave fo's defaults.
+        integer :: test_retries = -1
+        integer :: slow_period = 0
+        integer :: slow_after = 0
         !> [extra.fo] debug-info = "g0" | "line-tables" | "full": how much
         !> debug info the default profile emits. A project declares its own
         !> budget here so the diet is visible in the manifest, not only in fo's
@@ -360,6 +370,9 @@ contains
         c%test_timeout = 0
         c%slow_test_timeout = 0
         c%test_wall_timeout = 0
+        c%test_retries = -1
+        c%slow_period = 0
+        c%slow_after = 0
         c%debug_info = ''
         c%pic = .false.
         c%link_shared = .false.
@@ -1491,6 +1504,13 @@ contains
             config%slow_test_timeout = positive_seconds(val, 'slow-test-timeout')
         case ('test-wall-timeout')
             config%test_wall_timeout = positive_seconds(val, 'test-wall-timeout')
+        case ('test-retries')
+            config%test_retries = retry_count(val)
+            if (config%test_retries < 0) config%manifest_parse_error = &
+                '[extra.fo] test-retries must be a whole number >= 0'
+        case ('slow-timeout')
+            call parse_slow_timeout(val, config%slow_period, config%slow_after, &
+                config%manifest_parse_error)
         case ('dispatcher')
             call extract_string(val, str_val)
             config%dispatcher = trim(str_val)
@@ -1697,8 +1717,15 @@ contains
                 seen_inputs = .true.
                 if (len_trim(err) == 0) &
                     call parse_string_list(items(i)%s, group%inputs, err)
+            case ('retries')
+                group%retries = retry_count(items(i)%s)
+                if (group%retries < 0) err = 'retries must be a whole number >= 0'
+            case ('slow-timeout')
+                call parse_slow_timeout(items(i)%s, group%slow_period, &
+                    group%slow_after, err)
             case default
-                err = 'unknown key '//keys(i)%s//' (expected tests, inputs)'
+                err = 'unknown key '//keys(i)%s// &
+                    ' (expected tests, inputs, retries, slow-timeout)'
             end select
             if (len_trim(err) > 0) then
                 config%manifest_parse_error = '[extra.fo.test-groups] '// &
@@ -1940,6 +1967,9 @@ contains
                 call move_alloc(config%test_groups(i)%name, grown(i)%name)
                 call move_alloc(config%test_groups(i)%tests, grown(i)%tests)
                 call move_alloc(config%test_groups(i)%inputs, grown(i)%inputs)
+                grown(i)%retries = config%test_groups(i)%retries
+                grown(i)%slow_period = config%test_groups(i)%slow_period
+                grown(i)%slow_after = config%test_groups(i)%slow_after
             end do
             call move_alloc(grown, config%test_groups)
         end if
@@ -1947,6 +1977,9 @@ contains
         call move_alloc(group%name, config%test_groups(config%n_test_groups)%name)
         call move_alloc(group%tests, config%test_groups(config%n_test_groups)%tests)
         call move_alloc(group%inputs, config%test_groups(config%n_test_groups)%inputs)
+        config%test_groups(config%n_test_groups)%retries = group%retries
+        config%test_groups(config%n_test_groups)%slow_period = group%slow_period
+        config%test_groups(config%n_test_groups)%slow_after = group%slow_after
     end subroutine append_group
 
     subroutine validate_extra_fo(config)
@@ -2130,6 +2163,54 @@ contains
                 trim(key)
         end select
     end subroutine parse_fo_input
+
+    integer function retry_count(val) result(n)
+        !! A whole number of retries >= 0, else -1 (unset).
+        character(len=*), intent(in) :: val
+        integer :: ios
+
+        read (val, *, iostat=ios) n
+        if (ios /= 0 .or. n < 0) n = -1
+    end function retry_count
+
+    subroutine parse_slow_timeout(val, period, after, err)
+        !! `{ period = SECONDS, terminate-after = K }`: warn SLOW after every
+        !! period seconds, terminate after K periods (K defaults to 1).
+        character(len=*), intent(in) :: val
+        integer, intent(inout) :: period, after
+        character(len=*), intent(inout) :: err
+        type(fpm_string_t), allocatable :: keys(:), items(:)
+        integer :: i, n, ios, value
+
+        call split_fo_table(val, keys, items, n, err)
+        if (len_trim(err) > 0) then
+            err = 'slow-timeout: '//trim(err)
+            return
+        end if
+        period = 0
+        after = 1
+        do i = 1, n
+            read (items(i)%s, *, iostat=ios) value
+            if (ios /= 0 .or. value < 1) then
+                err = 'slow-timeout '//keys(i)%s//' must be a whole number >= 1'
+                return
+            end if
+            select case (keys(i)%s)
+            case ('period')
+                period = value
+            case ('terminate-after')
+                after = value
+            case default
+                err = 'slow-timeout: unknown key '//keys(i)%s// &
+                    ' (expected period, terminate-after)'
+                return
+            end select
+        end do
+        if (period < 1) then
+            err = 'slow-timeout requires period'
+            after = 0
+        end if
+    end subroutine parse_slow_timeout
 
     integer function positive_seconds(val, key) result(seconds)
         character(len=*), intent(in) :: val, key

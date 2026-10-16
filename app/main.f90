@@ -25,7 +25,9 @@ program fo_main
     use fo_project_load, only: project_has_model, &
         project_run_cases, project_list_text, project_list_json, &
         project_select, project_run_affected, &
-        project_load, project_inventory_cases, project_build_cases
+        project_load, project_inventory_cases, project_build_cases, &
+        project_list_expand
+    use fo_test_budget, only: test_set_retry_options
     use fo_fmt, only: fmt_sources, FMT_SELECT_ALL, FMT_SELECT_FILES, FMT_SELECT_CHANGED, &
         write_git_changed_source_list
     use fo_process, only: process_exit, process_run_argv_logged, argv_push, &
@@ -509,6 +511,9 @@ contains
         write (out, '(a)') '                  drop cases whose labels match RE (repeat: AND)'
         write (out, '(a)') '  --layer NAME    select cases of layer NAME (repeat: union)'
         write (out, '(a)') '  --list          print the selection and build plan; no build'
+        write (out, '(a)') '                  (cases of built executables are listed)'
+        write (out, '(a)') '  --retries N     retry a failed test N times; pass after fail is FLAKY'
+        write (out, '(a)') '  --strict-flaky  a FLAKY test fails the run'
         write (out, '(a)') '  --random N      sample N tests without replacement'
         write (out, '(a)') '  --seed S        replay a random sample with seed S'
         write (out, '(a)') '  --verbose       show all tests (default for named runs)'
@@ -887,6 +892,9 @@ contains
             case ('--case')
                 call get_command_argument(i + 1, arg)
                 k = model_find_case(model, trim(arg))
+                ! `exe::case` builds what its executable needs.
+                if (k == 0 .and. index(arg, '::') > 1) &
+                    k = model_find_case(model, arg(1:index(arg, '::') - 1))
                 if (k == 0) then
                     write (error_unit, '(a)') 'fo: unknown test case: '//trim(arg)
                     call process_exit(1)
@@ -1091,6 +1099,8 @@ contains
         logical :: only_changed, include_all, verbose, use_json, skip_next
         logical :: json_full, quiet
         logical :: end_options, flags_seen, list_mode, filtered, no_build
+        logical :: strict_flaky
+        integer :: retries
         type(string_t), allocatable :: widen_reasons(:)
         type(model_request_t) :: request
         type(model_selection_t) :: selection
@@ -1119,6 +1129,8 @@ contains
         end_options = .false.
         list_mode = .false.
         no_build = .false.
+        strict_flaky = .false.
+        retries = -1
         allocate (request%include_labels(0), request%exclude_labels(0), &
             request%layers(0))
         do i = 2, command_argument_count()
@@ -1206,6 +1218,14 @@ contains
                 skip_next = .true.
             case ('--list')
                 list_mode = .true.
+            case ('--strict-flaky')
+                strict_flaky = .true.
+            case ('--retries')
+                call test_option_value(i, '--retries needs N', arg)
+                read (arg, *, iostat=ierr) retries
+                if (ierr /= 0 .or. retries < 0) &
+                    call test_usage_error('invalid --retries N')
+                skip_next = .true.
             case ('--no-build')
                 no_build = .true.
             case ('--only-changed')
@@ -1237,6 +1257,7 @@ contains
                 test_names(n_arg_names) = trim(arg)
             end select
         end do
+        call test_set_retry_options(retries, strict_flaky)
         ! Agent-facing and summary modes get the report only, no live lines.
         if (use_json .or. quiet) call progress_suppress(.true.)
 
@@ -1346,6 +1367,15 @@ contains
                 i=1, n_arg_names)]
         end if
         if (list_mode) then
+            ! Built executables that list their cases show them as cases.
+            if (.not. only_changed .and. random_count == 0) then
+                call project_list_expand(b, all_flags, request, model, selection, &
+                    ierr, message)
+                if (ierr /= 0) then
+                    write (error_unit, '(a)') 'fo: '//message
+                    stop 1
+                end if
+            end if
             if (use_json) then
                 call project_list_json(model, selection, text)
             else
@@ -1368,7 +1398,7 @@ contains
         end if
         call make_tmpfile('fo-test', test_log)
         call project_run_cases(b, model, selection%cases, all_flags, no_build, &
-            test_log, exitcode)
+            test_log, exitcode, selection)
         call report_test_result(exitcode, test_log, &
             (random_count == 0 .and. n_arg_names == 0 .and. .not. filtered .and. &
             .not. verbose .and. .not. only_changed) .or. quiet, use_json, &
