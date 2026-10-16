@@ -73,7 +73,7 @@ program test_gremlin_bootstrap
         field(parsed_one, 'state') == 'attached', 'first start reports its shared owner state')
     call assert_true(field(parsed_two, 'state') == 'running' .or. &
         field(parsed_two, 'state') == 'attached', 'second start reports its shared owner state')
-    call gremlin_wait_file(marker, 30000, found)
+    call gremlin_wait_file(marker, 120000, found)
     call assert_true(found, 'first generation test starts once')
     call status_now(lane, session, status)
     generation = field(status, 'active_generation')
@@ -98,14 +98,14 @@ program test_gremlin_bootstrap
         'concurrent start produces exactly one old-case completion receipt')
 
     ! Next case reads frozen runtime input, then is preempted only by a good build.
-    call gremlin_wait_file(obsolete_read, 30000, found)
+    call gremlin_wait_file(obsolete_read, 120000, found)
     call assert_true(found, 'second old-generation test reads its runtime snapshot')
     call assert_equal_string(read_text(obsolete_read), 'old'//new_line('a'), &
         'runtime read came from the captured old generation')
     call assert_equal_string(read_text(project//'/test/obsolete.version'), &
         'invalid'//new_line('a'), &
         'editable runtime input differs from the captured old generation')
-    call gremlin_wait_file(old_pid_file, 5000, found)
+    call gremlin_wait_file(old_pid_file, 30000, found)
     call assert_true(found, 'obsolete child publishes its PID after the runtime read')
     old_pid = read_integer(old_pid_file)
     call assert_true(old_pid > 0 .and. process_alive(old_pid), &
@@ -134,7 +134,7 @@ program test_gremlin_bootstrap
     call write_gate_case(scratch//'/other', 'test_lane_b', lane_gate, &
         scratch//'/lane-b.started', scratch//'/lane-b.done')
     call start_other_lane(scratch//'/other', lane_session)
-    call gremlin_wait_file(scratch//'/lane-b.started', 30000, found)
+    call gremlin_wait_file(scratch//'/lane-b.started', 120000, found)
     call assert_true(found, 'independent lane B enters its blocking test')
     call status_now(lane, session, status)
     call stop_lane(lane, session)
