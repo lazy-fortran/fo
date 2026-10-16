@@ -130,6 +130,12 @@ module fo_test_harness
             integer(c_size_t), value :: size
         end function c_getcwd
 
+        integer(c_int) function c_setenv(name, value, overwrite) bind(C, name='setenv')
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: name(*), value(*)
+            integer(c_int), value :: overwrite
+        end function c_setenv
+
         integer(c_int) function c_pipe(descriptors, parent_reads) bind(C, name='fo_test_pipe_mode')
             import :: c_int
             integer(c_int), intent(out) :: descriptors(2)
@@ -295,6 +301,7 @@ contains
         type(string_list_t) :: empty_environment
         integer(c_int) :: child
 
+        call ensure_private_admission()
         call make_c_vector(command, pointers, storage)
         if (present(environment)) then
             call make_c_vector(environment, environment_pointers, environment_storage)
@@ -307,12 +314,31 @@ contains
         call assert_true(process_id > 0, 'start fixture process')
     end subroutine spawn_process
 
+    subroutine ensure_private_admission()
+        !! Every child of a test inherits a Gremlin admission domain private to this
+        !! test process, so lanes never queue behind the host-wide work slots held
+        !! by other sessions. A fixture that sets FO_GREMLIN_ADMISSION_DIR itself,
+        !! in the process or in a child environment list, keeps its own domain.
+        logical, save :: done = .false.
+        character(:), allocatable :: domain
+        integer(c_int) :: rc
+
+        if (done) return
+        done = .true.
+        if (len_trim(environment_value('FO_GREMLIN_ADMISSION_DIR')) > 0) return
+        call make_scratch('fo-admission', domain)
+        if (len(domain) == 0) return
+        rc = c_setenv('FO_GREMLIN_ADMISSION_DIR'//c_null_char, domain//c_null_char, 1_c_int)
+        call assert_true(rc == 0, 'set private Gremlin admission domain')
+    end subroutine ensure_private_admission
+
     subroutine spawn_unowned_process(command, directory, process_id)
         type(string_list_t), intent(in) :: command
         character(len=*), intent(in) :: directory
         integer, intent(out) :: process_id
         type(c_ptr), allocatable, target :: pointers(:)
         character(c_char), allocatable, target :: storage(:, :), directory_bytes(:)
+        call ensure_private_admission()
         call make_c_vector(command, pointers, storage)
         call encode_c_string(directory, directory_bytes)
         process_id = int(c_spawn_unowned(pointers, directory_bytes))
@@ -661,6 +687,7 @@ contains
             return
         end if
         if (present(environment)) empty_environment = environment
+        call ensure_private_admission()
         call isolate_git(arguments, empty_environment)
         call make_c_vector(empty_environment, env_pointers, env_storage)
         call make_c_vector(arguments, argument_pointers, argument_storage)
