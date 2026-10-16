@@ -32,11 +32,12 @@ module fo_fpm_model
     use fx_string, only: string_t, to_lower
     use fx_hash, only: sha256_string
     use fo_fpm_config, only: fpm_config_t, fpm_string_t, fpm_config_parse, &
-        fpm_config_allocate
+        fpm_config_allocate, dep_kind, DEP_GIT
     use fo_pattern, only: pattern_glob
     use fo_scan, only: scan_unit_t, scan_dir, is_slow_test, MAX_PATH
     use fo_util, only: read_text_file_alloc
     use fo_build_tree, only: native_output_dir
+    use fo_dep_update, only: dep_acquire_sources
     use fo_dep_resolve, only: resolved_src_t, resolve_dep_srcs, &
         resolve_dev_dep_srcs, MAX_RESOLVED
     use fo_gfortran_build, only: scan_project_test_units, scan_project_app_units, &
@@ -66,6 +67,30 @@ module fo_fpm_model
     end type layering_t
 
 contains
+
+    logical function git_checkout_missing(project_dir, config)
+        !! A Git dependency or dev-dependency of the root whose checkout has no
+        !! manifest below build/dependencies yet.
+        character(len=*), intent(in) :: project_dir
+        type(fpm_config_t), intent(in) :: config
+        integer :: i
+        logical :: present
+
+        git_checkout_missing = .false.
+        do i = 1, config%n_deps + config%n_dev_deps
+            if (i <= config%n_deps) then
+                if (dep_kind(config%deps(i)) /= DEP_GIT) cycle
+                inquire (file=trim(project_dir)//'/build/dependencies/'// &
+                    trim(config%deps(i)%name)//'/fpm.toml', exist=present)
+            else
+                if (dep_kind(config%dev_deps(i - config%n_deps)) /= DEP_GIT) cycle
+                inquire (file=trim(project_dir)//'/build/dependencies/'// &
+                    trim(config%dev_deps(i - config%n_deps)%name)//'/fpm.toml', &
+                    exist=present)
+            end if
+            if (.not. present) git_checkout_missing = .true.
+        end do
+    end function git_checkout_missing
 
     subroutine fpm_model_load(project_dir, model, ierr, message, unlayered, &
             scanned)
@@ -118,6 +143,15 @@ contains
         if (ierr /= 0) then
             message = 'cannot scan library sources'
             return
+        end if
+        ! A clean tree has no Git checkout yet: the model needs their sources, so
+        ! the run acquires them itself instead of relying on an earlier build.
+        if (git_checkout_missing(project_dir, config)) then
+            call dep_acquire_sources(project_dir, ierr)
+            if (ierr /= 0) then
+                message = 'cannot acquire dependencies'
+                return
+            end if
         end if
         allocate (deps(MAX_RESOLVED), devs(MAX_RESOLVED))
         call resolve_dep_srcs(project_dir, deps, n_deps, n_unresolved, ierr)
