@@ -34,7 +34,8 @@ program test_process_monitor_reaps
     pid_path = join_path(scratch, 'orphan.pid')
     script = '( sh -c "echo \$\$ > '//pid_path//'" & ) ; sleep 0.5; ' // &
         'if kill -0 $(cat '//pid_path//') 2>/dev/null; then echo alive; ' // &
-        'else echo gone; fi > '//result_path
+        'else echo gone; fi > '//result_path//'.tmp; ' // &
+        'mv '//result_path//'.tmp '//result_path
     sh = ['s', 'h', c_null_char]
     dash_c = ['-', 'c', c_null_char]
     cwd = ['/', c_null_char]
