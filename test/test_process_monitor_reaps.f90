@@ -61,8 +61,8 @@ program test_process_monitor_reaps
         call sleep_ms(50)
     end do
     call assert_true(file_exists(result_path), 'target reports a verdict')
-    if (file_exists(result_path)) call assert_equal_string(trim(read_text(result_path)), &
-        'gone', 'exited orphan adopted by the monitor is reaped, not a zombie')
+    if (file_exists(result_path)) call assert_equal_string(read_text(result_path), &
+        'gone'//new_line('a'), 'exited orphan adopted by the monitor is reaped, not a zombie')
     call remove_tree(scratch)
     call finish_assertions()
 end program test_process_monitor_reaps
