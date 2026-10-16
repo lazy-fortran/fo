@@ -4167,6 +4167,7 @@ contains
         character(len=512) :: archive_key_parts(3)
         character(len=*), parameter :: archive_environment = 'ZERO_AR_DATE=1'
         integer :: cache_rc, store_rc
+        character(len=1024) :: store_msg
 
         archive_path = ''
         exitcode = 0
@@ -4254,7 +4255,9 @@ contains
             ! public pathname immediately after an independent validation.
             call cache_store_binary(archive_cache, archive_action, stage_archive, store_rc)
             if (store_rc /= 0) then
-                call append_artifact_error(log_file, 'fo: could not record validated archive action')
+                write (store_msg, '(a,i0,a)') 'fo: could not record validated archive action (store status ', &
+                    store_rc, ') in cache '//trim(archive_cache%root_dir)
+                call append_artifact_error(log_file, trim(store_msg))
                 call fs_remove_tree(trim(stage_dir))
                 exitcode = 1
                 return
