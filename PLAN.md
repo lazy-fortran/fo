@@ -1,6 +1,6 @@
 # Fo delivery goals
 
-Updated 2026-10-16 at main `8cec6ed` (audit of 2026-10-15 at `342da71`).
+Updated 2026-10-16 at main `21e4822` (audit of 2026-10-15 at `342da71`).
 Issues define observable success and this plan orders delivery. Apply
 [goals and architectural freedom](doc/GOAL_DRIVEN_DEVELOPMENT.md), choose the
 smallest complete change, and preserve supported behaviour and independent
@@ -88,6 +88,37 @@ packages are on main:
   is unavailable non-interactively, so fixture repositories must disable
   signing (`8cec6ed`). fpm there is in `~/.local/bin`, which non-interactive SSH
   does not put on PATH.
+
+
+### Since `8cec6ed` (2026-10-16)
+
+- **Wave 4:**
+  - Case-level discovery: `exe::case`, fo listing protocol and test-drive adapter, FLAKY with retries and `--strict-flaky`, SLOW warn-then-kill (`aad07e1`, `e64eb50`).
+  - One-shot PASS cache shared with MCP, `-E` filter expressions, `--junit`, `--partition` (`3bf775d`).
+  - Shell-free tests with one compiled fake command and isolated fixture git (`0dcd3ae`..`d42efad`).
+- **Gremlin core:**
+  - The lane owner is one `owner_t` with a short event loop; the supervisor shrank from 5,370 to 957 lines.
+  - MCP and Gremlin share one execution service, and MCP `gremlin_reproduce` no longer blocks the server.
+  - Status JSON is built with the Fx builder (`538a078`..`21e4822`).
+- **Fixed regressions and races:**
+  - Clone events on live inputs looked like edits (`c608258`).
+  - Edits made during a capture were dropped (`839ab98`).
+  - Host-slot contention between test fixtures; reproduce's unbounded slot wait (`3929134`).
+  - The freshness acknowledgement bound (`8493757`).
+  - A gfortran 16 array-constructor heap overflow in a fixture, and an `is_within` out-of-bounds read (`7941a57`).
+  - Tag-pinned git dependencies on a clean cache (`aff0bce`).
+  - The MCP stderr leak, wall-time label, per-run failure logs, JUnit strict-flaky, dev-dependency acquisition, and the PASS cache's extra CMake configure (`7590a83`..`12e2384`).
+- **Upstream:** FortFront `a9e09f92` parses named DO constructs inside DO WHILE bodies (GORILLA `pusher_tetra_poly.f90`).
+- **Evidence:** the full default suite on Darwin passes 173/173 at `21e4822` in 349 s wall. Production code is 72,895 physical lines.
+- **Deployed:** faepmac1 runs `21e4822`; mailuefterl runs `7941a57` until its next Linux checkpoint passes.
+- **Open:**
+  - Stop-aware slot acquisition and lanes that outlive crashed fixtures.
+  - Task-owned lanes (#142) and Gremlin status deltas (#218).
+  - Admission directory garbage collection.
+  - Linux slow fixtures on the host-wide admission directory.
+  - The pFUnit profile for GORILLA.
+  - Windows qualification.
+  - Further #205 reduction.
 
 ## Stage 1: fix every known bug
 
