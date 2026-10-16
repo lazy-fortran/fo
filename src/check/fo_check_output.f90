@@ -7,7 +7,6 @@ module fo_check_output
         json_to_string
     implicit none
     private
-    public :: check_result_text
     public :: check_result_compact_json, check_result_full_json
 
 contains
@@ -26,37 +25,6 @@ contains
             summary = 'fo check did not complete'
         end if
     end function agent_summary
-
-    function check_result_text(res) result(line)
-        type(check_result_t), intent(in) :: res
-        character(len=2048) :: line
-
-        character(len=32) :: modules, cached, changed, affected, elapsed
-
-        write (modules, '(i0)') res%n_modules
-        write (cached, '(i0)') res%n_cached
-        write (changed, '(i0)') res%n_changed
-        write (affected, '(i0)') res%n_affected
-        write (elapsed, '(f12.3)') res%elapsed
-
-        if (res%build_ok .and. res%tests_ok) then
-            line = 'OK modules='//trim(modules)//' cached='//trim(cached)
-            line = trim(line)//' changed='//trim(changed)
-            line = trim(line)//' affected='//trim(affected)
-            if (res%n_in_cycle > 0) then
-                block
-                    character(len=32) :: cyc
-                    write (cyc, '(i0)') res%n_in_cycle
-                    line = trim(line)//' cycle_warning='//trim(cyc)
-                end block
-            end if
-            line = trim(line)//' elapsed_s='//trim(adjustl(elapsed))
-        else if (.not. res%build_ok) then
-            line = 'Build: FAIL '//trim(res%error_msg)
-        else
-            line = 'Tests: FAIL '//trim(res%error_msg)
-        end if
-    end function check_result_text
 
     subroutine compact_members(jb, res)
         !! The members of the compact object, inside an open object.
