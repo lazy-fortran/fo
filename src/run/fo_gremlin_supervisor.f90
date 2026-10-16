@@ -1,144 +1,63 @@
 module fo_gremlin_supervisor
-    use, intrinsic :: iso_fortran_env, only: int64, error_unit, dp => real64
-    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_size_t, c_null_char
-    use fo_build_backend, only: BACKEND_NATIVE, BACKEND_CMAKE, backend_t, &
-        detect_backend, cmake_configure
-    use fo_cmake_generation, only: cmake_registered_names
-    use fo_cache, only: HASH_LEN, cache_digest, cache_store_root
-    use fx_action_result_store, only: action_result_store_t, &
-        action_result_store_init, action_result_maintenance_tick, ACTION_RESULT_OK
-    use fx_immutable_root_compact, only: immutable_store_compact_generation_roots
-    use fx_immutable_store, only: IMMUTABLE_OK
-    use fo_gremlin_context, only: capture_candidate, generation_inventory_restore, &
-        common_generation_cas_root
-    use fo_gremlin_request, only: gremlin_request_t, parse_request, is_hex_digest, &
-        gremlin_json_field
-    use fo_gremlin_case_inputs, only: generation_model_roots, &
-        generation_units_ensure, generation_case_digests_ensure, &
-        generation_case_digest, generation_inventory_changes
-    use fx_string, only: string_t
-    use fx_json_parse, only: json_parser_t, json_event_t, json_parser_init_strict, &
-        json_parser_next, JSON_OBJECT_START, JSON_OBJECT_END, JSON_ARRAY_START, &
-        JSON_ARRAY_END, JSON_KEY, JSON_STRING, JSON_ERROR, JSON_END_OF_INPUT
-    use fo_gremlin_generation, only: generation_t, generation_driver_identity, &
-        generation_model_key
-    use fo_project_load, only: project_has_model, project_load_configured, &
-        project_inventory_cases, project_affected_cases, project_changed_files, &
-        project_expand_cases
-    use fo_project_model, only: model_find_case, model_select, model_request_t, &
-        model_selection_t, SELECT_OK, SELECT_EMPTY
-    use fo_gremlin_log_text, only: gremlin_retain_build_log, gremlin_log_tail
-    use fo_gremlin_retention, only: gremlin_retention_json
-    use fo_gremlin_status_json, only: gremlin_status_json, gremlin_status_enrich, &
-        gremlin_wait_decorate, gremlin_summary_json, gremlin_events_json, &
-        gremlin_failure_json, simple_response => gremlin_simple_response, &
-        error_response => gremlin_error_response
-    use fo_json_object, only: json_value_raw
-    use fx_json_build, only: json_builder_t, json_new, json_escape_string, &
-        array_open => json_array_start, array_close => json_array_end
+    !! The Gremlin request adapter shared by the CLI and MCP: it starts or
+    !! stops the lane owner (fo_gremlin_owner), answers status, wait, events
+    !! and failures from the published state and receipts, and runs one-off
+    !! reproductions of retained generations.
+    use, intrinsic :: iso_fortran_env, only: int64
+    use fo_build_backend, only: BACKEND_CMAKE, backend_t, detect_backend, cmake_configure
+    use fo_cache, only: HASH_LEN
+    use fo_driver, only: driver_pin_t, driver_pin_current, driver_pin_existing
+    use fo_exec_service, only: exec_job_t, exec_start, exec_poll, exec_cancel, &
+        exec_clock_ms, EXEC_UNCANCELLED
+    use fo_fs, only: fs_make_dir, fs_sleep_ms
+    use fo_gremlin_campaign, only: discover_campaign, case_wall_timeout, &
+        build_command, case_command, append_execution_provenance, &
+        acquire_heavy_work_slot, release_heavy_work_slot, release_generation_lease, &
+        request_policy_key, push_scope_args, log_path, gremlin_attach_response
+    use fo_gremlin_context, only: generation_inventory_restore, common_generation_cas_root
+    use fo_gremlin_coverage, only: coverage_read_view_path, COVERAGE_OK, &
+        COVERAGE_NOT_FOUND
+    use fo_gremlin_coverage_view, only: gremlin_coverage_view_t
     use fo_gremlin_execution_view, only: execution_view_t, execution_view_create, &
         execution_view_release
-    use fo_driver, only: driver_pin_t, driver_pin_current, driver_pin_existing
-    use fo_change_watch, only: change_watch_t, change_watch_init, &
-        change_watch_poll, change_watch_close
-    use fo_gremlin_journal, only: journal_append, journal_read_page, journal_read_all, &
-        journal_compact_tail, journal_record_t, JOURNAL_OK, JOURNAL_INVALID, &
-        JOURNAL_MAX_RECORD_BYTES
-    use fo_gremlin_coverage, only: coverage_epoch_t, coverage_open, &
-        coverage_next_chunk, coverage_record, coverage_record_path, &
-        coverage_recover_running, COVERAGE_OK
-    use fo_gremlin_coverage, only: coverage_read_view_path, COVERAGE_NOT_FOUND
-    use fo_gremlin_coverage_view, only: gremlin_coverage_view_t
-    use fo_gremlin_readiness, only: gremlin_readiness_input_t, gremlin_readiness_t, &
-        gremlin_readiness_compute, gremlin_wait_satisfied, gremlin_wait_code, &
-        gremlin_phase_name, gremlin_health_name, gremlin_verification_name, &
-        GREMLIN_PHASE_STARTING, GREMLIN_PHASE_BUILDING, GREMLIN_PHASE_TESTING, &
-        GREMLIN_PHASE_QUIESCENT, GREMLIN_PHASE_STOPPED, GREMLIN_PHASE_FAILED, &
-        GREMLIN_HEALTH_FAILURE, GREMLIN_VERIFY_ORDINARY, &
+    use fo_gremlin_generation, only: generation_t, generation_driver_identity
+    use fo_gremlin_journal, only: journal_read_page, journal_read_all, &
+        journal_record_t, JOURNAL_OK
+    use fo_gremlin_lifecycle, only: gremlin_freshness_check, gremlin_lifecycle_event_t, &
+        gremlin_lifecycle_read_page, LIFECYCLE_OK
+    use fo_gremlin_log_text, only: gremlin_retain_build_log, gremlin_log_tail
+    use fo_gremlin_owner, only: run_owner
+    use fo_gremlin_readiness, only: gremlin_readiness_t, gremlin_wait_satisfied, &
+        gremlin_wait_code, GREMLIN_PHASE_STARTING, GREMLIN_PHASE_BUILDING, &
+        GREMLIN_PHASE_TESTING, GREMLIN_PHASE_QUIESCENT, GREMLIN_PHASE_STOPPED, &
+        GREMLIN_PHASE_FAILED, GREMLIN_HEALTH_FAILURE, GREMLIN_VERIFY_ORDINARY, &
         GREMLIN_VERIFY_FULL
-    use fo_gremlin_lifecycle, only: gremlin_freshness_update, &
-        gremlin_freshness_check, gremlin_lifecycle_event_t, &
-        gremlin_lifecycle_append, gremlin_lifecycle_read_page, &
-        gremlin_lifecycle_make_id, LIFECYCLE_OK, LIFECYCLE_INVALID, &
-        LIFECYCLE_MAX_EVENT
-    use fo_gremlin_policy, only: shuffle_gremlin_tests, GREMLIN_POLICY_OK, &
-        GREMLIN_NONMANDATORY_LIMIT
-    use fo_gremlin_state, only: gremlin_session_t, gremlin_lease_t, &
-        gremlin_session_acquire, &
-        gremlin_session_publish, gremlin_session_read, gremlin_session_release, &
-        gremlin_session_recovery_complete, gremlin_session_state_dir, &
-        gremlin_session_request_stop, gremlin_session_stop_requested, &
-        gremlin_lease_release, gremlin_lease_group_t, &
-        gremlin_host_lease_acquire_weighted, gremlin_host_lease_release, &
-        gremlin_generation_lease_acquire_at, gremlin_generation_pin_at, &
-        gremlin_generation_prune_inactive, &
-        GREMLIN_STATE_TEXT_MAX
-    use fo_scan, only: is_slow_test
-    use fo_test_budget, only: test_budget_seconds, test_wall_cap_seconds
-    use fo_fpm_config, only: fpm_config_t, fpm_config_parse
-    use fo_process, only: argv_push, process_cancel_pid, &
-        process_poll_pid, process_reap_adopted_scope_zombies, &
-        process_start_argv_logged, process_set_async_scope, process_detect_nproc, &
-        process_scope_t, process_scope_begin, process_scope_end
-    use fo_scan_types, only: MAX_PATH
-    use fo_util, only: json_bool, json_int
-    use fx_dag, only: MAX_NODES
-    use fo_fs, only: fs_make_dir, fs_sleep_ms, fs_remove_tree
+    use fo_gremlin_receipts, only: NAME_LEN, PATH_LEN, record_receipt, &
+        compute_readiness, lifecycle_path_for_session, status_is_failure, &
+        runner_case_outcome
+    use fo_gremlin_request, only: gremlin_request_t, parse_request, is_hex_digest, &
+        gremlin_json_field
     use fo_gremlin_session, only: gremlin_resolve_read_session, &
-        gremlin_load_terminal_session, gremlin_get_session_journal_path, &
-        gremlin_stage_recovery_journal, gremlin_recover_owner_journal, &
-        gremlin_publish_terminal_snapshot, gremlin_release_stopped_session
+        gremlin_load_terminal_session, gremlin_stage_recovery_journal
+    use fo_gremlin_state, only: gremlin_session_t, gremlin_lease_t, &
+        gremlin_lease_group_t, gremlin_session_acquire, gremlin_session_read, &
+        gremlin_session_release, gremlin_session_state_dir, &
+        gremlin_session_request_stop, gremlin_session_stop_requested, &
+        gremlin_generation_lease_acquire_at, gremlin_generation_pin_at, &
+        GREMLIN_STATE_TEXT_MAX
+    use fo_gremlin_status_json, only: gremlin_status_enrich, gremlin_wait_decorate, &
+        gremlin_summary_json, gremlin_events_json, gremlin_failure_json, &
+        simple_response => gremlin_simple_response, &
+        error_response => gremlin_error_response
+    use fo_json_object, only: json_value_raw
+    use fo_process, only: argv_push, process_poll_pid, process_scope_t, &
+        process_scope_begin, process_scope_end
+    use fo_util, only: int_text
+    use fx_dag, only: MAX_NODES
+    use fx_json_build, only: json_builder_t, json_new, json_escape_string, &
+        array_open => json_array_start, array_close => json_array_end
     implicit none
     private
-
-    integer, parameter :: NAME_LEN = 1024, PATH_LEN = 4096
-    integer, parameter :: GREMLIN_HISTORY_LIMIT = 128
-    integer, parameter :: GREMLIN_POLICY_RECEIPT_LIMIT = 512
-    integer, parameter :: GREMLIN_MIN_RECEIPT_LIMIT = 16
-    integer, parameter :: GREMLIN_HEAVY_LANE_CAPACITY = 2
-    !! Upper bound of concurrently running case children in one lane.
-    integer, parameter :: GREMLIN_MAX_LANE_JOBS = 16
-    character(len=*), parameter :: GREMLIN_HEAVY_LEASE = 'gremlin-heavy-work'
-
-
-    type :: child_t
-        integer :: pid = 0
-        integer :: campaign = 0
-        integer :: case_index = 0
-        integer :: seed = 0
-        character(len=PATH_LEN) :: log_file = ''
-        character(len=NAME_LEN) :: case_name = ''
-        type(execution_view_t) :: execution_view
-        logical :: gate_required = .false.
-        real(dp) :: started_at = 0.0_dp
-        ! Not launched: an earlier generation's PASS receipt with the same
-        ! case input closure digest is reused (see case_reuse_source).
-        logical :: reused = .false.
-    end type child_t
-
-    type :: case_index_entry_t
-        !! Latest campaign receipt and latest PASS of one case.
-        character(len=HASH_LEN) :: last_digest = '', last_generation = ''
-        character(len=16) :: last_status = ''
-        character(len=HASH_LEN) :: pass_digest = '', pass_generation = ''
-    end type case_index_entry_t
-
-    !! Running cases of the owner process, set by set_running_summary and
-    !! embedded in every published state.
-    integer, save :: running_summary_count = 0
-    !! Parallel fan-out of this owner; > 1 makes the lane hold the whole host
-    !! heavy-work capacity (see gremlin_heavy_work_weight).
-    integer, save :: lane_admission_jobs = 1
-    character(len=NAME_LEN), save :: running_summary_names(GREMLIN_MAX_LANE_JOBS) = ''
-
-    interface
-        integer(c_int) function c_publish_file(path, data, data_len) &
-                bind(C, name='fo_c_gremlin_coverage_publish')
-            import :: c_char, c_int, c_size_t
-            character(kind=c_char), intent(in) :: path(*), data(*)
-            integer(c_size_t), value :: data_len
-        end function c_publish_file
-    end interface
 
     public :: gremlin_handle, runner_case_outcome
 
@@ -237,14 +156,15 @@ contains
 
         type(gremlin_session_t) :: session
         type(driver_pin_t) :: driver_pin
-        character(len=PATH_LEN) :: message, status_text, owner_start
+        type(exec_job_t) :: launcher
+        character(len=GREMLIN_STATE_TEXT_MAX) :: status_text
+        character(len=PATH_LEN) :: message, owner_start, log_file
         character(len=128) :: session_id
         character(len=HASH_LEN) :: stored_policy
-        integer :: ierr, owner_pid, pid, spawn_exit, i, n_args
+        integer :: ierr, owner_pid, spawn_exit, i, n_args
         integer, parameter :: READY_WAIT_POLLS = 1200
         logical :: ready, owner_exited
         character(len=:), allocatable :: packed
-        character(len=PATH_LEN) :: executable, log_file
 
         exitcode = 0
         call gremlin_session_acquire(project_dir, trim(request%lane_id), &
@@ -255,32 +175,8 @@ contains
             return
         end if
         if (session%attached) then
-            do i = 1, 60
-                call gremlin_session_read(project_dir, trim(request%lane_id), session_id, &
-                    owner_pid, owner_start, status_text, ierr, message)
-                if (ierr == 0 .and. len_trim(status_text) > 0) exit
-                call fs_sleep_ms(50)
-            end do
-            if (ierr /= 0) then
-                call error_response('start', trim(message), response)
-                exitcode = 2
-                return
-            end if
-            if (len_trim(status_text) == 0) then
-                call error_response('start', 'active Gremlin owner has not published state', &
-                    response)
-                exitcode = 2
-                return
-            end if
-            call gremlin_json_field(status_text, 'policy_key', stored_policy)
-            if (trim(stored_policy) /= request_policy_key(request)) then
-                call error_response('start', &
-                    'an active Gremlin session has an incompatible policy', response)
-                exitcode = 2
-                return
-            end if
-            call simple_response('start', request%lane_id, trim(session_id), &
-                'attached', response)
+            call gremlin_attach_response('start', project_dir, request, response, &
+                exitcode)
             return
         end if
         if (allocated(session%recovered_session_id)) then
@@ -311,11 +207,10 @@ contains
             exitcode = 2
             return
         end if
-        executable = driver_pin%path
         call fs_make_dir(trim(session%state_dir)//'/logs')
         call log_path(session, 'launcher.log', log_file)
         n_args = 0
-        call argv_push(packed, n_args, trim(executable))
+        call argv_push(packed, n_args, trim(driver_pin%path))
         call argv_push(packed, n_args, 'gremlin')
         call argv_push(packed, n_args, 'run')
         call argv_push(packed, n_args, '--dir')
@@ -341,8 +236,8 @@ contains
             call argv_push(packed, n_args, trim(request%targets(i)))
         end do
         call push_scope_args(packed, n_args, request)
-        call process_start_argv_logged(project_dir, packed, n_args, log_file, &
-            pid, spawn_exit, 'FO_DISABLE_SELF_REFRESH=1;FO_SELF_REFRESH=0')
+        call exec_start(launcher, project_dir, packed, n_args, log_file, spawn_exit, &
+            'FO_DISABLE_SELF_REFRESH=1;FO_SELF_REFRESH=0')
         if (spawn_exit /= 0) then
             call error_response('start', 'cannot launch the Gremlin owner '// &
                 '(process setup error '//int_text(spawn_exit)//')', response)
@@ -361,13 +256,13 @@ contains
                 owner_pid, owner_start, status_text, ierr, message)
             if (ierr /= 0 .or. len_trim(session_id) == 0 .or. &
                 len_trim(status_text) == 0) then
-                call process_poll_pid(pid, owner_exited, spawn_exit)
+                call exec_poll(launcher, owner_exited, spawn_exit)
                 if (owner_exited) exit
                 cycle
             end if
             call gremlin_json_field(status_text, 'policy_key', stored_policy)
             if (trim(stored_policy) /= request_policy_key(request)) then
-                call cancel_launched_owner(pid, spawn_exit)
+                call exec_cancel(launcher, spawn_exit)
                 if (spawn_exit /= 0) then
                     call error_response('start', 'conflicting owner; failed to release '// &
                         'this launcher process', response)
@@ -383,7 +278,8 @@ contains
             exit
         end do
         if (.not. ready) then
-            if (.not. owner_exited) call cancel_launched_owner(pid, spawn_exit)
+            spawn_exit = 0
+            if (.not. owner_exited) call exec_cancel(launcher, spawn_exit)
             if (owner_exited) then
                 message = 'Gremlin owner exited before publishing ready state'
             else if (spawn_exit == 0) then
@@ -521,203 +417,6 @@ contains
         exitcode = 0
     end subroutine handle_status
 
-    subroutine compute_readiness(session, status_text, coverage, &
-            have_coverage, readiness, ierr, message, freshness_verified)
-        type(gremlin_session_t), intent(in) :: session
-        character(len=*), intent(in) :: status_text
-        type(gremlin_coverage_view_t), intent(in) :: coverage
-        logical, intent(in) :: have_coverage
-        type(gremlin_readiness_t), intent(out) :: readiness
-        integer, intent(out) :: ierr
-        character(len=*), intent(out) :: message
-
-        logical, intent(in), optional :: freshness_verified
-        type(gremlin_readiness_input_t) :: input
-        type(journal_record_t), allocatable :: records(:)
-        character(len=HASH_LEN) :: active_id, candidate_id, receipt_generation
-        character(len=NAME_LEN) :: status_name, case_id, raw, receipt_session
-        character(len=PATH_LEN) :: journal_path, campaign_state_dir
-        character(len=NAME_LEN) :: gate_cases(MAX_NODES)
-        character(len=NAME_LEN) :: gate_pass_cases(MAX_NODES)
-        integer(int64) :: cursor, next_cursor
-        integer :: journal_status, i, ios, gate_count, gate_passed, journal_index
-        logical :: build_passed, gate_failure, gate_required, passed, journal_exists
-
-        ierr = 0
-        message = ''
-        input = gremlin_readiness_input_t()
-        active_id = ''
-        candidate_id = ''
-        status_name = ''
-        call gremlin_json_field(status_text, 'active_generation', active_id)
-        call gremlin_json_field(status_text, 'candidate_generation', candidate_id)
-        call gremlin_json_field(status_text, 'state', status_name)
-        call gremlin_json_field(status_text, 'gate_required', raw)
-        read(raw, *, iostat=ios) input%gate_required
-        if (ios /= 0) input%gate_required = -1
-        call gremlin_json_field(status_text, 'input_changed', raw)
-        input%dirty = trim(raw) == 'true'
-        if (present(freshness_verified)) &
-            input%dirty = input%dirty .or. .not. freshness_verified
-        input%owner_session = session%session_id
-        input%generation = active_id
-        input%inventory_digest = coverage%inventory_digest
-        call gremlin_json_field(status_text, 'requirement_digest', &
-            input%requirement_digest)
-        call gremlin_json_field(status_text, 'event_epoch', raw)
-        read (raw, *, iostat=ios) input%event_epoch
-        if (ios /= 0) input%event_epoch = -1
-        input%dirty = input%dirty .or. len_trim(active_id) /= HASH_LEN .or. &
-            (len_trim(candidate_id) > 0 .and. trim(candidate_id) /= trim(active_id))
-        if (trim(status_name) == 'building' .or. trim(status_name) == 'build_failed' .or. &
-            trim(status_name) == 'capture_failed' .or. &
-            trim(status_name) == 'capture_pending') input%dirty = .true.
-        if (trim(status_name) == 'build_failed' .or. &
-            trim(status_name) == 'capture_failed' .or. trim(status_name) == 'error') &
-            input%failure_observed = .true.
-        input%exact_active_generation = len_trim(active_id) == HASH_LEN .and. &
-            input%gate_required >= 0 .and. input%event_epoch >= 0 .and. &
-            len_trim(input%requirement_digest) == HASH_LEN .and. have_coverage .and. &
-            coverage%generation_id == active_id .and. &
-            len_trim(coverage%inventory_digest) == HASH_LEN
-        input%capture_fresh = input%exact_active_generation .and. .not. input%dirty
-        if (input%gate_required < 0) input%gate_required = 0
-        if (have_coverage .and. trim(coverage%generation_id) == trim(active_id)) then
-            input%ordinary_required = coverage%ordinary_eligible_count
-            input%ordinary_passed = coverage%ordinary_pass_count
-            input%ordinary_failures = coverage%ordinary_failure_count
-            input%full_required = coverage%eligible_count
-            input%full_passed = coverage%pass_count
-            input%full_failures = coverage%fail_count + coverage%timeout_count + &
-                coverage%flaky_count + coverage%infra_count
-        end if
-        select case (trim(status_name))
-        case ('starting')
-            input%phase = GREMLIN_PHASE_STARTING
-        case ('building')
-            input%phase = GREMLIN_PHASE_BUILDING
-        case ('quiescent')
-            input%phase = GREMLIN_PHASE_QUIESCENT
-        case ('stopped')
-            input%phase = GREMLIN_PHASE_STOPPED
-        case ('capture_pending')
-            if (input%exact_active_generation) then
-                input%phase = GREMLIN_PHASE_TESTING
-            else
-                input%phase = GREMLIN_PHASE_STARTING
-            end if
-        case ('error', 'inventory_failed', 'test_launch_failed', 'build_failed', &
-                'capture_failed')
-            input%phase = GREMLIN_PHASE_FAILED
-        case default
-            if (input%exact_active_generation) then
-                input%phase = GREMLIN_PHASE_TESTING
-            else
-                input%phase = GREMLIN_PHASE_FAILED
-            end if
-        end select
-
-        build_passed = .false.
-        gate_failure = .false.
-        gate_cases = ''
-        gate_pass_cases = ''
-        gate_count = 0
-        gate_passed = 0
-        cursor = 0_int64
-        if (.not. allocated(session%project_key) .or. &
-            .not. allocated(session%lane_id) .or. &
-            .not. allocated(session%session_id)) then
-            ierr = 1
-            message = 'Gremlin session has no receipt journal identity'
-            return
-        end if
-        call gremlin_get_session_journal_path(trim(session%project_key), &
-            trim(session%lane_id), trim(session%session_id), journal_path, ierr, message)
-        if (ierr /= 0) return
-        do journal_index = 1, 2
-            if (journal_index == 2) then
-                call gremlin_session_state_dir(trim(session%project_key), &
-                    trim(session%lane_id), campaign_state_dir, ierr, message)
-                if (ierr /= 0) return
-                journal_path = trim(campaign_state_dir)//'/campaign-journal.jsonl'
-                inquire(file=trim(journal_path), exist=journal_exists)
-                if (.not. journal_exists) cycle
-            end if
-            cursor = 0_int64
-            do
-                call journal_read_page(trim(journal_path), cursor, 64, &
-                    int(JOURNAL_MAX_RECORD_BYTES, int64)*64_int64, records, &
-                    next_cursor, journal_status, message)
-                if (journal_status /= JOURNAL_OK) then
-                    ierr = journal_status
-                    return
-                end if
-                if (size(records) == 0) exit
-                do i = 1, size(records)
-                    receipt_generation = ''
-                    case_id = ''
-                    status_name = ''
-                    raw = ''
-                    ! This session's ledger entries precede their coverage update;
-                    ! the session journal receives each one after coverage, so
-                    ! counting them here would report gates ahead of coverage.
-                    if (journal_index == 2) then
-                        receipt_session = ''
-                        call gremlin_json_field(records(i)%json, 'session_id', &
-                            receipt_session)
-                        if (trim(receipt_session) == trim(session%session_id)) cycle
-                    end if
-                    call gremlin_json_field(records(i)%json, 'generation', &
-                        receipt_generation)
-                    call gremlin_json_field(records(i)%json, 'case_id', case_id)
-                    call gremlin_json_field(records(i)%json, 'status', status_name)
-                    if (trim(receipt_generation) == trim(candidate_id) .and. &
-                        trim(case_id) == '<build>' .and. &
-                        status_is_failure(trim(status_name))) &
-                        input%failure_observed = .true.
-                    if (trim(receipt_generation) /= trim(active_id)) cycle
-                    if (trim(case_id) == '<build>' .and. &
-                        trim(status_name) == 'BUILD_PASS') build_passed = .true.
-                    if (status_is_failure(trim(status_name))) then
-                        gate_failure = .true.
-                        input%failure_observed = .true.
-                    end if
-                    gate_required = gate_receipt_matches(records(i)%json, active_id, &
-                        input%requirement_digest, case_id, status_name)
-                    passed = trim(status_name) == 'PASS'
-                    if (gate_required .and. len_trim(case_id) > 0) then
-                        if (.not. any(gate_cases(:gate_count) == trim(case_id))) then
-                            if (gate_count < size(gate_cases)) then
-                                gate_count = gate_count + 1
-                                gate_cases(gate_count) = trim(case_id)
-                            end if
-                        end if
-                        if (passed .and. .not. any( &
-                            gate_pass_cases(:gate_passed) == trim(case_id))) then
-                            if (gate_passed < size(gate_cases)) then
-                                gate_passed = gate_passed + 1
-                                gate_pass_cases(gate_passed) = trim(case_id)
-                            end if
-                        end if
-                    end if
-                end do
-                if (next_cursor <= cursor) then
-                    ierr = JOURNAL_INVALID
-                    message = 'Gremlin receipt cursor did not advance during readiness'
-                    return
-                end if
-                cursor = next_cursor
-            end do
-        end do
-        input%exact_active_generation = input%exact_active_generation .and. build_passed
-        input%capture_fresh = input%exact_active_generation .and. .not. input%dirty
-        input%build_passed = build_passed
-        input%gate_required = max(input%gate_required, gate_count)
-        input%gate_passed = min(input%gate_required, gate_passed)
-        input%gate_failure = gate_failure
-        call gremlin_readiness_compute(input, readiness)
-    end subroutine compute_readiness
-
     subroutine compact_summary(status_text, session, action, response, &
             ierr, message)
         !! The summary document; with failure evidence it names this session's
@@ -823,7 +522,7 @@ contains
         timed_out = .false.
         terminal = .false.
         elapsed = 0
-        call clock_milliseconds(started_ms)
+        started_ms = exec_clock_ms()
         do
             call handle_status(project_dir, poll_request, status_json, ierr)
             if (ierr /= 0) then
@@ -883,7 +582,7 @@ contains
             terminal = trim(state_name) == 'stopped' .or. trim(state_name) == 'error'
             if (satisfied .or. terminal) exit
 
-            call clock_milliseconds(now_ms)
+            now_ms = exec_clock_ms()
             elapsed = int(max(0_int64, now_ms - started_ms))
             if (elapsed >= request%wait_ms) then
                 timed_out = .true.
@@ -980,3610 +679,313 @@ contains
     end subroutine handle_failures
 
     subroutine handle_reproduce(project_dir, request, response, exitcode)
+        !! Build a retained generation in a private view and run one of its
+        !! cases again; the reproduction receipt never credits coverage.
         character(len=*), intent(in) :: project_dir
         type(gremlin_request_t), intent(in) :: request
         character(len=:), allocatable, intent(out) :: response
         integer, intent(out) :: exitcode
 
         type(gremlin_session_t) :: session
-        type(gremlin_lease_t) :: reproduction_lease
-        type(gremlin_lease_group_t) :: reproduction_work_lease
-        type(process_scope_t) :: reproduction_scope
+        type(gremlin_lease_t) :: lease
+        type(gremlin_lease_group_t) :: work_slot
+        type(process_scope_t) :: scope
         type(generation_t) :: generation
-        type(execution_view_t) :: execution_view, build_view
-        type(driver_pin_t) :: reproduction_pin
+        type(execution_view_t) :: case_view, build_view
+        type(driver_pin_t) :: pin
         type(gremlin_request_t) :: selection_request
-        type(backend_t) :: reproduction_backend
-        character(len=PATH_LEN) :: message, active_project, log_file, executable
-        character(len=PATH_LEN) :: cleanup_message
-        character(len=PATH_LEN) :: work_release_message
-        character(len=PATH_LEN) :: generation_root, driver_state_dir
-        character(len=32) :: reproduction_id
+        type(backend_t) :: backend
+        type(exec_job_t) :: job
+        character(len=PATH_LEN) :: message, log_file, build_log, driver_state_dir, detail
         character(len=NAME_LEN) :: selected(MAX_NODES)
-        character(len=HASH_LEN) :: active_identity
+        character(len=HASH_LEN) :: identity
         character(len=16) :: outcome
         character(len=GREMLIN_STATE_TEXT_MAX) :: status_text
-        character(len=128) :: build_view_owner
-        character(len=:), allocatable :: packed, execution_env, build_packed
-        character(len=PATH_LEN) :: build_log
-        integer :: owner_pid, ierr, n_selected, mandatory_count, seed
-        integer :: n_args, spawn_exit, test_exit, sequence, release_error
-        integer :: n_build_args, build_pid, build_exit
-        integer :: reproduction_timeout, work_release_error, scope_restore_error
         character(len=128) :: view_owner
-        logical :: retain_view, have_reproduction_work_lease, stop_requested, build_stopped
-        logical :: have_reproduction_lease, executable_ok, is_live, slot_busy
-        real(dp) :: slot_wait_started, slot_wait_now
+        character(len=:), allocatable :: packed, env
+        integer :: owner_pid, ierr, n_selected, mandatory_count, seed, n_args, status
+        integer :: sequence, timeout, test_exit
+        integer(int64) :: clock_count
+        logical :: have_lease, have_slot, have_scope, stop_requested, stopped
+        logical :: exists, is_live, spawned, slot_busy
+        integer(int64) :: slot_wait_started
 
-        exitcode = 0
-        have_reproduction_lease = .false.
-        have_reproduction_work_lease = .false.
+        exitcode = 2
+        have_lease = .false.
+        have_slot = .false.
+        have_scope = .false.
+        test_exit = 0
         call gremlin_resolve_read_session(project_dir, request, session, status_text, &
             owner_pid, is_live, ierr, message)
+        if (ierr == 0 .and. is_live) call gremlin_session_acquire(project_dir, &
+            trim(request%lane_id), session, ierr, message)
         if (ierr /= 0) then
             call error_response('reproduce', trim(message), response)
-            exitcode = 2
-            return
-        end if
-        if (is_live) then
-            call gremlin_session_acquire(project_dir, trim(request%lane_id), session, &
-                ierr, message)
-        end if
-        if (ierr /= 0) then
-            call error_response('reproduce', trim(message), response)
-            exitcode = 2
             return
         end if
         ! Retired sessions keep their exact journal namespace. Driver pins are
         ! shared by that lane and remain validated against the generation key.
-        call gremlin_session_state_dir(project_dir, request%lane_id, &
-            driver_state_dir, ierr, message)
-        if (ierr /= 0) then
-            call release_if_owner(session, release_error, cleanup_message)
-            call error_response('reproduce', trim(message), response)
-            exitcode = 2
-            return
-        end if
-        call fs_make_dir(trim(session%state_dir)//'/logs')
-        call gremlin_json_field(status_text, 'active_generation', active_identity)
-        if (len_trim(request%generation_id) > 0) then
-            active_identity = request%generation_id
-        end if
-        if (.not. is_hex_digest(active_identity)) then
-            call release_if_owner(session, ierr, message)
-            call error_response('reproduce', 'there is no compatible successful generation', &
-                response)
-            exitcode = 2
-            return
-        end if
-        call common_generation_cas_root(generation_root, ierr, message)
-        if (ierr /= 0) then
-            call release_if_owner(session, release_error, cleanup_message)
-            call error_response('reproduce', 'cannot resolve requested generation: '// &
-                trim(message), response)
-            exitcode = 2
-            return
-        end if
-        generation_root = trim(generation_root)//'/gremlin/generations-v2/'// &
-            trim(active_identity)
-        active_project = trim(generation_root)//'/bundle/project'
-        generation%identity = active_identity
-        generation%root = generation_root
-        generation%project_root = active_project
-        call generation_inventory_restore(generation, ierr, message)
-        call gremlin_generation_lease_acquire_at(generation%root, reproduction_lease, &
+        call gremlin_session_state_dir(project_dir, request%lane_id, driver_state_dir, &
             ierr, message)
+        if (ierr /= 0) call finish(trim(message))
+        if (ierr /= 0) return
+        call fs_make_dir(session%state_dir//'/logs')
+        call gremlin_json_field(status_text, 'active_generation', identity)
+        if (len_trim(request%generation_id) > 0) identity = request%generation_id
+        if (.not. is_hex_digest(identity)) then
+            call finish('there is no compatible successful generation')
+            return
+        end if
+        call common_generation_cas_root(generation%root, ierr, message)
         if (ierr /= 0) then
-            call error_response('reproduce', 'cannot lease requested generation: '// &
-                trim(message), response)
-            exitcode = 2
+            call finish('cannot resolve requested generation: '//trim(message))
             return
         end if
-        have_reproduction_lease = .true.
-        call generation_driver_identity(generation%root, generation%driver_digest, &
-            generation%driver_size, ierr, message)
+        generation%identity = identity
+        generation%root = trim(generation%root)//'/gremlin/generations-v2/'// &
+            trim(identity)
+        generation%project_root = trim(generation%root)//'/bundle/project'
+        call generation_inventory_restore(generation, ierr, message)
+        call gremlin_generation_lease_acquire_at(generation%root, lease, ierr, message)
+        have_lease = ierr == 0
+        if (ierr /= 0) message = 'cannot lease requested generation: '//trim(message)
+        if (ierr == 0) then
+            call generation_driver_identity(generation%root, generation%driver_digest, &
+                generation%driver_size, ierr, message)
+            if (ierr /= 0) message = 'cannot read generation driver identity: '// &
+                trim(message)
+        end if
+        if (ierr == 0) then
+            call driver_pin_existing(driver_state_dir, generation%driver_digest, &
+                generation%driver_size, pin, ierr, message)
+            if (ierr /= 0) message = 'cannot validate the pinned generation driver: '// &
+                trim(message)
+        end if
         if (ierr /= 0) then
-            call release_generation_lease(reproduction_lease, have_reproduction_lease, &
-                release_error, cleanup_message)
-            call release_if_owner(session, release_error, cleanup_message)
-            call error_response('reproduce', &
-                'cannot read generation driver identity: '//trim(message), response)
-            exitcode = 2
+            call finish(trim(message))
             return
         end if
-        call driver_pin_existing(driver_state_dir, generation%driver_digest, &
-            generation%driver_size, reproduction_pin, ierr, message)
-        if (ierr /= 0) then
-            call release_generation_lease(reproduction_lease, have_reproduction_lease, &
-                release_error, cleanup_message)
-            call release_if_owner(session, release_error, cleanup_message)
-            call error_response('reproduce', &
-                'cannot validate the pinned generation driver: '// &
-                trim(message), response)
-            exitcode = 2
+        generation%driver_path = pin%path
+        inquire (file=trim(generation%project_root)//'/fpm.toml', exist=exists)
+        if (.not. exists) inquire (file=trim(generation%project_root)// &
+            '/CMakeLists.txt', exist=exists)
+        if (.not. exists) then
+            call finish('requested generation snapshot is unavailable')
             return
         end if
-        generation%driver_path = reproduction_pin%path
-        inquire (file=trim(active_project)//'/fpm.toml', exist=executable_ok)
-        if (.not. executable_ok) &
-            inquire(file=trim(active_project)//'/CMakeLists.txt', exist=executable_ok)
-        if (.not. executable_ok) then
-            call release_generation_lease(reproduction_lease, have_reproduction_lease, &
-                release_error, cleanup_message)
-            call release_if_owner(session, ierr, message)
-            call error_response('reproduce', 'requested generation snapshot is unavailable', &
-                response)
-            exitcode = 2
-            return
-        end if
-        executable = reproduction_pin%path
         ! The completion sequence is the reproduction execution ID. Allocate it
         ! before launch so its output path and durable receipt identify the same
         ! invocation, including concurrent reproductions in one live session.
-        sequence = int(system_clock_count())
-        write (reproduction_id, '(i0)') sequence
-        call log_path(session, 'reproduce-'//trim(reproduction_id)//'.log', log_file)
-        reproduction_timeout = case_wall_timeout(active_project, request%case_id, &
+        call system_clock(count=clock_count)
+        sequence = int(clock_count)
+        call log_path(session, 'reproduce-'//int_text(sequence)//'.log', log_file)
+        call log_path(session, 'reproduce-'//int_text(sequence)//'-build.log', build_log)
+        timeout = case_wall_timeout(generation%project_root, request%case_id, &
             request%timeout_seconds)
-        write(view_owner, '(a,"-reproduce-",i0)') trim(session%session_id), sequence
-        write(build_view_owner, '(a,"-build")') trim(view_owner)
-        call execution_view_create(trim(session%state_dir)//'/views', &
-            generation%identity, trim(build_view_owner), 'build', &
-            generation%input_inventory, generation%input_inventory_ready, &
-            generation%input_inventory_complete, build_view, ierr, message, &
+        write (view_owner, '(a,"-reproduce-",i0)') session%session_id, sequence
+        call execution_view_create(session%state_dir//'/views', generation%identity, &
+            trim(view_owner)//'-build', 'build', generation%input_inventory, &
+            generation%input_inventory_ready, generation%input_inventory_complete, &
+            build_view, ierr, message, &
             candidate_bundle_root=trim(generation%root)//'/bundle')
         if (ierr /= 0) then
-            call release_generation_lease(reproduction_lease, &
-                have_reproduction_lease, release_error, cleanup_message)
-            call release_if_owner(session, release_error, cleanup_message)
-            call error_response('reproduce', 'cannot create private build view: '// &
-                trim(message), response)
-            exitcode = 2
+            call finish('cannot create private build view: '//trim(message))
             return
         end if
-        call execution_view_create(trim(session%state_dir)//'/views', &
-            generation%identity, trim(view_owner), request%case_id, &
-            generation%input_inventory, generation%input_inventory_ready, &
-            generation%input_inventory_complete, execution_view, ierr, message)
+        call execution_view_create(session%state_dir//'/views', generation%identity, &
+            trim(view_owner), request%case_id, generation%input_inventory, &
+            generation%input_inventory_ready, generation%input_inventory_complete, &
+            case_view, ierr, message)
         if (ierr /= 0) then
-            call execution_view_release(build_view, .false., release_error, &
-                cleanup_message)
-            call release_generation_lease(reproduction_lease, &
-                have_reproduction_lease, release_error, cleanup_message)
-            call release_if_owner(session, release_error, cleanup_message)
-            call error_response('reproduce', 'cannot create private execution view: '// &
-                trim(message), response)
-            exitcode = 2
+            call finish('cannot create private execution view: '//trim(message))
             return
         end if
-        call process_scope_begin(session%state_dir, reproduction_scope, ierr)
+        call process_scope_begin(session%state_dir, scope, ierr)
+        have_scope = ierr == 0
         if (ierr == 0) then
             ! The case wall timeout also bounds the wait for a host work slot,
             ! so a reproduction never blocks silently behind other lanes.
-            call clock_seconds(slot_wait_started)
+            slot_wait_started = exec_clock_ms()
             do
-                call acquire_heavy_work_slot(session, reproduction_work_lease, &
-                    have_reproduction_work_lease, .false., stop_requested, ierr, &
-                    message, slot_busy)
+                call acquire_heavy_work_slot(session, 1, work_slot, have_slot, &
+                    .false., stop_requested, ierr, message, slot_busy)
                 if (ierr /= 0 .or. .not. slot_busy) exit
-                call clock_seconds(slot_wait_now)
-                if (slot_wait_now - slot_wait_started >= &
-                        real(reproduction_timeout, dp)) then
+                if (exec_clock_ms() - slot_wait_started >= &
+                        int(timeout, int64)*1000_int64) then
                     ierr = 1
                     write (message, '(a,i0,a)') 'TIMEOUT: no host Gremlin work '// &
-                        'slot became free within ', reproduction_timeout, ' seconds'
+                        'slot became free within ', timeout, ' seconds'
                     exit
                 end if
                 call fs_sleep_ms(100)
             end do
         else
-            message = 'cannot claim reproduction process ownership: '//trim(int_text(ierr))
+            message = 'cannot claim reproduction process ownership: '//int_text(ierr)
         end if
         if (ierr /= 0) then
-            call process_scope_end(reproduction_scope, scope_restore_error)
-            call execution_view_release(execution_view, .false., release_error, &
-                cleanup_message)
-            call execution_view_release(build_view, .false., release_error, &
-                cleanup_message)
-            call release_generation_lease(reproduction_lease, &
-                have_reproduction_lease, release_error, cleanup_message)
-            call release_if_owner(session, release_error, cleanup_message)
-            call error_response('reproduce', trim(message), response)
-            exitcode = 2
+            call finish(trim(message))
             return
         end if
         ! Captured generations contain authored inputs rather than generated
         ! CTest files. Query the frozen configuration in the owned writable view.
         generation%build_project_root = build_view%cwd
-        reproduction_backend = detect_backend(build_view%cwd)
-        if (reproduction_backend%kind == BACKEND_CMAKE) then
-            call cmake_configure(reproduction_backend%cmake, '', log_file, ierr)
-            if (ierr /= 0) message = &
-                'cannot configure frozen CMake test inventory; diagnostic: '// &
-                trim(log_file)
-        end if
-        if (ierr == 0) then
-            selection_request = request
-            selection_request%targets = ''
-            selection_request%targets(1) = request%case_id
-            selection_request%n_targets = 1
-            selection_request%random_count = 0
-            call discover_campaign(generation, session, selection_request, selected, &
-                n_selected, mandatory_count, seed, ierr, message, &
-                bypass_coverage=.true.)
-            if (ierr == 0) then
-                if (n_selected /= 1) then
-                    ierr = 1
-                    message = 'case_id is not present in that generation'
-                else if (trim(selected(1)) /= trim(request%case_id)) then
-                    ierr = 1
-                    message = 'case_id is not present in that generation'
-                end if
+        backend = detect_backend(build_view%cwd)
+        if (backend%kind == BACKEND_CMAKE) then
+            call cmake_configure(backend%cmake, '', log_file, ierr)
+            if (ierr /= 0) then
+                call finish('cannot configure frozen CMake test inventory; '// &
+                    'diagnostic: '//trim(log_file))
+                return
             end if
         end if
-        build_stopped = .false.
-        build_exit = 0
+        selection_request = request
+        selection_request%targets = ''
+        selection_request%targets(1) = request%case_id
+        selection_request%n_targets = 1
+        selection_request%random_count = 0
+        call discover_campaign(generation, session, selection_request, selected, &
+            n_selected, mandatory_count, seed, ierr, message, bypass_coverage=.true.)
         if (ierr == 0) then
-            ! Build the generation once here; the case child never builds, so
-            ! a build failure is reported once and no case runs.
-            call log_path(session, 'reproduce-'//trim(reproduction_id)// &
-                '-build.log', build_log)
-            n_build_args = 0
-            call argv_push(build_packed, n_build_args, trim(executable))
-            call argv_push(build_packed, n_build_args, 'build')
-            call argv_push(build_packed, n_build_args, '--tests')
-            call argv_push(build_packed, n_build_args, '--case')
-            call argv_push(build_packed, n_build_args, trim(request%case_id))
-            call process_start_argv_logged(trim(build_view%cwd), build_packed, &
-                n_build_args, trim(build_log), build_pid, spawn_exit, &
-                'FO_DISABLE_SELF_REFRESH=1;FO_SELF_REFRESH=0;'// &
-                'FO_GREMLIN_FROZEN_ROOT='//trim(build_view%cwd)//';TMPDIR='// &
-                trim(build_view%tmpdir))
-            if (spawn_exit /= 0) then
-                ierr = 1
-                message = 'cannot start the generation build'
-            else
-                call process_wait_bounded(build_pid, reproduction_timeout, &
-                    build_exit, session, build_stopped)
-                if (build_exit == 124) then
-                    call gremlin_retain_build_log(build_log)
-                    ierr = 1
-                    write (message, '(a,i0,a,a)') &
-                        'TIMEOUT: generation build exceeded ', reproduction_timeout, &
-                        ' seconds and was cancelled; diagnostic: ', trim(build_log)
-                else if (build_stopped) then
-                    call gremlin_retain_build_log(build_log)
-                    ierr = 1
-                    message = 'CANCELLED: generation build cancelled by a stop request'
-                else if (build_exit /= 0) then
-                    call gremlin_retain_build_log(build_log)
-                    ierr = 1
-                    message = 'generation build failed; diagnostic: '//trim(build_log)
-                end if
-            end if
+            if (n_selected /= 1) ierr = 1
+            if (ierr == 0 .and. trim(selected(1)) /= trim(request%case_id)) ierr = 1
+            if (ierr /= 0) message = 'case_id is not present in that generation'
         end if
         if (ierr /= 0) then
-            call release_heavy_work_slot(reproduction_work_lease, &
-                have_reproduction_work_lease, work_release_error, &
-                work_release_message, drain=.true.)
-            call process_scope_end(reproduction_scope, scope_restore_error)
-            call execution_view_release(execution_view, .false., release_error, &
-                cleanup_message)
-            call execution_view_release(build_view, .false., release_error, &
-                cleanup_message)
-            call release_generation_lease(reproduction_lease, &
-                have_reproduction_lease, release_error, cleanup_message)
-            call release_if_owner(session, release_error, cleanup_message)
-            call error_response('reproduce', trim(message), response)
-            exitcode = 2
-            if (build_exit /= 0) exitcode = 1
+            call finish(trim(message))
             return
         end if
-        n_args = 0
-        call argv_push(packed, n_args, trim(executable))
-        call argv_push(packed, n_args, 'test')
-        call argv_push(packed, n_args, '--no-build')
-        call argv_push(packed, n_args, '--no-cache')
-        call argv_push(packed, n_args, '--json=full')
-        if (case_needs_all(generation, request%case_id)) &
-            call argv_push(packed, n_args, '--all')
+        ! Build the generation once here; the case child never builds, so
+        ! a build failure is reported once and no case runs.
+        call build_command(pin%path, build_view, packed, n_args, env)
+        call argv_push(packed, n_args, '--case')
         call argv_push(packed, n_args, trim(request%case_id))
-        execution_env = 'FO_BIN='//trim(executable)//';FO='//trim(executable)//';'// &
-            'FO_DISABLE_SELF_REFRESH=1;FO_SELF_REFRESH=0;'// &
-            'FO_GREMLIN_EXECUTION_CWD='//trim(execution_view%cwd)//';'// &
-            'FO_GREMLIN_FROZEN_ROOT='//trim(build_view%cwd)//';'// &
-            'TMPDIR='//trim(execution_view%tmpdir)
-        call process_start_argv_logged(trim(build_view%cwd), packed, n_args, &
-            trim(log_file), owner_pid, spawn_exit, &
-            trim(execution_env))
-        if (spawn_exit == 0) then
-            call process_wait_bounded(owner_pid, reproduction_timeout, test_exit)
-            if (test_exit == 124) then
+        call exec_start(job, trim(build_view%cwd), packed, n_args, trim(build_log), &
+            ierr, env, timeout)
+        if (ierr /= 0) then
+            call finish('cannot start the generation build')
+            return
+        end if
+        call wait_job(job, stopped, session)
+        if (job%exitcode /= 0) then
+            call gremlin_retain_build_log(build_log)
+            exitcode = 1
+            if (job%timed_out) then
+                write (message, '(a,i0,a,a)') 'TIMEOUT: generation build exceeded ', &
+                    timeout, ' seconds and was cancelled; diagnostic: ', trim(build_log)
+            else if (stopped) then
+                message = 'CANCELLED: generation build cancelled by a stop request'
+            else
+                message = 'generation build failed; diagnostic: '//trim(build_log)
+            end if
+            call finish(trim(message))
+            return
+        end if
+        call case_command(pin%path, generation, request%case_id, case_view, &
+            build_view%cwd, packed, n_args, env)
+        call exec_start(job, trim(build_view%cwd), packed, n_args, trim(log_file), &
+            test_exit, env, timeout)
+        spawned = test_exit == 0
+        if (.not. spawned) then
+            outcome = 'INFRA_ERROR'
+        else
+            call wait_job(job, stopped)
+            test_exit = job%exitcode
+            if (job%timed_out .and. test_exit /= EXEC_UNCANCELLED) then
                 outcome = 'TIMEOUT'
-                test_exit = 124
-            else if (test_exit == 125) then
+            else if (test_exit == EXEC_UNCANCELLED) then
                 outcome = 'INFRA_ERROR'
-                call gremlin_generation_pin_at(generation%root, .true., &
-                    release_error, cleanup_message)
+                call gremlin_generation_pin_at(generation%root, .true., status, detail)
             else
                 outcome = runner_case_outcome(log_file, request%case_id)
             end if
-        else
-            test_exit = spawn_exit
-            outcome = 'INFRA_ERROR'
+            call append_execution_provenance(log_file, case_view)
         end if
-        if (spawn_exit == 0) call append_execution_provenance(log_file, execution_view)
-        retain_view = spawn_exit == 0 .and. test_exit /= 0
-        call execution_view_release(execution_view, retain_view, release_error, &
-            cleanup_message)
-        call execution_view_release(build_view, retain_view, release_error, &
-            cleanup_message)
-        call record_immediate_case(session, request, generation, request%case_id, &
-            test_exit, trim(outcome), sequence, 1, seed, trim(log_file), ierr, message, &
+        call record_receipt(session, request, generation, request%case_id, test_exit, &
+            trim(outcome), sequence, 1, seed, trim(log_file), ierr, message, &
             credit_coverage=.false., gate_required=.true.)
-        call release_heavy_work_slot(reproduction_work_lease, &
-            have_reproduction_work_lease, work_release_error, work_release_message, &
-            drain=.true.)
-        call process_scope_end(reproduction_scope, scope_restore_error)
-        if (work_release_error == 0 .and. scope_restore_error /= 0) then
-            work_release_error = scope_restore_error
-            work_release_message = 'cannot restore caller process ownership'
-        end if
-        call release_generation_lease(reproduction_lease, have_reproduction_lease, &
-            release_error, cleanup_message)
-        if (work_release_error /= 0) then
-            call release_if_owner(session, release_error, cleanup_message)
-            call error_response('reproduce', &
-                'cannot release Gremlin host work slot: '//trim(work_release_message), &
-                response)
-            exitcode = 2
-            return
-        end if
-        if (release_error /= 0) then
-            call error_response('reproduce', 'cannot release generation lease: '// &
-                trim(cleanup_message), response)
-            exitcode = 2
-            return
-        end if
-        call release_if_owner(session, release_error, cleanup_message)
-        if (release_error /= 0) then
-            call error_response('reproduce', 'cannot release Gremlin ownership: '// &
-                trim(cleanup_message), response)
-            exitcode = 2
-            return
-        end if
         if (ierr /= JOURNAL_OK) then
-            call error_response('reproduce', trim(message), response)
-            exitcode = 2
+            call finish(trim(message), spawned .and. test_exit /= 0)
             return
         end if
-        if (test_exit /= 0) exitcode = 1
-        call simple_response('reproduce', request%lane_id, session%session_id, &
-            trim(outcome), response)
-    end subroutine handle_reproduce
-
-    subroutine run_owner(project_dir, request, response, exitcode)
-        character(len=*), intent(in) :: project_dir
-        type(gremlin_request_t), intent(in) :: request
-        character(len=:), allocatable, intent(out) :: response
-        integer, intent(out) :: exitcode
-
-        type(gremlin_session_t) :: session
-        type(driver_pin_t) :: driver_pin
-        type(gremlin_request_t), allocatable :: owner_request
-        type(gremlin_lease_t) :: active_lease, candidate_lease
-        type(gremlin_lease_group_t) :: heavy_work_lease
-        type(generation_t) :: active_generation, candidate_generation
-        type(change_watch_t) :: change_watch
-        type(child_t) :: build_child, test_children(GREMLIN_MAX_LANE_JOBS)
-        character(len=PATH_LEN) :: message, state_name, last_failed_identity
-        character(len=PATH_LEN) :: capture_diagnostic
-        character(len=PATH_LEN) :: fatal_message, state_message
-        character(len=PATH_LEN) :: build_view_cleanup_message
-        character(len=16) :: observed_outcome
-        character(len=PATH_LEN) :: owner_start
-        character(len=NAME_LEN), allocatable :: selected(:)
-        character(len=HASH_LEN) :: stored_policy
-        character(len=65536) :: status_text
-        character(len=128) :: stored_session_id
-        integer :: ierr, build_exit, test_exit, launch_error, completed, selected_count
-        integer :: lane_jobs, slot
-        integer :: cancel_error, release_error, capture_error, state_error
-        integer :: registration_error
-        integer :: build_view_cleanup_status
-        integer :: owner_pid, i, cache_cursor, cache_status
-        integer :: sequence, campaign_seed, campaign_number, test_index
-        integer(int64) :: capture_debounce_ms, campaign_started_ms, freshness_ticket
-        integer(int64) :: last_idle_reap_ms, last_cache_maintenance_ms, now_ms
-        character(len=PATH_LEN) :: freshness_path
-        character(len=NAME_LEN) :: finished_case
-        real(dp) :: test_timeout
-        logical :: have_active, have_candidate, stop_requested, capture_ok
-        logical :: capture_failed, provider_quiet
-        logical :: have_active_lease, have_candidate_lease, have_heavy_work_lease
-        logical :: active_pinned, candidate_pinned, slot_busy
-        logical :: build_done, test_done, fatal_error, cache_warning_reported
-
-        exitcode = 0
-        allocate (owner_request, selected(MAX_NODES))
-        active_generation = generation_t()
-        candidate_generation = generation_t()
-        owner_request = request
-        build_child = child_t()
-        test_children = child_t()
-        lane_jobs = lane_job_count(request)
-        lane_admission_jobs = lane_jobs
-        call set_running_summary(test_children)
-        completed = 0
-        selected_count = 0
-        sequence = 0
-        campaign_number = 0
-        test_index = 0
-        capture_debounce_ms = 0_int64
-        campaign_started_ms = 0_int64
-        last_idle_reap_ms = 0_int64
-        last_cache_maintenance_ms = 0_int64
-        cache_cursor = 0
-        cache_warning_reported = .false.
-        have_active = .false.
-        have_candidate = .false.
-        have_active_lease = .false.
-        have_candidate_lease = .false.
-        have_heavy_work_lease = .false.
-        active_pinned = .false.
-        candidate_pinned = .false.
-        last_failed_identity = ''
-        capture_diagnostic = ''
-        state_name = 'starting'
-        campaign_seed = request%seed
-        if (campaign_seed == 0) then
-            call system_clock(campaign_seed)
-            if (campaign_seed == 0) campaign_seed = 1
-        end if
-        fatal_error = .false.
-        fatal_message = ''
-        call gremlin_session_acquire(project_dir, trim(request%lane_id), &
-            session, ierr, message)
-        if (ierr /= 0) then
-            call error_response('run', trim(message), response)
-            exitcode = 2
-            return
-        end if
-        if (session%attached) then
-            do i = 1, 60
-                call gremlin_session_read(project_dir, trim(request%lane_id), &
-                    stored_session_id, owner_pid, owner_start, status_text, ierr, message)
-                if (ierr == 0 .and. len_trim(status_text) > 0) exit
-                call fs_sleep_ms(50)
-            end do
-            if (ierr /= 0) then
-                call error_response('run', trim(message), response)
-                exitcode = 2
-                return
-            end if
-            if (len_trim(status_text) == 0) then
-                call error_response('run', 'active Gremlin owner has not published state', &
-                    response)
-                exitcode = 2
-                return
-            end if
-            call gremlin_json_field(status_text, 'policy_key', stored_policy)
-            if (trim(stored_policy) /= request_policy_key(request)) then
-                call error_response('run', &
-                    'an active Gremlin session has an incompatible policy', response)
-                exitcode = 2
-                return
-            end if
-            call simple_response('run', request%lane_id, trim(stored_session_id), &
-                'attached', response)
-            return
-        end if
-        call process_set_async_scope(session%state_dir, session%owner_pid, &
-            session%owner_start, ierr)
-        if (ierr /= 0) then
-            call gremlin_session_release(session, release_error, state_message)
-            if (release_error == 0) message = 'cannot configure exact process ownership: '// &
-                trim(int_text(ierr))
-            if (release_error /= 0) message = 'cannot release owner after process ownership '// &
-                'setup failure: '//trim(state_message)
-            call error_response('run', trim(message), response)
-            exitcode = 2
-            return
-        end if
-        call maintain_fo_cache(cache_cursor, cache_status)
-        if (cache_status /= 0) then
-            write (error_unit, '(a,i0)') 'Gremlin cache maintenance: ', cache_status
-            cache_warning_reported = .true.
-        end if
-        call clock_milliseconds(last_cache_maintenance_ms)
-        call gremlin_recover_owner_journal(project_dir, session, ierr, message)
-        if (ierr /= 0) then
-            call release_if_owner(session, state_error, state_message)
-            call error_response('run', 'cannot recover prior Gremlin receipts: '// &
-                trim(message), response)
-            exitcode = 2
-            return
-        end if
-        call driver_pin_current(session%state_dir, driver_pin, ierr, message)
-        if (ierr /= 0) then
-            call release_if_owner(session, state_error, state_message)
-            call error_response('run', 'cannot pin the running fo driver: '// &
-                trim(message), response)
-            exitcode = 2
-            return
-        end if
-        session%driver_path = driver_pin%path
-        session%driver_digest = driver_pin%digest
-        session%driver_size = driver_pin%size
-        call fs_make_dir(session%state_dir//'/logs')
-        call publish_state(session, owner_request, 'starting', active_generation, &
-            candidate_generation, '', completed, selected_count, campaign_seed, 'NONE', 0, &
-            ierr, message)
-        if (ierr /= 0) then
-            fatal_message = trim(message)
-            call gremlin_session_release(session, release_error, state_message)
-            if (release_error /= 0) fatal_message = trim(state_message)
-            call error_response('run', 'cannot publish initial Gremlin state: '// &
-                trim(fatal_message), response)
-            exitcode = 2
-            return
-        end if
-        call change_watch_init(change_watch, project_dir, ierr, message)
-        if (ierr /= 0) then
-            call change_watch_close(change_watch)
-            call release_if_owner(session, state_error, state_message)
-            call error_response('run', 'cannot start Gremlin change watcher: '// &
-                trim(message), response)
-            exitcode = 2
-            return
-        end if
-        call capture_candidate(project_dir, driver_pin, candidate_generation, &
-            candidate_lease, &
-            capture_ok, registration_error, message, change_watch=change_watch)
-        if (registration_error /= 0) then
-            fatal_error = .true.
-            fatal_message = 'cannot register captured generation: '//trim(message)
-        end if
-        if (capture_ok .and. registration_error == 0) then
-            have_candidate = .true.
-            have_candidate_lease = .true.
-            if (.not. fatal_error) then
-                call acquire_heavy_work_slot(session, heavy_work_lease, &
-                    have_heavy_work_lease, .true., stop_requested, ierr, message, &
-                    slot_busy)
-                if (ierr == 0 .and. slot_busy) then
-                    call publish_state(session, owner_request, 'starting', &
-                        active_generation, candidate_generation, '', completed, &
-                        selected_count, campaign_seed, 'NONE', 0, diagnostic= &
-                        'waiting for a host Gremlin work slot held by other lanes')
-                    call acquire_heavy_work_slot(session, heavy_work_lease, &
-                        have_heavy_work_lease, .true., stop_requested, ierr, message)
-                end if
-                if (ierr /= 0) then
-                    fatal_error = .true.
-                    fatal_message = trim(message)
-                else if (.not. stop_requested) then
-                    call start_build(session, owner_request, candidate_generation, &
-                        build_child, ierr, message)
-                end if
-                if (ierr /= 0) then
-                    launch_error = ierr
-                    fatal_message = 'cannot start initial candidate build '// &
-                        '(process setup error '//int_text(ierr)//')'
-                    call publish_state(session, owner_request, 'build_failed', active_generation, &
-                        candidate_generation, '', completed, selected_count, campaign_seed, &
-                        'INFRA_ERROR', launch_error, state_error, state_message)
-                    if (state_error == 0) then
-                        sequence = sequence + 1
-                        call record_immediate_case(session, request, candidate_generation, &
-                            '<build>', launch_error, 'INFRA_ERROR', sequence, 0, &
-                            campaign_seed, build_child%log_file, ierr, message, &
-                            credit_coverage=.false.)
-                    else
-                        ierr = state_error
-                        message = state_message
-                    end if
-                    if (ierr /= 0) fatal_message = trim(message)
-                    fatal_error = .true.
-                    last_failed_identity = candidate_generation%identity
-                    have_candidate = .false.
-                    if (have_candidate_lease) then
-                        call gremlin_lease_release(candidate_lease, release_error, &
-                            state_message)
-                        if (release_error == 0) have_candidate_lease = .false.
-                        if (release_error /= 0) fatal_message = &
-                            'cannot release failed candidate lease: '//trim(state_message)
-                    end if
-                else if (.not. stop_requested) then
-                    call publish_state(session, owner_request, 'building', active_generation, &
-                        candidate_generation, '', completed, selected_count, campaign_seed, &
-                        'NONE', 0, state_error, state_message)
-                    if (state_error /= 0) then
-                        fatal_error = .true.
-                        fatal_message = trim(state_message)
-                    end if
-                    state_name = 'building'
-                end if
-            end if
-        else if (.not. fatal_error) then
-            capture_diagnostic = trim(message)
-            call publish_state(session, owner_request, 'capture_failed', active_generation, &
-                candidate_generation, '', completed, selected_count, 0, 'NONE', 0, &
-                ierr, message, diagnostic=trim(capture_diagnostic))
-            if (ierr /= 0) fatal_error = .true.
-        end if
-
-        do
-            if (fatal_error) exit
-            if (build_child%pid <= 0 .and. running_count(test_children) == 0) then
-                call clock_milliseconds(now_ms)
-                if (now_ms == 0_int64 .or. &
-                        now_ms - last_idle_reap_ms >= 1000_int64) then
-                    call process_reap_adopted_scope_zombies(ierr)
-                    if (ierr /= 0) then
-                        message = 'cannot reap adopted Gremlin children ('// &
-                            trim(int_text(ierr))//')'
-                        fatal_error = .true.
-                        exit
-                    end if
-                    last_idle_reap_ms = now_ms
-                end if
-                if (state_name /= 'quiescent' .and. &
-                        now_ms - last_cache_maintenance_ms >= 5000_int64) then
-                    call maintain_fo_cache(cache_cursor, cache_status)
-                    if (cache_status /= 0 .and. .not. cache_warning_reported) &
-                        write (error_unit, '(a,i0)') &
-                            'Gremlin cache maintenance: ', cache_status
-                    cache_warning_reported = cache_status /= 0
-                    last_cache_maintenance_ms = now_ms
-                end if
-            end if
-            call gremlin_session_stop_requested(session, stop_requested, ierr, message)
-            if (ierr /= 0) then
-                fatal_error = .true.
-                exit
-            end if
-            if (stop_requested) exit
-
-            if (build_child%pid > 0) then
-                call process_poll_pid(build_child%pid, build_done, build_exit)
-                if (build_done) then
-                    call complete_build(project_dir, session, owner_request, candidate_generation, &
-                        build_child, build_exit, active_generation, have_active, &
-                        test_children, active_lease, candidate_lease, &
-                        have_active_lease, have_candidate_lease, active_pinned, &
-                        candidate_pinned, selected, selected_count, campaign_seed, &
-                        completed, state_name, last_failed_identity, sequence, ierr, message)
-                    if (ierr /= 0) then
-                        build_child%pid = 0
-                        if (build_child%execution_view%active) then
-                            call execution_view_release( &
-                                build_child%execution_view, .false., &
-                                build_view_cleanup_status, &
-                                build_view_cleanup_message)
-                        end if
-                        if (candidate_generation%build_project_root == &
-                                build_child%execution_view%cwd) &
-                            candidate_generation%build_project_root = ''
-                        fatal_error = .true.
-                        exit
-                    end if
-                    if (build_exit == 0 .and. have_active .and. selected_count > 0) then
-                        campaign_number = campaign_number + 1
-                        test_index = 0
-                        call clock_milliseconds(campaign_started_ms)
-                        call advance_campaign(project_dir, session, owner_request, &
-                            active_generation, selected, selected_count, &
-                            test_index, campaign_seed, campaign_number, &
-                            campaign_started_ms, test_children, lane_jobs, .true., &
-                            ierr, message, completed, state_name, sequence)
-                        if (ierr /= 0) then
-                            fatal_error = .true.
-                            exit
-                        end if
-                    end if
-                    have_candidate = .false.
-                end if
-            end if
-            if (fatal_error) exit
-
-            do slot = 1, GREMLIN_MAX_LANE_JOBS
-                if (test_children(slot)%pid <= 0) cycle
-                test_timeout = real(case_wall_timeout(active_generation%project_root, &
-                    test_children(slot)%case_name, request%timeout_seconds), dp)
-                call process_poll_pid(test_children(slot)%pid, test_done, test_exit)
-                if (test_done) then
-                    state_name = 'testing'
-                    observed_outcome = runner_case_outcome(test_children(slot)%log_file, &
-                        test_children(slot)%case_name)
-                    call append_execution_provenance(test_children(slot)%log_file, &
-                        test_children(slot)%execution_view)
-                    call record_case(session, owner_request, active_generation, &
-                        test_children(slot), test_exit, observed_outcome, sequence, &
-                        campaign_seed, ierr, message)
-                    call execution_view_release(test_children(slot)%execution_view, &
-                        test_exit /= 0 .or. trim(observed_outcome) /= 'PASS', &
-                        release_error, state_message)
-                else if (elapsed_seconds(test_children(slot)%started_at) >= test_timeout) then
-                    call cancel_owned_process(test_children(slot)%pid, test_exit)
-                    if (test_exit /= 0) then
-                        message = 'cannot cancel timed-out Gremlin test process'
-                        fatal_error = .true.
-                        exit
-                    end if
-                    call append_execution_provenance(test_children(slot)%log_file, &
-                        test_children(slot)%execution_view)
-                    call execution_view_release(test_children(slot)%execution_view, &
-                        .true., release_error, state_message)
-                    test_exit = 124
-                    observed_outcome = 'TIMEOUT'
-                    call record_case(session, owner_request, active_generation, &
-                        test_children(slot), 124, 'TIMEOUT', sequence, campaign_seed, &
-                        ierr, message)
-                else
-                    cycle
-                end if
-                ! One child finished (or timed out): its receipt was allocated
-                ! its sequence number just now, in completion order.
-                finished_case = test_children(slot)%case_name
-                test_children(slot)%pid = 0
-                call set_running_summary(test_children)
-                completed = completed + 1
-                if (ierr /= 0) then
-                    fatal_error = .true.
-                    exit
-                end if
-                call publish_state(session, owner_request, state_name, &
-                    active_generation, candidate_generation, finished_case, &
-                    completed, selected_count, campaign_seed, observed_outcome, &
-                    test_exit, ierr, message)
-                if (ierr /= 0) then
-                    fatal_error = .true.
-                    exit
-                end if
-                call advance_campaign(project_dir, session, owner_request, &
-                    active_generation, selected, &
-                    selected_count, test_index, campaign_seed, campaign_number, &
-                    campaign_started_ms, test_children, lane_jobs, .false., ierr, &
-                    message, completed, state_name, sequence)
-                if (ierr /= 0) then
-                    fatal_error = .true.
-                    exit
-                end if
-            end do
-            if (fatal_error) exit
-
-            ! Snapshot consumers before the provider poll: a request arriving
-            ! after this point must wait for the next poll, never an older one.
-            freshness_path = trim(session%state_dir)//'/freshness-'// &
-                trim(session%session_id)
-            freshness_ticket = 0_int64
-            call gremlin_freshness_update(trim(freshness_path), 0, &
-                freshness_ticket, state_error)
-            if (state_error /= 0) freshness_ticket = 0_int64
-            call maybe_capture_latest(project_dir, session, driver_pin, owner_request, &
-                active_generation, &
-                candidate_generation, have_active, have_candidate, last_failed_identity, &
-                build_child, candidate_lease, have_candidate_lease, heavy_work_lease, &
-                have_heavy_work_lease, stop_requested, capture_debounce_ms, &
-                change_watch, sequence, completed, selected_count, campaign_seed, &
-                current_test_name(selected, selected_count), state_name, capture_failed, &
-                ierr, message, provider_quiet)
-            if (ierr /= 0) then
-                fatal_message = trim(message)
-                fatal_error = .true.
-                exit
-            end if
-            if (capture_failed) then
-                state_name = 'capture_failed'
-                capture_error = 1
-                capture_diagnostic = trim(message)
-                call publish_state(session, owner_request, state_name, active_generation, &
-                    candidate_generation, current_test_name(selected, selected_count), &
-                    completed, selected_count, campaign_seed, 'NONE', capture_error, &
-                    state_error, state_message, diagnostic=trim(capture_diagnostic))
-                if (state_error /= 0) then
-                    fatal_message = 'cannot publish capture failure: '//trim(state_message)
-                    fatal_error = .true.
-                    exit
-                end if
-                ierr = 0
-            end if
-            if (build_child%pid <= 0 .and. running_count(test_children) == 0 .and. &
-                    have_heavy_work_lease) then
-                call release_heavy_work_slot(heavy_work_lease, &
-                    have_heavy_work_lease, ierr, message)
-                if (ierr /= 0) then
-                    fatal_message = trim(message)
-                    fatal_error = .true.
-                    exit
-                end if
-            end if
-            if (freshness_ticket > 0_int64 .and. &
-                (owner_request%input_changed .or. provider_quiet)) &
-                call gremlin_freshness_update(trim(freshness_path), 2, &
-                freshness_ticket, state_error)
-            call fs_sleep_ms(100)
-        end do
-        call change_watch_close(change_watch)
-
-        if (fatal_error) then
-            if (len_trim(fatal_message) == 0) fatal_message = trim(message)
-            if (len_trim(fatal_message) == 0) &
-                fatal_message = 'Gremlin stopped after an evidence or process error'
-            cancel_error = 0
-            call cancel_all_test_cases(session, active_generation, test_children, &
-                cancel_error, state_message)
-            if (build_child%pid > 0) then
-                call cancel_owned_process(build_child%pid, build_exit)
-                if (build_exit /= 0 .and. cancel_error == 0) cancel_error = build_exit
-                if (build_exit == 0) then
-                    build_child%pid = 0
-                    if (build_child%execution_view%active) then
-                        call execution_view_release( &
-                            build_child%execution_view, .false., &
-                            build_view_cleanup_status, build_view_cleanup_message)
-                    end if
-                    candidate_generation%build_project_root = ''
-                end if
-            end if
-            if (cancel_error == 0) then
-                if (candidate_pinned) then
-                    call gremlin_generation_pin_at(candidate_generation%root, .false., &
-                        state_error, state_message)
-                    if (state_error == 0) candidate_pinned = .false.
-                    if (state_error /= 0) fatal_message = &
-                        'cannot release failed candidate pin: '//trim(state_message)
-                end if
-                call release_generation_lease(candidate_lease, have_candidate_lease, &
-                    state_error, state_message)
-                if (state_error /= 0) fatal_message = trim(state_message)
-                call release_generation_lease(active_lease, have_active_lease, &
-                    state_error, state_message)
-                if (state_error /= 0) fatal_message = trim(state_message)
-                call release_heavy_work_slot(heavy_work_lease, &
-                    have_heavy_work_lease, state_error, state_message, drain=.true.)
-                if (state_error /= 0) fatal_message = trim(state_message)
-            else if (build_child%pid > 0 .and. len_trim(candidate_generation%root) > 0) then
-                call gremlin_generation_pin_at(candidate_generation%root, .true., &
-                    state_error, state_message)
-            end if
-            call publish_state(session, owner_request, 'error', active_generation, &
-                candidate_generation, current_test_name(selected, selected_count), &
-                completed, selected_count, campaign_seed, 'INFRA_ERROR', 1, &
-                state_error, state_message, diagnostic=trim(fatal_message))
-            if (state_error /= 0) fatal_message = trim(state_message)
-            if (cancel_error /= 0) fatal_message = &
-                'process cancellation failed: '//trim(int_text(cancel_error))
-            if (cancel_error == 0 .and. state_error == 0) then
-                call gremlin_publish_terminal_snapshot(project_dir, session, release_error, &
-                    state_message)
-                if (release_error == 0) then
-                    call gremlin_session_release(session, release_error, state_message)
-                end if
-                if (release_error /= 0) fatal_message = &
-                    'cannot preserve terminal Gremlin ownership record: '//trim(state_message)
-            end if
-            call error_response('run', trim(fatal_message), response)
-            exitcode = 2
-            return
-        end if
-        stop_requested = stop_requested .or. running_count(test_children) > 0 .or. &
-            build_child%pid > 0
-        cancel_error = 0
-        call cancel_all_test_cases(session, active_generation, test_children, &
-            cancel_error, state_message)
-        if (build_child%pid > 0) then
-            call cancel_owned_process(build_child%pid, build_exit)
-            if (build_exit /= 0 .and. cancel_error == 0) cancel_error = build_exit
-            if (build_exit == 0) then
-                build_child%pid = 0
-                if (build_child%execution_view%active) &
-                    call execution_view_release(build_child%execution_view, .false., &
-                        release_error, state_message)
-                candidate_generation%build_project_root = ''
-            end if
-        end if
-        if (cancel_error /= 0) then
-            call publish_state(session, owner_request, 'error', active_generation, &
-                candidate_generation, current_test_name(selected, selected_count), &
-                completed, selected_count, campaign_seed, 'INFRA_ERROR', cancel_error, &
-                state_error, state_message)
-            if (build_child%pid > 0 .and. len_trim(candidate_generation%root) > 0) then
-                call gremlin_generation_pin_at(candidate_generation%root, .true., &
-                    release_error, message)
-            end if
-            call error_response('run', 'cannot cancel owned Gremlin work: '// &
-                trim(int_text(cancel_error))//'; '//trim(state_message), response)
-            exitcode = 2
-            return
-        end if
-        call release_generation_lease(candidate_lease, have_candidate_lease, &
-            state_error, state_message)
-        if (state_error == 0) call release_generation_lease(active_lease, &
-            have_active_lease, state_error, state_message)
-        if (state_error == 0) call release_heavy_work_slot(heavy_work_lease, &
-            have_heavy_work_lease, state_error, state_message, drain=.true.)
-        if (state_error /= 0) then
-            call publish_state(session, owner_request, 'error', active_generation, &
-                candidate_generation, '', completed, selected_count, campaign_seed, &
-                'INFRA_ERROR', state_error, release_error, message)
-            if (release_error == 0) then
-                call gremlin_publish_terminal_snapshot(project_dir, session, release_error, message)
-                if (release_error == 0) then
-                    call gremlin_session_release(session, release_error, message)
-                end if
-            end if
-            call error_response('run', 'cannot release generation lease: '// &
-                trim(state_message), response)
-            exitcode = 2
-            return
-        end if
-        state_name = 'NONE'
-        if (stop_requested) state_name = 'CANCELLED'
-        call publish_state(session, owner_request, 'stopped', active_generation, &
-            candidate_generation, '', completed, selected_count, campaign_seed, &
-            state_name, 0, ierr, message, status_text_out=status_text)
-        if (ierr /= 0) then
-            state_error = ierr
-            call gremlin_release_stopped_session(project_dir, session, &
-                trim(status_text), release_error, state_message)
-            if (release_error /= 0) then
-                call error_response('run', 'cannot durably terminalize stopped Gremlin '// &
-                    'state after state publication error ('//trim(int_text(state_error))// &
-                    '): '//trim(state_message), response)
-            else
-                call error_response('run', 'cannot publish stopped Gremlin state ('// &
-                    trim(int_text(state_error))//'); stored the constructed terminal state', &
-                    response)
-            end if
-            exitcode = 2
-            return
-        end if
-        call gremlin_release_stopped_session(project_dir, session, trim(status_text), &
-            ierr, message)
-        if (ierr /= 0) then
-            call error_response('run', trim(message), response)
-            exitcode = 2
-            return
-        end if
-        if (len_trim(active_generation%build_project_root) > 0) then
-            call fs_remove_tree(trim(active_generation%build_project_root))
-            active_generation%build_project_root = ''
-        end if
-        ! Stopping keeps this session's generations: terminal reproduction replays
-        ! them after the owner exits. Later builds prune inactive generations.
-        call maintain_fo_cache(cache_cursor, cache_status)
-        if (cache_status /= 0) write (error_unit, '(a,i0)') &
-            'Gremlin cache maintenance at stop: ', cache_status
-        call simple_response('run', request%lane_id, session%session_id, 'stopped', response)
-    end subroutine run_owner
-
-    subroutine maintain_fo_cache(scan_cursor, ierr)
-        integer, intent(inout) :: scan_cursor
-        integer, intent(out) :: ierr
-        type(action_result_store_t) :: store
-        character(len=PATH_LEN) :: root
-        integer :: scanned, retired, deleted, scanned_rows, compacted
-        integer :: action_status, compact_status
-
-        call cache_store_root(root)
-        call action_result_store_init(store, trim(root), ierr)
-        if (ierr /= ACTION_RESULT_OK) return
-        call action_result_maintenance_tick(store, scanned, retired, deleted, &
-            action_status)
-        call immutable_store_compact_generation_roots(store%objects, &
-            4096, 1, 4096, scanned_rows, compacted, compact_status, scan_cursor)
-        ierr = action_status
-        if (ierr == ACTION_RESULT_OK .and. compact_status /= IMMUTABLE_OK) &
-            ierr = compact_status
-    end subroutine maintain_fo_cache
-
-    subroutine acquire_heavy_work_slot(session, lease, held, honor_stop, &
-            stop_requested, ierr, message, would_wait)
-        type(gremlin_session_t), intent(in) :: session
-        type(gremlin_lease_group_t), intent(inout) :: lease
-        logical, intent(inout) :: held
-        logical, intent(in) :: honor_stop
-        logical, intent(out) :: stop_requested
-        integer, intent(out) :: ierr
-        character(len=*), intent(out) :: message
-        !! When present, return at once with would_wait = .true. instead of
-        !! waiting for a slot that other lanes hold, so callers can publish why.
-        logical, intent(out), optional :: would_wait
-
-        logical :: busy
-        integer :: weight
-
-        ierr = 0
-        message = ''
-        stop_requested = .false.
-        if (present(would_wait)) would_wait = .false.
-        if (held) then
-            if (.not. lease%closing) return
-        end if
-        weight = gremlin_heavy_work_weight()
-        do
-            if (held) then
-                call release_heavy_work_slot(lease, held, ierr, message)
-                if (ierr /= 0) return
-                busy = held
-            else
-                call gremlin_host_lease_acquire_weighted(GREMLIN_HEAVY_LEASE, &
-                    GREMLIN_HEAVY_LANE_CAPACITY, weight, lease, busy, ierr, message)
-            end if
-            if (ierr == 0) then
-                if (.not. busy) then
-                    if (lease%count == 0) cycle
-                    held = .true.
-                    return
-                end if
-            end if
-            if (.not. busy) then
-                message = 'cannot acquire Gremlin host work slot: '//trim(message)
-                return
-            end if
-            if (present(would_wait)) then
-                ! A busy slot reports EAGAIN; that is a wait, not a failure.
-                ierr = 0
-                message = ''
-                would_wait = .true.
-                return
-            end if
-            if (honor_stop) then
-                call gremlin_session_stop_requested(session, stop_requested, &
-                    ierr, message)
-                if (ierr /= 0) then
-                    message = 'cannot check Gremlin stop while waiting for host '// &
-                        'work slot: '//trim(message)
-                    return
-                end if
-                if (stop_requested) return
-            end if
-            call fs_sleep_ms(100)
-        end do
-    end subroutine acquire_heavy_work_slot
-
-    subroutine release_heavy_work_slot(lease, held, ierr, message, drain)
-        type(gremlin_lease_group_t), intent(inout) :: lease
-        logical, intent(inout) :: held
-        integer, intent(out) :: ierr
-        character(len=*), intent(out) :: message
-
-        logical, intent(in), optional :: drain
-        logical :: wait_for_children
-
-        wait_for_children = .false.
-        if (present(drain)) wait_for_children = drain
-        ierr = 0
-        message = ''
-        if (.not. held) return
-        do
-            call gremlin_host_lease_release(lease, ierr, message)
-            if (ierr /= 0 .or. lease%count == 0) exit
-            if (.not. wait_for_children) exit
-            call fs_sleep_ms(20)
-        end do
-        if (ierr == 0 .and. lease%count == 0) held = .false.
-        if (ierr /= 0) message = &
-            'cannot release Gremlin host work slot: '//trim(message)
-    end subroutine release_heavy_work_slot
-
-    integer function receipt_limit() result(limit)
-        !! Campaign journal retention: FO_GREMLIN_RECEIPT_LIMIT clamped to
-        !! [GREMLIN_MIN_RECEIPT_LIMIT, GREMLIN_POLICY_RECEIPT_LIMIT].
-        character(len=32) :: value
-        integer :: status, parsed
-
-        limit = GREMLIN_POLICY_RECEIPT_LIMIT
-        call get_environment_variable('FO_GREMLIN_RECEIPT_LIMIT', value, status=status)
-        if (status /= 0) return
-        read (value, *, iostat=status) parsed
-        if (status /= 0) return
-        limit = max(GREMLIN_MIN_RECEIPT_LIMIT, min(GREMLIN_POLICY_RECEIPT_LIMIT, parsed))
-    end function receipt_limit
-
-    integer function gremlin_host_jobs() result(jobs)
-        !! Host job budget; matches native_jobs(): unset/invalid FO_JOBS keeps
-        !! the host default.
-        character(len=32) :: value
-        integer :: status, parse_status
-
-        jobs = process_detect_nproc()
-        if (jobs < 1) jobs = 1
-        call get_environment_variable('FO_JOBS', value, status=status)
-        if (status == 0 .and. len_trim(value) > 0) then
-            read (value, *, iostat=parse_status) jobs
-            if (parse_status /= 0 .or. jobs < 1) then
-                jobs = process_detect_nproc()
-                if (jobs < 1) jobs = 1
-            end if
-        end if
-    end function gremlin_host_jobs
-
-    integer function gremlin_heavy_work_weight() result(weight)
-        !! Host admission weight of this lane out of GREMLIN_HEAVY_LANE_CAPACITY:
-        !! min(capacity, FO_JOBS). A lane that fans out (jobs > 1) holds the
-        !! whole capacity, so parallel lanes never overlap on the host while two
-        !! serial FO_JOBS=1 lanes still share it.
-        weight = min(GREMLIN_HEAVY_LANE_CAPACITY, gremlin_host_jobs())
-        if (lane_admission_jobs > 1) weight = GREMLIN_HEAVY_LANE_CAPACITY
-    end function gremlin_heavy_work_weight
-
-    subroutine maybe_capture_latest(project_dir, session, driver_pin, request, &
-            active, candidate, &
-            have_active, have_candidate, last_failed, build_child, candidate_lease, &
-            have_candidate_lease, heavy_work_lease, have_heavy_work_lease, &
-            stop_requested, capture_debounce_ms, change_watch, sequence, &
-            completed, selected_count, seed, current_case, resume_state, capture_failed, &
-            ierr, message, provider_quiet)
-        character(len=*), intent(in) :: project_dir
-        type(gremlin_session_t), intent(in) :: session
-        type(driver_pin_t), intent(in) :: driver_pin
-        type(gremlin_request_t), intent(inout) :: request
-        type(generation_t), intent(in) :: active
-        type(generation_t), intent(inout) :: candidate
-        logical, intent(in) :: have_active
-        logical, intent(inout) :: have_candidate
-        character(len=*), intent(inout) :: last_failed
-        type(child_t), intent(inout) :: build_child
-        type(gremlin_lease_t), intent(inout) :: candidate_lease
-        logical, intent(inout) :: have_candidate_lease
-        type(gremlin_lease_group_t), intent(inout) :: heavy_work_lease
-        logical, intent(inout) :: have_heavy_work_lease
-        logical, intent(inout) :: stop_requested
-        integer(int64), intent(inout) :: capture_debounce_ms
-        type(change_watch_t), intent(inout) :: change_watch
-        integer, intent(inout) :: sequence
-        integer, intent(in) :: completed, selected_count, seed
-        character(len=*), intent(in) :: current_case, resume_state
-        logical, intent(out) :: capture_failed, provider_quiet
-        integer, intent(out) :: ierr
-        character(len=*), intent(out) :: message
-
-        type(generation_t) :: current
-        type(gremlin_lease_t) :: current_lease
-        character(len=PATH_LEN) :: changed_path
-        logical :: ok, got_event, slot_busy
-        integer(int64) :: now_ms
-        integer :: spawn_error, journal_error, release_error, event_type, watch_error
-        integer :: state_error
-        character(len=16) :: resumed
-        character(len=PATH_LEN) :: state_message
-
-        ierr = 0
-        message = ''
-        capture_failed = .false.
-        ! A zero-timeout provider poll deliberately cannot finish a pending
-        ! structural reconciliation. Give the watcher a bounded tick so its
-        ! quiet deadline can expire while the owner loop remains responsive.
-        call change_watch_poll(change_watch, 1, changed_path, event_type, &
-            got_event, watch_error, provider_quiet)
-        if (watch_error /= 0) then
-            ierr = watch_error
-            message = 'Gremlin change watcher reconciliation failed'
-            return
-        end if
-        call clock_milliseconds(now_ms)
-        if (got_event) then
-            request%event_epoch = request%event_epoch + 1
-            request%input_changed = .true.
-            call publish_state(session, request, 'capture_pending', active, candidate, &
-                current_case, completed, selected_count, seed, 'NONE', 0, ierr, message)
-            if (ierr /= 0) return
-            capture_debounce_ms = now_ms + 250_int64
-            return
-        end if
-        if (capture_debounce_ms <= 0_int64 .or. now_ms < capture_debounce_ms) return
-        capture_debounce_ms = 0_int64
-        call capture_candidate(project_dir, driver_pin, current, current_lease, ok, &
-            release_error, message, change_watch)
-        if (release_error /= 0) then
-            ierr = release_error
-            message = 'cannot register captured generation: '//trim(message)
-            return
-        end if
-        if (.not. ok) then
-            capture_failed = .true.
-            return
-        end if
-        if (have_candidate) then
-            if (current%identity == candidate%identity) then
-                call gremlin_lease_release(current_lease, release_error, message)
-                if (release_error /= 0) ierr = release_error
-                return
-            end if
-            if (build_child%pid > 0) then
-                call cancel_owned_process(build_child%pid, ierr)
-                if (ierr /= 0) then
-                    message = 'cannot cancel superseded candidate build process'
-                    return
-                end if
-                build_child%pid = 0
-            end if
-            if (have_candidate_lease) then
-                call gremlin_lease_release(candidate_lease, release_error, message)
-                if (release_error /= 0) then
-                    ierr = release_error
-                    message = 'cannot release superseded candidate generation lease'
-                    return
-                end if
-                have_candidate_lease = .false.
-            end if
-            have_candidate = .false.
-        end if
-        if (have_active) then
-            if (current%identity == active%identity) then
-                call gremlin_lease_release(current_lease, release_error, message)
-                if (release_error /= 0) then
-                    ierr = release_error
-                    return
-                end if
-                request%input_changed = .false.
-                ! The edit left the generation unchanged: resume the state the
-                ! lane slept in instead of waking it into an endless testing phase.
-                resumed = 'testing'
-                if (trim(resume_state) == 'quiescent') resumed = 'quiescent'
-                call publish_state(session, request, trim(resumed), active, current, &
-                    current_case, completed, selected_count, seed, 'NONE', 0, ierr, message)
-                return
-            end if
-        end if
-        if (current%identity == last_failed) then
-            call gremlin_lease_release(current_lease, release_error, message)
-            if (release_error /= 0) ierr = release_error
-            return
-        end if
-        call acquire_heavy_work_slot(session, heavy_work_lease, &
-            have_heavy_work_lease, .true., stop_requested, ierr, message, slot_busy)
-        if (ierr == 0 .and. slot_busy) then
-            call publish_state(session, request, 'capture_pending', active, current, &
-                current_case, completed, selected_count, seed, 'NONE', 0, &
-                diagnostic='waiting for a host Gremlin work slot held by other lanes')
-            call acquire_heavy_work_slot(session, heavy_work_lease, &
-                have_heavy_work_lease, .true., stop_requested, ierr, message)
-        end if
-        if (ierr /= 0 .or. stop_requested) then
-            call gremlin_lease_release(current_lease, release_error, message)
-            if (ierr == 0 .and. release_error /= 0) ierr = release_error
-            return
-        end if
-        candidate = current
-        have_candidate = .true.
-        candidate_lease = current_lease
-        current_lease%lock_fd = -1
-        have_candidate_lease = .true.
-        call start_build(session, request, candidate, build_child, spawn_error, &
-            message)
-        if (spawn_error /= 0) then
-            have_candidate = .false.
-            last_failed = candidate%identity
-            sequence = sequence + 1
-            call record_immediate_case(session, request, candidate, '<build>', &
-                spawn_error, 'INFRA_ERROR', sequence, 0, request%seed, &
-                build_child%log_file, journal_error, message)
-            call gremlin_lease_release(candidate_lease, release_error, message)
-            if (release_error == 0) have_candidate_lease = .false.
-            if (journal_error /= JOURNAL_OK) then
-                ierr = journal_error
-                return
-            end if
-            if (release_error /= 0) then
-                ierr = release_error
-                message = 'cannot release failed candidate generation lease'
-                return
-            end if
-            ierr = spawn_error
-            message = 'cannot start candidate build'
-        else
-            call publish_state(session, request, 'building', active, candidate, &
-                current_case, completed, selected_count, seed, 'NONE', 0, &
-                state_error, state_message)
-            if (state_error /= 0) then
-                ierr = state_error
-                message = 'cannot publish candidate build start: '//trim(state_message)
-            end if
-        end if
-    end subroutine maybe_capture_latest
-
-    subroutine start_build(session, request, generation, child, ierr, message)
-        !! Build the generation once for its campaigns: a focused campaign
-        !! (explicit targets, no random cases) builds what its cases need,
-        !! any other campaign what every inventory case needs.
-        type(gremlin_session_t), intent(in) :: session
-        type(gremlin_request_t), intent(in) :: request
-        type(generation_t), intent(inout) :: generation
-        type(child_t), intent(out) :: child
-        integer, intent(out) :: ierr
-        character(len=*), intent(out) :: message
-
-        character(len=PATH_LEN) :: executable, view_message
-        character(len=:), allocatable :: packed
-        integer :: n_args, spawn_exit, view_status, i
-        logical :: exists
-
-        child = child_t()
-        if (generation%driver_digest /= session%driver_digest .or. &
-            generation%driver_size /= session%driver_size .or. &
-            len_trim(session%driver_path) == 0) then
-            ierr = 1
-            message = 'candidate generation does not match the pinned fo driver'
-            return
-        end if
-        inquire (file=trim(session%driver_path), exist=exists)
-        if (.not. exists) then
-            ierr = 1
-            message = 'pinned fo driver is missing; refusing to launch candidate build'
-            return
-        end if
-        executable = session%driver_path
-        generation%build_project_root = ''
-        call execution_view_create(trim(session%state_dir)//'/views', &
-            generation%identity, trim(session%session_id)//'-build', 'build', &
-            generation%input_inventory, generation%input_inventory_ready, &
-            generation%input_inventory_complete, child%execution_view, ierr, message, &
-            candidate_bundle_root=trim(generation%root)//'/bundle')
-        if (ierr /= 0) then
-            message = 'cannot create candidate build view: '//trim(message)
-            return
-        end if
-        generation%build_project_root = child%execution_view%cwd
-        call log_path(session, 'build-'//generation%identity(1:16), child%log_file)
-        n_args = 0
-        call argv_push(packed, n_args, trim(executable))
-        call argv_push(packed, n_args, 'build')
-        call argv_push(packed, n_args, '--tests')
-        if (request%random_count == 0) then
-            do i = 1, request%n_targets
-                call argv_push(packed, n_args, '--case')
-                call argv_push(packed, n_args, trim(request%targets(i)))
-            end do
-        end if
-        ! A scoped lane builds the plan targets of its scope only.
-        call push_scope_args(packed, n_args, request)
-        call process_start_argv_logged(trim(child%execution_view%cwd), packed, &
-            n_args, trim(child%log_file), child%pid, spawn_exit, &
-            'FO_DISABLE_SELF_REFRESH=1;FO_SELF_REFRESH=0;'// &
-            'FO_GREMLIN_FROZEN_ROOT='//trim(child%execution_view%cwd)//';TMPDIR='// &
-            trim(child%execution_view%tmpdir))
-        ierr = spawn_exit
-        if (ierr /= 0) then
-            message = 'cannot start candidate build'
-            child%pid = 0
-            call execution_view_release(child%execution_view, .false., view_status, &
-                view_message)
-            generation%build_project_root = ''
-            return
-        end if
-        call clock_seconds(child%started_at)
-        message = ''
-    end subroutine start_build
-
-    subroutine complete_build(live_dir, session, request, candidate, build_child, &
-            build_exit, &
-            active, have_active, test_children, active_lease, candidate_lease, &
-            have_active_lease, have_candidate_lease, active_pinned, candidate_pinned, &
-            selected, selected_count, seed, completed, state_name, last_failed, &
-            sequence, ierr, message)
-        !! live_dir: the project directory the lane watches (the source of
-        !! the first generation's delta; the generation holds a frozen copy).
-        character(len=*), intent(in) :: live_dir
-        type(gremlin_session_t), intent(in) :: session
-        type(gremlin_request_t), intent(inout) :: request
-        type(generation_t), intent(inout) :: candidate, active
-        type(child_t), intent(inout) :: build_child, test_children(:)
-        type(gremlin_lease_t), intent(inout) :: active_lease, candidate_lease
-        integer, intent(in) :: build_exit
-        logical, intent(inout) :: have_active
-        logical, intent(inout) :: have_active_lease, have_candidate_lease
-        logical, intent(inout) :: active_pinned, candidate_pinned
-        character(len=*), intent(out) :: selected(:)
-        integer, intent(out) :: selected_count
-        integer, intent(inout) :: seed
-        integer, intent(in) :: completed
-        character(len=*), intent(out) :: state_name, last_failed
-        integer, intent(inout) :: sequence
-        integer, intent(out) :: ierr
-        character(len=*), intent(out) :: message
-
-        type(gremlin_lease_t) :: new_active_lease
-        type(gremlin_request_t), allocatable :: selection_request
-        integer :: inventory_status, cancel_exit, mandatory_count, state_status
-        integer :: release_status, pin_status, i
-        character(len=PATH_LEN) :: state_message, release_message
-        character(len=PATH_LEN) :: coverage_path, discovery_diagnostic
-        type(gremlin_coverage_view_t) :: coverage_view
-        character(len=NAME_LEN) :: active_case
-        logical :: was_active
-
-        ierr = 0
-        message = ''
-        allocate (selection_request)
-        was_active = have_active
-        call record_build(session, request, candidate, build_exit, build_child%log_file, &
-            sequence, ierr, message)
-        if (ierr /= 0) return
-        build_child%pid = 0
-        if (build_exit /= 0) then
-            call gremlin_retain_build_log(build_child%log_file)
-            if (build_child%execution_view%active) &
-                call execution_view_release(build_child%execution_view, .false., &
-                    release_status, release_message)
-            candidate%build_project_root = ''
-            last_failed = candidate%identity
-            state_name = 'build_failed'
-            active_case = ''
-            do i = 1, size(test_children)
-                if (test_children(i)%pid > 0) then
-                    active_case = test_children(i)%case_name
-                    exit
-                end if
-            end do
-            call publish_state(session, request, state_name, active, candidate, &
-                trim(active_case), &
-                completed, selected_count, seed, 'BUILD_FAIL', build_exit, ierr, message)
-            if (ierr /= 0) return
-            if (have_candidate_lease) then
-                call gremlin_lease_release(candidate_lease, release_status, release_message)
-                if (release_status /= 0) then
-                    ierr = release_status
-                    message = 'cannot release failed candidate generation lease: '// &
-                        trim(release_message)
-                    return
-                end if
-                have_candidate_lease = .false.
-            end if
-            return
-        end if
-        ! The completed build keeps its CWD for campaign artifacts, but no
-        ! process still owns its disposable scratch after successful completion.
-        call execution_view_release(build_child%execution_view, .true., &
-            release_status, release_message)
-        if (release_status /= 0) then
-            ierr = release_status
-            message = 'cannot release completed build scratch: '//trim(release_message)
-            return
-        end if
-        if (allocated(request%impact_cases)) deallocate(request%impact_cases)
-        request%n_impact_cases = 0
-        request%impact_all = .false.
-        call gremlin_generation_lease_acquire_at(candidate%root, new_active_lease, &
-            ierr, message)
-        if (ierr /= 0) then
-            message = 'cannot lease successfully built generation: '//trim(message)
-            return
-        end if
-        call gremlin_generation_pin_at(candidate%root, .true., pin_status, message)
-        if (pin_status /= 0) then
-            ierr = pin_status
-            message = 'cannot preserve successfully built generation: '//trim(message)
-            call gremlin_lease_release(new_active_lease, release_status, release_message)
-            return
-        end if
-        candidate_pinned = .true.
-        if (running_count(test_children) > 0) then
-            ! Supersession: every in-flight child of the old generation goes.
-            call cancel_all_test_cases(session, active, test_children, cancel_exit, &
-                message)
-            if (cancel_exit /= 0) then
-                ierr = cancel_exit
-                message = 'cannot cancel obsolete generation test process'
-                call gremlin_generation_pin_at(candidate%root, .false., &
-                    pin_status, release_message)
-                if (pin_status == 0) candidate_pinned = .false.
-                call gremlin_lease_release(new_active_lease, release_status, release_message)
-                return
-            end if
-        end if
-
-        if (active_pinned) then
-            call gremlin_generation_pin_at(active%root, .false., pin_status, message)
-            if (pin_status /= 0) then
-                ierr = pin_status
-                message = 'cannot release previous generation pin: '//trim(message)
-                call gremlin_generation_pin_at(candidate%root, .false., &
-                    state_status, release_message)
-                if (state_status == 0) candidate_pinned = .false.
-                call gremlin_lease_release(new_active_lease, release_status, release_message)
-                return
-            end if
-            active_pinned = .false.
-        end if
-        if (have_active_lease) then
-            call gremlin_lease_release(active_lease, release_status, release_message)
-            if (release_status /= 0) then
-                call gremlin_generation_pin_at(active%root, .true., state_status, &
-                    release_message)
-                if (state_status == 0) active_pinned = .true.
-                call gremlin_generation_pin_at(candidate%root, .false., &
-                    state_status, release_message)
-                if (state_status == 0) candidate_pinned = .false.
-                call gremlin_lease_release(new_active_lease, state_status, release_message)
-                ierr = release_status
-                message = 'cannot release previous generation lease: '//trim(release_message)
-                return
-            end if
-            have_active_lease = .false.
-        end if
-
-        active_lease%resource = new_active_lease%resource
-        active_lease%slot = new_active_lease%slot
-        active_lease%lock_fd = new_active_lease%lock_fd
-        new_active_lease%lock_fd = -1
-        new_active_lease%slot = -1
-        have_active_lease = .true.
-        candidate%build_project_root = build_child%execution_view%cwd
-        if (was_active .and. len_trim(active%build_project_root) > 0) &
-            call fs_remove_tree(trim(active%build_project_root))
-        request%has_previous_generation = was_active
-        request%requirement_digest = ''
-        request%gate_cases = ''
-        if (was_active) then
-            call generation_model_adopt(active, candidate)
-            call generation_model_expand(candidate)
-            ! Impact on the candidate's model and its built view.
-            call compute_generation_impact(active, candidate, request)
-        else if (allocated(candidate%model)) then
-            deallocate (candidate%model)
-        end if
-        active = candidate
-        have_active = .true.
-        request%input_changed = .false.
-        request%gate_required_count = 0
-        active_pinned = .true.
-        candidate_pinned = .false.
-        if (have_candidate_lease) then
-            call gremlin_lease_release(candidate_lease, release_status, release_message)
-            if (release_status /= 0) then
-                ierr = release_status
-                message = 'cannot release candidate generation lease: '//trim(release_message)
-                return
-            end if
-            have_candidate_lease = .false.
-        end if
-        last_failed = ''
-        if (was_active) seed = next_campaign_seed(seed)
-        selection_request = request
-        selection_request%seed = seed
-        call discover_campaign(active, session, &
-            selection_request, selected, selected_count, mandatory_count, seed, &
-            inventory_status, message, live_dir=live_dir)
-        request%requirement_digest = selection_request%requirement_digest
-        request%gate_cases = selection_request%gate_cases
-        request%gate_required_count = selection_request%gate_required_count
-        if (inventory_status /= 0) then
-            state_name = 'inventory_failed'
-            selected_count = 0
-            discovery_diagnostic = trim(message)
-            if (len_trim(discovery_diagnostic) == 0) &
-                discovery_diagnostic = 'discovery returned an unspecified error'
-            call publish_state(session, request, state_name, active, candidate, '', &
-                completed, selected_count, seed, 'INFRA_ERROR', inventory_status, &
-                ierr, message, diagnostic=trim(discovery_diagnostic))
-            if (ierr == 0) then
-                ierr = inventory_status
-                message = 'cannot discover the frozen test inventory: '// &
-                    trim(discovery_diagnostic)
-            end if
-            return
-        end if
-        state_name = 'testing'
-        if (selected_count == 0) then
-            state_name = 'idle'
-            if (request%random_count == 0 .and. request%gate_required_count > 0) &
-                state_name = 'quiescent'
-            coverage_path = trim(session%state_dir)//'/coverage-'// &
-                trim(active%identity)//'.state'
-            call coverage_read_view_path(trim(coverage_path), active%identity, &
-                coverage_view, inventory_status, message)
-            if (inventory_status == COVERAGE_OK) then
-                if (coverage_view%green .and. request%gate_required_count > 0) &
-                    state_name = 'quiescent'
-            else if (inventory_status /= COVERAGE_NOT_FOUND) then
-                ierr = inventory_status
-                return
-            end if
-        end if
-        call publish_state(session, request, state_name, active, candidate, &
-            current_test_name(selected, selected_count), completed, selected_count, &
-            seed, 'NONE', 0, ierr, message)
-        if (ierr == 0 .and. was_active) then
-            call gremlin_generation_prune_inactive(active%root, state_status, &
-                release_message)
-            if (state_status /= 0) write (error_unit, '(a)') &
-                'Gremlin generation cleanup: '//trim(release_message)
-        end if
-    end subroutine complete_build
-
-    subroutine compute_generation_impact(baseline, candidate, request)
-        !! Cases of the candidate affected by its input changes against the
-        !! previous generation: model_affected on the candidate's model
-        !! (fpm and CMake alike) with the changed project files of the two
-        !! inventories. Changed inputs outside the project files (global
-        !! roles, dependency trees, CMake context), an incomplete inventory
-        !! or another fo driver widen to every case.
-        type(generation_t), intent(inout) :: baseline, candidate
-        type(gremlin_request_t), intent(inout) :: request
-
-        type(backend_t) :: backend
-        type(string_t), allocatable :: changed(:), reasons(:), roots(:)
-        type(string_t), allocatable :: widen_reasons(:)
-        integer, allocatable :: cases(:), affected(:)
-        character(len=PATH_LEN) :: message, project
-        integer :: ierr, i
-
-        if (allocated(request%impact_cases)) deallocate(request%impact_cases)
-        request%n_impact_cases = 0
-        request%impact_all = .true.
-        project = campaign_project(candidate)
-        backend = detect_backend(trim(project))
-        ! The frozen FO_CMAKE_NATIVE route has no model: every case.
-        if (.not. project_has_model(backend)) return
-        if (.not. baseline%input_inventory_ready) then
-            call generation_inventory_restore(baseline, ierr, message)
-            if (ierr /= 0) return
-        end if
-        if (.not. candidate%input_inventory_ready) then
-            call generation_inventory_restore(candidate, ierr, message)
-            if (ierr /= 0) return
-        end if
-        call generation_model_ensure(candidate, ierr, message)
-        if (ierr /= 0 .or. .not. allocated(candidate%model)) return
-        call generation_units_ensure(candidate, trim(project))
-        call generation_inventory_changes(baseline%input_inventory, &
-            candidate%input_inventory, changed, reasons)
-        if (baseline%driver_digest /= candidate%driver_digest .or. &
-            baseline%driver_size /= candidate%driver_size) &
-            call push_reason('fo driver changed')
-        call generation_model_roots(candidate, trim(project), roots)
-        call project_inventory_cases(candidate%model, cases)
-        if (size(reasons) > 0) then
-            call project_affected_cases(candidate%model, candidate%units, roots, &
-                cases, changed, affected, widen_reasons, force_reason=reasons(1)%s)
-        else
-            call project_affected_cases(candidate%model, candidate%units, roots, &
-                cases, changed, affected, widen_reasons)
-        end if
-        request%impact_all = .false.
-        request%n_impact_cases = size(affected)
-        allocate (request%impact_cases(size(affected)))
-        do i = 1, size(affected)
-            request%impact_cases(i) = candidate%model%cases(affected(i))%name
-        end do
+        call finish('', spawned .and. test_exit /= 0)
+        if (exitcode /= 2) call simple_response('reproduce', request%lane_id, &
+            session%session_id, trim(outcome), response)
 
     contains
 
-        subroutine push_reason(text)
-            character(len=*), intent(in) :: text
-            type(string_t), allocatable :: grown(:)
+        subroutine finish(error_text, retain_views)
+            !! Release everything this reproduction holds, in reverse order;
+            !! error_text (or the first release failure) is the response.
+            character(len=*), intent(in) :: error_text
+            logical, intent(in), optional :: retain_views
+            character(len=PATH_LEN) :: failure
+            logical :: retain
 
-            allocate (grown(size(reasons) + 1))
-            grown(1:size(reasons)) = reasons
-            grown(size(grown))%s = text
-            call move_alloc(grown, reasons)
-        end subroutine push_reason
-
-    end subroutine compute_generation_impact
-
-    function campaign_project(generation) result(project)
-        type(generation_t), intent(in) :: generation
-        character(len=PATH_LEN) :: project
-        type(backend_t) :: backend
-        backend = detect_backend(generation%project_root)
-        project = generation%project_root
-        if (backend%kind == BACKEND_CMAKE .and. &
-            len_trim(generation%build_project_root) > 0) &
-            project = generation%build_project_root
-    end function campaign_project
-
-    subroutine generation_model_ensure(generation, ierr, message)
-        !! Load the generation's project model once, from its built view
-        !! (CMake: the configure of the generation build, not repeated).
-        !! A model reused from an earlier generation is kept as is. The
-        !! frozen FO_CMAKE_NATIVE route has no model and loads nothing.
-        type(generation_t), intent(inout) :: generation
-        integer, intent(out) :: ierr
-        character(len=*), intent(out) :: message
-        type(backend_t) :: backend
-        character(len=:), allocatable :: detail
-        integer :: restore_status
-
-        ierr = 0
-        message = ''
-        if (allocated(generation%model)) return
-        backend = detect_backend(campaign_project(generation))
-        if (.not. project_has_model(backend)) return
-        ! Without its inventory the model has no reuse key; it still loads.
-        if (.not. generation%input_inventory_ready) &
-            call generation_inventory_restore(generation, restore_status, message)
-        message = ''
-        allocate (generation%model)
-        call project_load_configured(backend, generation%model, ierr, detail, &
-            scanned=generation%model_extra)
-        if (ierr /= 0) then
-            deallocate (generation%model)
-            message = 'cannot load the generation project model: '//detail
-            return
-        end if
-        generation%model_generation = generation%identity
-        generation%model_root = campaign_project(generation)
-        ! fpm source layers follow module use, so every source counts.
-        generation%model_full_key = backend%kind == BACKEND_NATIVE .and. &
-            generation%model%n_layers > 0
-        generation%model_key = ''
-        if (generation%input_inventory_ready) generation%model_key = &
-            generation_model_key(generation%input_inventory, &
-            generation%driver_digest, generation%model_full_key)
-        call generation_model_expand(generation)
-    end subroutine generation_model_ensure
-
-    subroutine generation_model_expand(generation)
-        !! Split the executables of the built generation that list their
-        !! cases into model cases `exe::case` (#217), so each case has its
-        !! own verdict, receipt and input closure digest. A model kept from an
-        !! earlier generation is expanded again from the new executables.
-        type(generation_t), intent(inout) :: generation
-        type(backend_t) :: backend
-        character(len=:), allocatable :: detail
-        integer :: n, ierr
-
-        if (.not. allocated(generation%model)) return
-        ! The executables are in the built view, where the cases run.
-        if (len_trim(generation%build_project_root) > 0) then
-            backend = detect_backend(trim(generation%build_project_root))
-        else
-            backend = detect_backend(campaign_project(generation))
-        end if
-        call project_expand_cases(backend, '', generation%model, n, ierr, detail, &
-            trim(generation%model_root), trim(generation%build_project_root))
-        if (allocated(generation%case_digests)) deallocate (generation%case_digests)
-    end subroutine generation_model_expand
-
-    function active_model_identity(generation) result(identity)
-        type(generation_t), intent(in) :: generation
-        character(len=HASH_LEN) :: identity
-
-        identity = ''
-        if (allocated(generation%model)) identity = generation%model%identity
-    end function active_model_identity
-
-    subroutine generation_model_adopt(previous, candidate)
-        !! Reuse the previous generation's model when the candidate's model
-        !! key (manifest, CMake script, preset and cache content, input
-        !! paths) is the same; otherwise the candidate loads its own.
-        type(generation_t), intent(in) :: previous
-        type(generation_t), intent(inout) :: candidate
-        character(len=HASH_LEN) :: key
-        character(len=PATH_LEN) :: message
-        integer :: ierr
-
-        if (allocated(candidate%model)) deallocate (candidate%model)
-        candidate%model_key = ''
-        candidate%model_generation = ''
-        if (.not. allocated(previous%model)) return
-        if (len_trim(previous%model_key) /= HASH_LEN) return
-        if (.not. candidate%input_inventory_ready) then
-            call generation_inventory_restore(candidate, ierr, message)
-            if (ierr /= 0) return
-        end if
-        key = generation_model_key(candidate%input_inventory, &
-            candidate%driver_digest, previous%model_full_key)
-        if (key /= previous%model_key) return
-        candidate%model = previous%model
-        candidate%model_key = key
-        candidate%model_generation = previous%model_generation
-        candidate%model_full_key = previous%model_full_key
-        candidate%model_root = previous%model_root
-        if (allocated(previous%model_extra)) &
-            candidate%model_extra = previous%model_extra
-    end subroutine generation_model_adopt
-
-    logical function case_needs_all(generation, name) result(needs)
-        !! The case is excluded by default through a label (slow), so its
-        !! run passes --all. Without a model: the slow name rule.
-        type(generation_t), intent(in) :: generation
-        character(len=*), intent(in) :: name
-        integer :: k, j, d
-
-        needs = is_slow_test(trim(name))
-        if (.not. allocated(generation%model)) return
-        k = model_find_case(generation%model, trim(name))
-        if (k == 0) return
-        needs = .false.
-        associate (c => generation%model%cases(k))
-            do j = 1, size(c%labels)
-                do d = 1, size(generation%model%default_exclude)
-                    if (c%labels(j)%s == generation%model%default_exclude(d)%s) &
-                        needs = .true.
-                end do
-            end do
-        end associate
-    end function case_needs_all
-
-    function case_attributes_json(generation, name) result(text)
-        !! ,"labels":[...],"layer":"..." of a model case; '' otherwise.
-        type(generation_t), intent(in) :: generation
-        character(len=*), intent(in) :: name
-        character(len=:), allocatable :: text
-        integer :: k, j
-
-        text = ''
-        if (.not. allocated(generation%model)) return
-        k = model_find_case(generation%model, trim(name))
-        if (k == 0) return
-        associate (c => generation%model%cases(k))
-            text = ',"labels":['
-            do j = 1, size(c%labels)
-                if (j > 1) text = text//','
-                text = text//'"'//json_escape_string(c%labels(j)%s)//'"'
-            end do
-            text = text//'],"layer":"'
-            if (c%layer > 0) text = text// &
-                json_escape_string(generation%model%layers(c%layer)%name)
-            text = text//'"'
-        end associate
-    end function case_attributes_json
-
-    subroutine discover_campaign(generation, session, request, &
-            selected, n_selected, &
-            n_mandatory_selected, seed, ierr, message, bypass_coverage, live_dir)
-        !! Select a campaign from the cases of the generation's project model
-        !! (loaded once per generation, see generation_model_ensure).
-        !! live_dir: the watched project directory, whose working-tree delta
-        !! an only-changed first generation owes (absent: no baseline).
-        type(generation_t), intent(inout) :: generation
-        type(gremlin_session_t), intent(in) :: session
-        type(gremlin_request_t), intent(inout) :: request
-        character(len=*), intent(out) :: selected(:)
-        integer, intent(out) :: n_selected, n_mandatory_selected, seed, ierr
-        character(len=*), intent(out) :: message
-        logical, intent(in), optional :: bypass_coverage
-        character(len=*), intent(in), optional :: live_dir
-
-        type(backend_t) :: backend
-        integer :: i, n_all, n_impacted
-        integer :: n_history, n_debt, cursor_seed, n_priorities, limit
-        integer :: n_selected_priorities
-        integer :: shuffle_status, coverage_status
-        character(len=NAME_LEN), allocatable :: all_names(:), impacted(:)
-        character(len=NAME_LEN), allocatable :: history(:), debt(:), priorities(:)
-        type(coverage_epoch_t) :: coverage
-        character(len=PATH_LEN) :: coverage_path
-        character(len=PATH_LEN) :: project_dir, live
-        character(len=HASH_LEN) :: generation_id
-        logical :: reproduce_only, focused_targets
-        integer, allocatable :: model_cases(:)
-        integer :: capacity, kept, n_model
-        type(model_request_t) :: scope_request
-        type(model_selection_t) :: scope_selection
-
-        project_dir = campaign_project(generation)
-        generation_id = generation%identity
-        ierr = 0
-        message = ''
-        call generation_model_ensure(generation, ierr, message)
-        if (ierr /= 0) return
-        call generation_case_digests_ensure(generation, trim(project_dir))
-        capacity = MAX_NODES
-        if (allocated(generation%model)) then
-            call project_inventory_cases(generation%model, model_cases)
-            capacity = max(capacity, size(model_cases))
-        end if
-        allocate (all_names(capacity), impacted(capacity), history(capacity), &
-            debt(capacity), priorities(capacity))
-        selected = ''
-        impacted = ''
-        n_selected = 0
-        n_mandatory_selected = 0
-        seed = request%seed
-        if (seed == 0) then
-            call system_clock(seed)
-            if (seed == 0) seed = 1
-        end if
-        backend = detect_backend(project_dir)
-        if (backend%kind /= BACKEND_CMAKE .and. backend%kind /= BACKEND_NATIVE) then
-            ierr = 1
-            message = 'Gremlin currently requires the native fpm test backend'
-            return
-        end if
-        n_all = 0
-        if (allocated(generation%model)) then
-            n_model = size(model_cases)
-            if (request_scoped(request)) then
-                ! Lane scope: the model's `fo test` selection of -L/-LE/--layer.
-                call scope_model_request(request, scope_request)
-                call model_select(generation%model, scope_request, scope_selection)
-                if (scope_selection%status /= SELECT_OK .and. &
-                    scope_selection%status /= SELECT_EMPTY) then
-                    ierr = 2
-                    message = 'invalid lane scope: '//scope_selection%message
-                    return
-                end if
-                kept = 0
-                do i = 1, n_model
-                    if (.not. any(scope_selection%cases == model_cases(i))) cycle
-                    kept = kept + 1
-                    model_cases(kept) = model_cases(i)
-                end do
-                n_model = kept
-                if (kept == 0) then
-                    ierr = 2
-                    message = 'the lane scope selects no test case'
-                    return
-                end if
+            retain = .false.
+            if (present(retain_views)) retain = retain_views
+            failure = error_text
+            if (have_slot) then
+                call release_heavy_work_slot(work_slot, have_slot, status, detail, &
+                    drain=.true.)
+                if (status /= 0 .and. len_trim(failure) == 0) failure = &
+                    'cannot release Gremlin host work slot: '//trim(detail)
             end if
-            do i = 1, n_model
-                associate (name => generation%model%cases(model_cases(i))%name)
-                    if (len(name) > len(all_names)) then
-                        ierr = 1
-                        message = 'test case name exceeds supported length: '//name
-                        return
-                    end if
-                    n_all = n_all + 1
-                    all_names(n_all) = name
-                end associate
-            end do
-        else
-            ! The frozen FO_CMAKE_NATIVE route has no project model.
-            call cmake_registered_names(backend, all_names, n_all, ierr, message)
-            if (ierr /= 0) return
-        end if
-        call read_campaign_history(session, all_names, n_all, history, n_history, &
-            debt, n_debt, cursor_seed, ierr, message)
-        if (ierr /= 0) return
-        n_impacted = 0
-        if (request%has_previous_generation) then
-            if (request%impact_all) then
-                call append_priority_names(all_names, n_all, impacted, n_impacted)
+            if (have_scope) then
+                call process_scope_end(scope, status)
+                if (status /= 0 .and. len_trim(failure) == 0) failure = &
+                    'cannot release Gremlin host work slot: '// &
+                    'cannot restore caller process ownership'
+            end if
+            if (case_view%active) call execution_view_release(case_view, retain, &
+                status, detail)
+            if (build_view%active) call execution_view_release(build_view, retain, &
+                status, detail)
+            call release_generation_lease(lease, have_lease, status, detail)
+            if (status /= 0 .and. len_trim(failure) == 0) failure = &
+                'cannot release generation lease: '//trim(detail)
+            call release_if_owner(session, status, detail)
+            if (status /= 0 .and. len_trim(failure) == 0) failure = &
+                'cannot release Gremlin ownership: '//trim(detail)
+            if (len_trim(failure) > 0) then
+                call error_response('reproduce', trim(failure), response)
+                if (exitcode /= 1 .or. len_trim(error_text) == 0) exitcode = 2
+            else if (test_exit /= 0) then
+                exitcode = 1
             else
-                if (request%n_impact_cases > 0) &
-                    call append_priority_names(request%impact_cases, &
-                        request%n_impact_cases, impacted, n_impacted)
+                exitcode = 0
             end if
-        else if (request%only_changed) then
-            ! First generation: the cases the working-tree delta affects on
-            ! the generation's model, as `fo test --only-changed`; without a
-            ! model (frozen FO_CMAKE_NATIVE) every case.
-            if (allocated(generation%model)) then
-                live = ''
-                if (present(live_dir)) live = live_dir
-                call first_generation_impact(generation, project_dir, trim(live), &
-                    model_cases(:n_model), impacted, n_impacted)
-            else
-                call append_priority_names(all_names, n_all, impacted, n_impacted)
-            end if
-        end if
-        ! Impact is computed over the complete generation model. A scoped
-        ! lane owes only the affected cases within its eligible inventory.
-        kept = 0
-        do i = 1, n_impacted
-            if (.not. any(all_names(:n_all) == impacted(i))) cycle
-            kept = kept + 1
-            impacted(kept) = impacted(i)
-        end do
-        n_impacted = kept
-        n_priorities = 0
-        ! Zero-random campaigns keep their explicit gate across source edits.
-        focused_targets = request%n_targets > 0 .and. request%random_count == 0
-        ! Recheck durable failures before new affected work without dropping either.
-        if (.not. focused_targets) &
-            call append_priority_names(history, n_history, priorities, n_priorities)
-        if (request%only_changed .or. request%has_previous_generation .or. &
-            request%n_targets > 0 .or. n_history > 0) then
-            call append_priority_names(request%gate_cases, request%gate_required_count, &
-                priorities, n_priorities)
-        end if
-        call append_priority_names(request%targets, request%n_targets, priorities, &
-            n_priorities)
-        if (.not. focused_targets) then
-            call append_priority_names(impacted, n_impacted, priorities, n_priorities)
-        end if
-        do i = 1, n_priorities
-            if (.not. any(all_names(:n_all) == priorities(i))) then
-                ierr = 2
-                message = 'requested or prioritized case is outside the eligible inventory'
-                return
-            end if
-        end do
-        reproduce_only = .false.
-        if (present(bypass_coverage)) reproduce_only = bypass_coverage
-        if (reproduce_only) then
-            n_selected = 1
-            n_mandatory_selected = 1
-            selected(1) = request%targets(1)
-            ierr = GREMLIN_POLICY_OK
-            message = ''
-            return
-        end if
-        n_mandatory_selected = 0
-        limit = n_priorities + min(GREMLIN_NONMANDATORY_LIMIT, request%random_count)
-        if (limit == 0) then
-            ierr = GREMLIN_POLICY_OK
-            message = ''
-            return
-        end if
-        if (len_trim(generation_id) /= HASH_LEN) then
-            ierr = 1
-            message = 'coverage requires an exact generation identity'
-            return
-        end if
-        coverage_path = trim(session%state_dir)//'/coverage-'// &
-            generation_id//'.state'
-        call coverage_open(trim(coverage_path), generation_id, all_names, n_all, &
-            seed, coverage, coverage_status, message)
-        if (coverage_status /= COVERAGE_OK) then
-            ierr = coverage_status
-            message = 'cannot recover current-generation coverage: '//trim(message)
-            return
-        end if
-        ! Discovery runs after the prior owned child has completed/cancelled.
-        ! Reset launch intents from a stopped or crashed owner before selection.
-        call coverage_recover_running(coverage, coverage_status, message)
-        if (coverage_status /= COVERAGE_OK) then
-            ierr = coverage_status
-            return
-        end if
-        seed = coverage%seed
-        call reconcile_coverage(session, coverage, message, ierr)
-        if (ierr /= 0) return
-        call coverage_next_chunk(coverage, priorities, n_priorities, min(limit, &
-            size(selected)), selected, n_selected, coverage_status, &
-            n_selected_priorities)
-        if (coverage_status /= COVERAGE_OK) then
-            ierr = coverage_status
-            message = 'coverage scheduler rejected eligible inventory or priorities'
-            return
-        end if
-        if (request%random_count == 0) then
-            selected(n_selected_priorities + 1:) = ''
-            n_selected = n_selected_priorities
-        end if
-        if (n_priorities == 0) then
-            if (n_selected > 0) then
-                priorities(1) = selected(1)
-            else
-                priorities(1) = all_names(1)
-            end if
-            n_priorities = 1
-        end if
-        if (len_trim(request%requirement_digest) /= HASH_LEN) then
-            request%gate_cases = ''
-            request%gate_cases(:n_priorities) = priorities(:n_priorities)
-            request%gate_required_count = n_priorities
-            request%requirement_digest = cache_digest(priorities, n_priorities)
-        end if
-        n_mandatory_selected = n_selected_priorities
-        call select_missing_gate_cases(session, generation_id, request, &
-            min(limit, size(selected)), selected, n_selected, &
-            n_mandatory_selected, ierr, message)
-        if (ierr /= 0) return
-        if (request%shuffle) then
-            call shuffle_gremlin_tests(selected, n_mandatory_selected, n_selected, &
-                seed, shuffle_status)
-            if (shuffle_status /= GREMLIN_POLICY_OK) then
-                ierr = shuffle_status
-                message = 'Gremlin could not shuffle selected tests'
-            end if
-        end if
-    end subroutine discover_campaign
+        end subroutine finish
 
-    subroutine first_generation_impact(generation, project_dir, live_dir, cases, &
-            impacted, n_impacted)
-        !! Names of the cases (model indices) that the working-tree delta of
-        !! live_dir affects: the selection of `fo test --only-changed` on the
-        !! generation's model (project_dir spells its sources). Without a
-        !! delta baseline every case.
-        type(generation_t), intent(inout) :: generation
-        character(len=*), intent(in) :: project_dir, live_dir
-        integer, intent(in) :: cases(:)
-        character(len=NAME_LEN), intent(inout) :: impacted(:)
-        integer, intent(inout) :: n_impacted
-        type(string_t), allocatable :: changed(:), roots(:), widen_reasons(:)
-        integer, allocatable :: affected(:)
-        character(len=:), allocatable :: reason
-        logical :: baseline
-        integer :: i
+    end subroutine handle_reproduce
 
-        call generation_units_ensure(generation, trim(project_dir))
-        call generation_model_roots(generation, trim(project_dir), roots)
-        if (len(live_dir) > 0) then
-            call project_changed_files(live_dir, changed, baseline, reason)
-        else
-            allocate (changed(0))
-            baseline = .false.
-            reason = 'no working tree to compare against'
-        end if
-        if (baseline) then
-            call project_affected_cases(generation%model, generation%units, roots, &
-                cases, changed, affected, widen_reasons)
-        else
-            call project_affected_cases(generation%model, generation%units, roots, &
-                cases, changed, affected, widen_reasons, force_reason=reason)
-        end if
-        do i = 1, size(affected)
-            n_impacted = n_impacted + 1
-            impacted(n_impacted) = generation%model%cases(affected(i))%name
-        end do
-    end subroutine first_generation_impact
+    subroutine wait_job(job, stopped, session)
+        !! Wait for the job under its wall deadline. With a session, a stop
+        !! request cancels it (EXEC_CANCELLED, or EXEC_UNCANCELLED on failure).
+        type(exec_job_t), intent(inout) :: job
+        logical, intent(out) :: stopped
+        type(gremlin_session_t), intent(in), optional :: session
+        integer :: polls, status
+        logical :: done, stop_now
+        character(len=PATH_LEN) :: detail
 
-    subroutine select_missing_gate_cases(session, generation, request, limit, &
-            selected, n_selected, n_mandatory, ierr, message)
-        type(gremlin_session_t), intent(in) :: session
-        character(len=*), intent(in) :: generation
-        type(gremlin_request_t), intent(in) :: request
-        integer, intent(in) :: limit
-        character(len=*), intent(inout) :: selected(:)
-        integer, intent(inout) :: n_selected, n_mandatory
-        integer, intent(out) :: ierr
-        character(len=*), intent(out) :: message
-
-        character(len=NAME_LEN) :: pending(MAX_NODES)
-        character(len=PATH_LEN) :: journal_path, campaign_state_dir
-        logical :: attempted(MAX_NODES)
-        integer :: i, n_pending
-
-        ! Coverage may already be complete when a frozen generation is reused
-        ! with a different gate. Durable campaign receipts precede lane receipts,
-        ! so both ledgers can discharge a matching gate after owner loss.
-        attempted = .false.
-        ierr = 0
-        message = ''
-        call gremlin_get_session_journal_path(session%project_key, request%lane_id, &
-            session%session_id, journal_path, ierr, message)
-        if (ierr /= 0) return
-        call mark_gate_receipts(journal_path, generation, request, attempted, ierr, &
-            message)
-        if (ierr /= JOURNAL_OK) return
-        call gremlin_session_state_dir(trim(session%project_key), &
-            trim(request%lane_id), campaign_state_dir, ierr, message)
-        if (ierr /= 0) return
-        journal_path = trim(campaign_state_dir)//'/campaign-journal.jsonl'
-        call mark_gate_receipts(journal_path, generation, request, attempted, ierr, &
-            message)
-        if (ierr /= JOURNAL_OK) return
-        pending = ''
-        n_pending = 0
-        do i = 1, request%gate_required_count
-            if (attempted(i)) cycle
-            n_pending = n_pending + 1
-            pending(n_pending) = request%gate_cases(i)
-        end do
-        call append_priority_names(selected, n_mandatory, pending, n_pending)
-        n_mandatory = min(n_pending, limit)
-        call append_priority_names(selected, n_selected, pending, n_pending)
-        n_selected = min(n_pending, limit)
-        selected = ''
-        selected(:n_selected) = pending(:n_selected)
-    end subroutine select_missing_gate_cases
-
-    subroutine mark_gate_receipts(path, generation, request, attempted, ierr, message)
-        character(len=*), intent(in) :: path, generation
-        type(gremlin_request_t), intent(in) :: request
-        logical, intent(inout) :: attempted(:)
-        integer, intent(out) :: ierr
-        character(len=*), intent(out) :: message
-
-        type(journal_record_t), allocatable :: records(:)
-        character(len=NAME_LEN) :: case_name
-        character(len=16) :: outcome
-        integer(int64) :: cursor, next_cursor
-        integer :: i, j
-        logical :: accepted
-        logical :: exists
-
-        cursor = 0_int64
-        ierr = JOURNAL_OK
-        message = ''
-        inquire(file=trim(path), exist=exists)
-        if (.not. exists) return
+        stopped = .false.
+        polls = 0
         do
-            call journal_read_page(trim(path), cursor, 64, &
-                int(JOURNAL_MAX_RECORD_BYTES, int64)*64_int64, records, next_cursor, &
-                ierr, message)
-            if (ierr /= JOURNAL_OK) return
-            if (size(records) == 0) exit
-            do i = 1, size(records)
-                accepted = gate_receipt_matches(records(i)%json, generation, &
-                    request%requirement_digest, case_name, outcome)
-                if (.not. accepted) cycle
-                do j = 1, request%gate_required_count
-                    if (case_name == request%gate_cases(j)) attempted(j) = .true.
-                end do
-            end do
-            if (next_cursor <= cursor) then
-                ierr = JOURNAL_INVALID
-                message = 'Gremlin receipt cursor did not advance during gate selection'
-                return
-            end if
-            cursor = next_cursor
-        end do
-    end subroutine mark_gate_receipts
-
-    logical function gate_receipt_matches(record, generation, requirement, case_name, &
-            outcome)
-        character(len=*), intent(in) :: record, generation, requirement
-        character(len=*), intent(out) :: case_name, outcome
-        character(len=HASH_LEN) :: receipt_generation, receipt_requirement
-        character(len=16) :: gate_required
-
-        case_name = ''
-        outcome = ''
-        call gremlin_json_field(record, 'generation', receipt_generation)
-        call gremlin_json_field(record, 'requirement_digest', receipt_requirement)
-        call gremlin_json_field(record, 'gate_required', gate_required)
-        call gremlin_json_field(record, 'case_id', case_name)
-        call gremlin_json_field(record, 'status', outcome)
-        gate_receipt_matches = trim(receipt_generation) == trim(generation) .and. &
-            trim(receipt_requirement) == trim(requirement) .and. &
-            trim(gate_required) == 'true' .and. len_trim(case_name) > 0 .and. &
-            (trim(outcome) == 'PASS' .or. status_is_failure(trim(outcome)))
-    end function gate_receipt_matches
-
-    subroutine append_priority_names(source, n_source, destination, n_destination)
-        character(len=*), intent(in) :: source(:)
-        integer, intent(in) :: n_source
-        character(len=*), intent(inout) :: destination(:)
-        integer, intent(inout) :: n_destination
-        integer :: i
-
-        do i = 1, n_source
-            if (n_destination >= size(destination)) exit
-            if (any(destination(:n_destination) == source(i))) cycle
-            n_destination = n_destination + 1
-            destination(n_destination) = source(i)
-        end do
-    end subroutine append_priority_names
-
-    subroutine reconcile_coverage(session, coverage, message, ierr)
-        type(gremlin_session_t), intent(in) :: session
-        type(coverage_epoch_t), intent(inout) :: coverage
-        character(len=*), intent(out) :: message
-        integer, intent(out) :: ierr
-
-        type(journal_record_t), allocatable :: records(:)
-        character(len=NAME_LEN) :: case_name
-        character(len=HASH_LEN) :: generation
-        character(len=16) :: outcome, seed_text
-        character(len=HASH_LEN) :: inventory_digest
-        character(len=16) :: epoch_text
-        character(len=PATH_LEN) :: path
-        integer(int64) :: cursor, next_cursor
-        integer :: journal_status, i, status, receipt_seed, receipt_epoch, ios
-        logical :: exists
-
-        ierr = 0
-        message = ''
-        path = trim(session%state_dir)//'/campaign-journal.jsonl'
-        inquire(file=trim(path), exist=exists)
-        if (.not. exists) return
-        cursor = 0_int64
-        do
-            call journal_read_page(trim(path), cursor, 64, &
-                int(JOURNAL_MAX_RECORD_BYTES, int64)*64_int64, records, &
-                next_cursor, journal_status, message)
-            if (journal_status /= JOURNAL_OK) then
-                ierr = journal_status
-                return
-            end if
-            if (size(records) == 0) exit
-            do i = 1, size(records)
-                case_name = ''
-                generation = ''
-                outcome = ''
-                seed_text = ''
-                inventory_digest = ''
-                epoch_text = ''
-                call gremlin_json_field(records(i)%json, 'case_id', case_name)
-                call gremlin_json_field(records(i)%json, 'generation', generation)
-                call gremlin_json_field(records(i)%json, 'status', outcome)
-                call gremlin_json_field(records(i)%json, 'seed', seed_text)
-                call gremlin_json_field(records(i)%json, 'inventory_digest', &
-                    inventory_digest)
-                call gremlin_json_field(records(i)%json, 'coverage_epoch', epoch_text)
-                if (trim(generation) /= trim(coverage%generation)) cycle
-                read(seed_text, *, iostat=ios) receipt_seed
-                if (ios /= 0) cycle
-                if (receipt_seed /= coverage%seed) cycle
-                read(epoch_text, *, iostat=ios) receipt_epoch
-                if (ios /= 0) cycle
-                if (receipt_epoch /= coverage%epoch .or. &
-                    trim(inventory_digest) /= trim(coverage%inventory_digest)) cycle
-                call coverage_record(coverage, case_name, outcome, status, message)
-                if (status /= COVERAGE_OK) then
-                    ierr = status
-                    return
-                end if
-            end do
-            if (next_cursor <= cursor) then
-                ierr = JOURNAL_INVALID
-                message = 'campaign journal cursor did not advance during coverage recovery'
-                return
-            end if
-            cursor = next_cursor
-        end do
-    end subroutine reconcile_coverage
-
-    subroutine read_campaign_history(session, inventory, n_inventory, history, &
-            n_history, debt, n_debt, cursor_seed, ierr, message)
-        type(gremlin_session_t), intent(in) :: session
-        character(len=*), intent(in) :: inventory(:)
-        integer, intent(in) :: n_inventory
-        character(len=*), intent(out) :: history(:), debt(:)
-        integer, intent(out) :: n_history, n_debt, cursor_seed, ierr
-        character(len=*), intent(out) :: message
-
-        type(journal_record_t), allocatable :: records(:)
-        character(len=NAME_LEN) :: case_name
-        character(len=16) :: status_name, seed_text
-        character(len=PATH_LEN) :: path
-        integer(int64) :: cursor, next_cursor
-        integer :: journal_status, i, seed_value, ios
-        logical :: exists
-
-        history = ''
-        debt = ''
-        n_history = 0
-        n_debt = 0
-        cursor_seed = 0
-        ierr = 0
-        message = ''
-        path = trim(session%state_dir)//'/campaign-journal.jsonl'
-        inquire(file=trim(path), exist=exists)
-        if (.not. exists) return
-        cursor = 0_int64
-        do
-            call journal_read_page(trim(path), cursor, 64, &
-                int(JOURNAL_MAX_RECORD_BYTES, int64)*64_int64, records, &
-                next_cursor, journal_status, message)
-            if (journal_status /= JOURNAL_OK) then
-                ierr = journal_status
-                return
-            end if
-            if (size(records) == 0) exit
-            do i = 1, size(records)
-                case_name = ''
-                status_name = ''
-                seed_text = ''
-                call gremlin_json_field(records(i)%json, 'case_id', case_name)
-                call gremlin_json_field(records(i)%json, 'status', status_name)
-                call gremlin_json_field(records(i)%json, 'seed', seed_text)
-                if (.not. any(inventory(:n_inventory) == case_name)) cycle
-                if (status_name /= 'PASS' .and. status_name /= 'FAIL' .and. &
-                    status_name /= 'TIMEOUT') cycle
-                read(seed_text, *, iostat=ios) seed_value
-                if (ios == 0) cursor_seed = seed_value
-                call move_to_recent(case_name, debt, n_debt)
-                if (status_name == 'FAIL' .or. status_name == 'TIMEOUT') then
-                    call move_to_priority(case_name, history, n_history)
-                end if
-            end do
-            if (next_cursor <= cursor) then
-                ierr = JOURNAL_INVALID
-                message = 'campaign journal cursor did not advance'
-                return
-            end if
-            cursor = next_cursor
-        end do
-    end subroutine read_campaign_history
-
-    subroutine move_to_recent(name, values, count_values)
-        character(len=*), intent(in) :: name
-        character(len=*), intent(inout) :: values(:)
-        integer, intent(inout) :: count_values
-        integer :: i, found
-
-        found = 0
-        do i = 1, count_values
-            if (values(i) == name) then
-                found = i
-                exit
-            end if
-        end do
-        if (found > 0) then
-            do i = found, count_values - 1
-                values(i) = values(i + 1)
-            end do
-            count_values = count_values - 1
-        else if (count_values == size(values)) then
-            values(:count_values - 1) = values(2:count_values)
-            count_values = count_values - 1
-        end if
-        if (count_values < size(values)) then
-            count_values = count_values + 1
-            values(count_values) = name
-        end if
-    end subroutine move_to_recent
-
-    subroutine move_to_priority(name, values, count_values)
-        character(len=*), intent(in) :: name
-        character(len=*), intent(inout) :: values(:)
-        integer, intent(inout) :: count_values
-        integer :: i
-
-        do i = 1, count_values
-            if (values(i) == name) then
-                if (i > 1) values(2:i) = values(1:i - 1)
-                values(1) = name
-                return
-            end if
-        end do
-        if (count_values == min(size(values), GREMLIN_HISTORY_LIMIT)) then
-            values(count_values) = ''
-            count_values = count_values - 1
-        end if
-        count_values = count_values + 1
-        if (count_values > 1) values(2:count_values) = values(1:count_values - 1)
-        values(1) = name
-    end subroutine move_to_priority
-
-    integer function running_count(children) result(n)
-        type(child_t), intent(in) :: children(:)
-
-        n = count(children%pid > 0)
-    end function running_count
-
-    function first_running_case(children) result(name)
-        type(child_t), intent(in) :: children(:)
-        character(len=NAME_LEN) :: name
-        integer :: i
-
-        name = ''
-        do i = 1, size(children)
-            if (children(i)%pid > 0) then
-                name = children(i)%case_name
-                return
-            end if
-        end do
-    end function first_running_case
-
-    subroutine set_running_summary(children)
-        !! Record the running cases (dispatch order by slot) for publish_state.
-        type(child_t), intent(in) :: children(:)
-        integer :: i
-
-        running_summary_count = 0
-        do i = 1, size(children)
-            if (children(i)%pid <= 0) cycle
-            running_summary_count = running_summary_count + 1
-            running_summary_names(running_summary_count) = children(i)%case_name
-        end do
-    end subroutine set_running_summary
-
-    subroutine cancel_all_test_cases(session, generation, children, ierr, message)
-        !! Cancel every in-flight case; ierr is the first failure, the others
-        !! are still attempted so no child outlives the generation.
-        type(gremlin_session_t), intent(in) :: session
-        type(generation_t), intent(in) :: generation
-        type(child_t), intent(inout) :: children(:)
-        integer, intent(out) :: ierr
-        character(len=*), intent(out) :: message
-        integer :: i, status
-        character(len=PATH_LEN) :: child_message
-
-        ierr = 0
-        message = ''
-        do i = 1, size(children)
-            if (children(i)%pid <= 0) cycle
-            call cancel_test_case(session, generation, children(i), status, child_message)
-            if (status /= 0 .and. ierr == 0) then
-                ierr = status
-                message = child_message
-            end if
-        end do
-        call set_running_summary(children)
-    end subroutine cancel_all_test_cases
-
-    integer function lane_job_count(request) result(k)
-        !! Case children one lane runs at once: the request's jobs, else the
-        !! host heavy-work weight (1 for FO_JOBS=1).
-        type(gremlin_request_t), intent(in) :: request
-
-        k = request%jobs
-        if (k < 1) k = min(GREMLIN_HEAVY_LANE_CAPACITY, gremlin_host_jobs())
-        k = max(1, min(GREMLIN_MAX_LANE_JOBS, k))
-    end function lane_job_count
-
-    subroutine cancel_test_case(session, generation, child, ierr, message)
-        type(gremlin_session_t), intent(in) :: session
-        type(generation_t), intent(in) :: generation
-        type(child_t), intent(inout) :: child
-        integer, intent(out) :: ierr
-        character(len=*), intent(out) :: message
-        character(len=PATH_LEN) :: coverage_path
-
-        call cancel_owned_process(child%pid, ierr)
-        message = 'cannot cancel owned test process'
-        if (ierr /= 0) return
-        child%pid = 0
-        call append_execution_provenance(child%log_file, child%execution_view)
-        call execution_view_release(child%execution_view, .false., ierr, message)
-        if (ierr /= 0) return
-        coverage_path = trim(session%state_dir)//'/coverage-'// &
-            generation%identity//'.state'
-        call coverage_record_path(trim(coverage_path), generation%identity, &
-            child%case_name, 'CANCELLED', ierr, message)
-    end subroutine cancel_test_case
-
-    subroutine append_execution_provenance(log_file, view)
-        character(len=*), intent(in) :: log_file
-        type(execution_view_t), intent(in) :: view
-
-        integer :: unit, ios
-        character(len=8) :: completeness
-
-        completeness = 'complete'
-        if (.not. view%complete) completeness = 'incomplete'
-        open (newunit=unit, file=trim(log_file), status='unknown', &
-            position='append', action='write', iostat=ios)
-        if (ios /= 0) return
-        write (unit, '(a)', iostat=ios) 'fo: execution cwd: '//trim(view%cwd)
-        if (ios == 0) write (unit, '(a)', iostat=ios) &
-            'fo: execution generation: '//trim(view%generation_id)
-        if (ios == 0) write (unit, '(a)', iostat=ios) &
-            'fo: execution input inventory: '//trim(view%inventory_digest)// &
-            ' ('//trim(completeness)//')'
-        close (unit)
-    end subroutine append_execution_provenance
-
-    subroutine launch_selected_case(session, request, generation, selected, n_selected, &
-            index_case, seed, campaign, lane_jobs, child, ierr, message, sequence)
-        type(gremlin_session_t), intent(in) :: session
-        type(gremlin_request_t), intent(in) :: request
-        type(generation_t), intent(in) :: generation
-        character(len=*), intent(in) :: selected(:)
-        integer, intent(in) :: n_selected, index_case, seed, campaign, lane_jobs
-        type(child_t), intent(out) :: child
-        integer, intent(out) :: ierr
-        character(len=*), intent(out) :: message
-        integer, intent(inout) :: sequence
-
-        character(len=PATH_LEN) :: executable, log_name, test_project
-        character(len=PATH_LEN) :: journal_message
-        character(len=PATH_LEN) :: view_owner, view_message
-        character(len=:), allocatable :: packed, execution_env
-        integer :: n_args, spawn_exit, journal_status, coverage_status
-        integer :: view_status
-        logical :: exists
-        character(len=PATH_LEN) :: coverage_path
-        character(len=HASH_LEN) :: reused_from
-
-        child = child_t()
-        ierr = 0
-        message = ''
-        if (index_case < 1 .or. index_case > n_selected) return
-        if (len_trim(generation%build_project_root) == 0) then
-            ierr = 1
-            message = 'active generation has no candidate build view'
-            return
-        end if
-        test_project = generation%build_project_root
-        child%gate_required = any(request%gate_cases(:request%gate_required_count) == &
-            selected(index_case))
-        if (generation%driver_digest /= session%driver_digest .or. &
-            generation%driver_size /= session%driver_size .or. &
-            len_trim(session%driver_path) == 0) then
-            ierr = 1
-            message = 'test generation does not match the pinned fo driver'
-            return
-        end if
-        inquire (file=trim(session%driver_path), exist=exists)
-        if (.not. exists) then
-            ierr = 1
-            message = 'pinned fo driver is missing; refusing to launch test case'
-            return
-        end if
-        executable = session%driver_path
-        call case_reuse_source(session, generation, selected(index_case), &
-            reused_from, ierr, message)
-        if (ierr /= 0) return
-        if (len_trim(reused_from) > 0) then
-            ! Same input closure as a PASS of an earlier generation: no run.
-            child%case_name = selected(index_case)
-            child%campaign = campaign
-            child%case_index = index_case
-            child%seed = seed
-            child%reused = .true.
-            sequence = sequence + 1
-            call record_immediate_case(session, request, generation, &
-                selected(index_case), 0, 'PASS', sequence, index_case, seed, '', &
-                ierr, message, gate_required=child%gate_required, &
-                reused_from=reused_from)
-            return
-        end if
-        write (log_name, '(a,i0,a,i0,a)') 'case-', campaign, '-', index_case, '.log'
-        call log_path(session, trim(log_name), child%log_file)
-        write(view_owner, '(a,"-case-",i0,"-",i0)') trim(session%session_id), &
-            campaign, index_case
-        call execution_view_create(trim(session%state_dir)//'/views', &
-            generation%identity, trim(view_owner), selected(index_case), &
-            generation%input_inventory, generation%input_inventory_ready, &
-            generation%input_inventory_complete, child%execution_view, ierr, message)
-        if (ierr /= 0) return
-        execution_env = 'FO_BIN='//trim(executable)//';FO='//trim(executable)//';'// &
-            'FO_DISABLE_SELF_REFRESH=1;FO_SELF_REFRESH=0;'// &
-            'FO_GREMLIN_EXECUTION_CWD='//trim(child%execution_view%cwd)//';'// &
-            'FO_GREMLIN_FROZEN_ROOT='//trim(test_project)//';'// &
-            'TMPDIR='//trim(child%execution_view%tmpdir)
-        ! Parallel cases split the host job budget; a serial lane keeps the
-        ! children's own OpenMP default.
-        if (lane_jobs > 1) execution_env = execution_env//';OMP_NUM_THREADS='// &
-            trim(int_text(max(1, gremlin_host_jobs()/lane_jobs)))
-        n_args = 0
-        call argv_push(packed, n_args, trim(executable))
-        ! The generation was built once by start_build; a case never builds.
-        call argv_push(packed, n_args, 'test')
-        call argv_push(packed, n_args, '--no-build')
-        call argv_push(packed, n_args, '--no-cache')
-        call argv_push(packed, n_args, '--json=full')
-        if (case_needs_all(generation, selected(index_case))) then
-            call argv_push(packed, n_args, '--all')
-        end if
-        call argv_push(packed, n_args, trim(selected(index_case)))
-        call process_start_argv_logged(trim(test_project), packed, &
-            n_args, trim(child%log_file), child%pid, spawn_exit, &
-            trim(execution_env))
-        ierr = spawn_exit
-        if (spawn_exit /= 0) then
-            child%pid = 0
-            call execution_view_release(child%execution_view, .false., view_status, &
-                view_message)
-            journal_message = 'cannot start selected test '//trim(selected(index_case))
-            sequence = sequence + 1
-            call record_immediate_case(session, request, generation, &
-                selected(index_case), spawn_exit, 'INFRA_ERROR', sequence, &
-                index_case, seed, child%log_file, journal_status, message, &
-                gate_required=child%gate_required)
-            if (journal_status /= JOURNAL_OK) then
-                ierr = journal_status
-            else
-                ierr = spawn_exit
-                message = trim(journal_message)
-            end if
-            return
-        end if
-        child%case_name = selected(index_case)
-        child%campaign = campaign
-        child%case_index = index_case
-        child%seed = seed
-        coverage_path = trim(session%state_dir)//'/coverage-'// &
-            generation%identity//'.state'
-        call coverage_record_path(trim(coverage_path), generation%identity, &
-            trim(selected(index_case)), 'RUNNING', coverage_status, message)
-        if (coverage_status /= COVERAGE_OK) then
-            ierr = coverage_status
-            return
-        end if
-        call clock_seconds(child%started_at)
-    end subroutine launch_selected_case
-
-    subroutine advance_campaign(project_dir, session, request, generation, selected, &
-            n_selected, index_case, seed, campaign, campaign_started_ms, children, &
-            lane_jobs, first, ierr, message, completed, state_name, sequence)
-        !! Dispatch cases in selection order until lane_jobs children run or
-        !! nothing is left to dispatch now; a reused case completes at once.
-        !! first: the campaign's first dispatch (no gate check, no rotation).
-        character(len=*), intent(in) :: project_dir
-        type(gremlin_session_t), intent(in) :: session
-        type(gremlin_request_t), intent(inout) :: request
-        type(generation_t), intent(inout) :: generation
-        character(len=*), intent(inout) :: selected(:)
-        integer, intent(inout) :: n_selected, index_case, seed, campaign
-        integer(int64), intent(inout) :: campaign_started_ms
-        type(child_t), intent(inout) :: children(:)
-        integer, intent(in) :: lane_jobs
-        logical, intent(in) :: first
-        integer, intent(out) :: ierr
-        character(len=*), intent(out) :: message, state_name
-        integer, intent(inout) :: completed
-        integer, intent(inout) :: sequence
-
-        logical :: started, reused, first_dispatch
-
-        first_dispatch = first
-        do
-            call advance_campaign_step(project_dir, session, request, generation, &
-                selected, n_selected, index_case, seed, campaign, &
-                campaign_started_ms, children, lane_jobs, first_dispatch, started, &
-                reused, ierr, message, completed, state_name, sequence)
-            first_dispatch = .false.
-            if (ierr /= 0) return
-            if (reused) then
-                completed = completed + 1
-            else if (.not. started .or. running_count(children) >= lane_jobs) then
-                return
-            end if
-        end do
-    end subroutine advance_campaign
-
-    subroutine advance_campaign_step(project_dir, session, request, generation, &
-            selected, n_selected, index_case, seed, campaign, campaign_started_ms, &
-            children, lane_jobs, first, started, reused, ierr, message, completed, &
-            state_name, sequence)
-        character(len=*), intent(in) :: project_dir
-        type(gremlin_session_t), intent(in) :: session
-        type(gremlin_request_t), intent(inout) :: request
-        type(generation_t), intent(inout) :: generation
-        character(len=*), intent(inout) :: selected(:)
-        integer, intent(inout) :: n_selected, index_case, seed, campaign
-        integer(int64), intent(inout) :: campaign_started_ms
-        type(child_t), intent(inout) :: children(:)
-        integer, intent(in) :: lane_jobs
-        logical, intent(in) :: first
-        logical, intent(out) :: started, reused
-        integer, intent(out) :: ierr
-        character(len=*), intent(out) :: message, state_name
-        integer, intent(in) :: completed
-        integer, intent(inout) :: sequence
-
-        type(child_t) :: child
-        integer :: slot, in_flight
-        integer(int64) :: now_ms
-        integer :: status, mandatory_count, launch_error
-        integer :: owner_pid
-        type(gremlin_request_t) :: next_request
-        type(gremlin_coverage_view_t) :: coverage_view
-        type(gremlin_readiness_t) :: readiness
-        character(len=PATH_LEN) :: launch_message, state_message
-        character(len=PATH_LEN) :: coverage_path
-        character(len=128) :: active_session, owner_start
-        character(len=GREMLIN_STATE_TEXT_MAX) :: status_text
-
-        ierr = 0
-        message = ''
-        started = .false.
-        reused = .false.
-        in_flight = running_count(children)
-        if (in_flight >= lane_jobs) return
-        call clock_milliseconds(now_ms)
-        if (first) then
-            index_case = 1
-        else
-        if (request%random_count == 0) then
-            call gremlin_session_read(project_dir, request%lane_id, &
-                active_session, owner_pid, owner_start, status_text, status, message)
-            if (status /= 0) then
-                ierr = status
-                return
-            end if
-            if (trim(active_session) /= trim(session%session_id)) then
-                ierr = 1
-                message = 'Gremlin owner identity changed before gate completion'
-                return
-            end if
-            coverage_path = trim(session%state_dir)//'/coverage-'// &
-                generation%identity//'.state'
-            call coverage_read_view_path(trim(coverage_path), generation%identity, &
-                coverage_view, status, message)
-            if (status == COVERAGE_OK) then
-                call compute_readiness(session, trim(status_text), coverage_view, &
-                    .true., readiness, ierr, message)
-                if (ierr /= 0) return
-                if (readiness%local_gate_green .and. in_flight > 0) then
-                    ! Quiescence only when nothing is in flight: drain first.
-                    return
-                else if (readiness%local_gate_green) then
-                    selected = ''
-                    n_selected = 0
-                    state_name = 'quiescent'
-                    call publish_state(session, request, state_name, generation, &
-                        generation, '', completed, n_selected, seed, 'NONE', 0, &
-                        ierr, message)
-                    return
-                end if
-            else if (status /= COVERAGE_NOT_FOUND) then
-                ierr = status
-                return
-            end if
-        end if
-        if (index_case < n_selected .and. &
-            now_ms - campaign_started_ms < &
-            int(request%campaign_seconds, int64)*1000_int64) then
-            index_case = index_case + 1
-        else if (in_flight > 0) then
-            ! Rotate the campaign only when no child is in flight.
-            return
-        else
-            seed = next_campaign_seed(seed)
-            next_request = request
-            next_request%seed = seed
-            call discover_campaign(generation, &
-                session, next_request, selected, n_selected, mandatory_count, seed, &
-                ierr, message)
-            request%requirement_digest = next_request%requirement_digest
-            request%gate_cases = next_request%gate_cases
-            request%gate_required_count = next_request%gate_required_count
-            if (ierr /= 0) then
-                state_name = 'inventory_failed'
-                call publish_state(session, request, state_name, generation, generation, '', &
-                    completed, n_selected, seed, 'NONE', ierr)
-                return
-            end if
-            campaign = campaign + 1
-            index_case = 1
-            call clock_milliseconds(campaign_started_ms)
-        end if
-        end if
-        if (n_selected == 0) then
-            state_name = 'idle'
-            if (request%random_count == 0 .and. request%gate_required_count > 0) &
-                state_name = 'quiescent'
-            coverage_path = trim(session%state_dir)//'/coverage-'// &
-                trim(generation%identity)//'.state'
-            call coverage_read_view_path(trim(coverage_path), generation%identity, &
-                coverage_view, status, message)
-            if (status == COVERAGE_OK) then
-                if (coverage_view%green .and. request%gate_required_count > 0) &
-                    state_name = 'quiescent'
-            else if (status /= COVERAGE_NOT_FOUND) then
-                ierr = status
-                return
-            end if
-            call publish_state(session, request, state_name, generation, generation, '', &
-                completed, n_selected, seed, 'NONE', 0, ierr, message)
-            return
-        end if
-        state_name = 'testing'
-        slot = 1
-        do while (children(slot)%pid > 0)
-            slot = slot + 1
-        end do
-        call launch_selected_case(session, request, generation, selected, n_selected, &
-            index_case, seed, campaign, lane_jobs, child, ierr, message, sequence)
-        children(slot) = child
-        reused = child%reused
-        if (ierr == 0 .and. child%pid > 0) then
-            started = .true.
-            call set_running_summary(children)
-            call publish_state(session, request, 'testing', generation, generation, &
-                first_running_case(children), completed, n_selected, seed, 'RUNNING', &
-                0, ierr, message)
-        end if
-        if (ierr /= 0) then
-            launch_error = ierr
-            launch_message = message
-            call publish_state(session, request, 'test_launch_failed', generation, &
-                generation, current_test_name(selected, n_selected), completed, &
-                n_selected, seed, 'INFRA_ERROR', launch_error, status, state_message)
-            if (status == 0) then
-                ierr = launch_error
-                message = trim(launch_message)
-            else
-                ierr = status
-                message = trim(state_message)
-            end if
-        end if
-    end subroutine advance_campaign_step
-
-    integer function next_campaign_seed(seed) result(next_seed)
-        integer, intent(in) :: seed
-        integer(int64) :: state
-
-        ! Park-Miller progression gives a reproducible positive 31-bit seed.
-        state = modulo(int(seed, int64), 2147483646_int64) + 1_int64
-        state = modulo(state*48271_int64, 2147483647_int64)
-        next_seed = int(state)
-    end function next_campaign_seed
-
-    subroutine record_case(session, request, generation, child, exitcode, outcome, &
-            sequence, seed, ierr, message)
-        type(gremlin_session_t), intent(in) :: session
-        type(gremlin_request_t), intent(in) :: request
-        type(generation_t), intent(in) :: generation
-        type(child_t), intent(in) :: child
-        integer, intent(in) :: exitcode, seed
-        character(len=*), intent(in) :: outcome
-        integer, intent(inout) :: sequence
-        integer, intent(out) :: ierr
-        character(len=*), intent(out) :: message
-
-        sequence = sequence + 1
-        call record_immediate_case(session, request, generation, child%case_name, &
-            exitcode, outcome, sequence, child%case_index, seed, child%log_file, ierr, &
-            message, gate_required=child%gate_required)
-    end subroutine record_case
-
-    subroutine record_immediate_case(session, request, generation, case_name, exitcode, &
-            outcome, sequence, case_index, seed, log_file, ierr, message, &
-            credit_coverage, gate_required, reused_from)
-        type(gremlin_session_t), intent(in) :: session
-        type(gremlin_request_t), intent(in) :: request
-        type(generation_t), intent(in) :: generation
-        character(len=*), intent(in) :: case_name, outcome, log_file
-        integer, intent(in) :: exitcode, sequence, case_index, seed
-        integer, intent(out) :: ierr
-        character(len=*), intent(out) :: message
-
-        logical, intent(in), optional :: credit_coverage
-        logical, intent(in), optional :: gate_required
-        !! The receipt reuses this earlier generation's PASS (no run).
-        character(len=*), intent(in), optional :: reused_from
-        logical :: credit, is_gate
-        character(len=:), allocatable :: reuse_identity
-        character(len=HASH_LEN) :: closure
-        character(len=160) :: gate_identity
-        character(len=256) :: completion_id
-        character(len=:), allocatable :: record
-        character(len=16) :: journal_outcome
-        character(len=PATH_LEN) :: journal_path
-        character(len=PATH_LEN) :: coverage_path
-        character(len=HASH_LEN) :: inventory_digest
-        character(len=96) :: receipt_epoch
-        character(len=512) :: receipt_identity
-        type(gremlin_coverage_view_t) :: coverage_view
-        integer :: status, coverage_status
-
-        write (completion_id, '(a,a,a,a,i0,a,i0)') trim(session%session_id), '-', &
-            generation%identity(1:12), '-', sequence, '-', case_index
-        journal_outcome = 'fail'
-        if (outcome == 'PASS' .or. outcome == 'BUILD_PASS') journal_outcome = 'pass'
-        credit = .true.
-        if (present(credit_coverage)) credit = credit_coverage
-        is_gate = .false.
-        if (present(gate_required)) is_gate = gate_required
-        gate_identity = ''
-        if (is_gate) gate_identity = ',"gate_required":true,"requirement_digest":"'// &
-            request%requirement_digest//'"'
-        receipt_identity = ',"evidence_kind":"reproduction"'
-        if (credit) receipt_identity = ',"evidence_kind":"campaign"'
-        ! Case receipts carry the case input closure digest (reuse key) and
-        ! whether the case ran or reused an earlier PASS.
-        closure = ''
-        reuse_identity = ''
-        if (case_name /= '<build>') then
-            closure = generation_case_digest(generation, case_name)
-            if (len_trim(closure) > 0) reuse_identity = &
-                ',"closure_digest":"'//trim(closure)//'"'
-            reuse_identity = reuse_identity//',"disposition":"run"'
-            if (present(reused_from)) reuse_identity = &
-                ',"closure_digest":"'//trim(closure)//'","disposition":"reused",'// &
-                '"reused_from":"'//trim(reused_from)//'"'
-        end if
-        if (credit .and. coverage_outcome(outcome)) then
-            coverage_path = trim(session%state_dir)//'/coverage-'// &
-                generation%identity//'.state'
-            call coverage_read_view_path(trim(coverage_path), generation%identity, &
-                coverage_view, coverage_status, message)
-            if (coverage_status /= COVERAGE_OK) then
-                ierr = coverage_status
-                return
-            end if
-            inventory_digest = coverage_view%inventory_digest
-            write(receipt_epoch, '(i0)') coverage_view%epoch
-            receipt_identity = ',"evidence_kind":"campaign","coverage_epoch":'// &
-                trim(receipt_epoch)// &
-                ',"inventory_digest":"'//trim(inventory_digest)//'"'
-        end if
-        record = '{"completion_id":"'//trim(completion_id)// &
-            '","session_id":"'//trim(json_escape_string(session%session_id))// &
-            '","lane_id":"'//trim(json_escape_string(request%lane_id))// &
-            '","generation":"'//generation%identity// &
-            '","driver_path":"'// &
-            trim(json_escape_string(trim(generation%driver_path)))// &
-            '","driver_digest":"'//generation%driver_digest// &
-            '","driver_size":'//trim(int64_text(generation%driver_size))// &
-            ',"case_id":"'//trim(json_escape_string(case_name))//'"'// &
-            case_attributes_json(generation, case_name)//reuse_identity// &
-            ',"outcome":"'//trim(journal_outcome)//'","status":"'// &
-            trim(outcome)//'","exitcode":'// &
-            trim(json_int(exitcode))//',"seed":'//trim(json_int(seed))// &
-            trim(receipt_identity)//trim(gate_identity)// &
-            ',"order":'//trim(json_int(case_index))//',"log_path":"'// &
-            trim(json_escape_string(log_file))//'"}'
-        call gremlin_get_session_journal_path(session%project_key, request%lane_id, &
-            session%session_id, journal_path, ierr, message)
-        if (ierr /= 0) return
-        ! The lane ledger is the selection source of truth and is written first.
-        ! A restart can therefore never advance coverage from an unreceipted case.
-        if (credit .and. coverage_outcome(outcome)) then
-            ! A non-PASS receipt is indexed first (a crash then only loses a
-            ! reuse); a PASS only once it is in the journal.
-            if (trim(outcome) /= 'PASS') then
-                call case_index_record(session, case_name, generation%identity, &
-                    closure, trim(outcome), status, message)
-                if (status /= 0) then
-                    ierr = status
+            call exec_poll(job, done, status)
+            if (done) return
+            polls = polls + 1
+            if (present(session) .and. mod(polls, 4) == 0) then
+                call gremlin_session_stop_requested(session, stop_now, status, detail)
+                if (status == 0 .and. stop_now) then
+                    call exec_cancel(job, status)
+                    if (status /= 0) job%exitcode = EXEC_UNCANCELLED
+                    stopped = .true.
                     return
                 end if
             end if
-            call journal_append(trim(session%state_dir)//'/campaign-journal.jsonl', &
-                trim(completion_id), trim(record), status, message)
-            if (status /= JOURNAL_OK) then
-                ierr = status
-                return
-            end if
-            if (trim(outcome) == 'PASS') then
-                call case_index_record(session, case_name, generation%identity, &
-                    closure, trim(outcome), status, message)
-                if (status /= 0) then
-                    ierr = status
-                    return
-                end if
-            end if
-            coverage_path = trim(session%state_dir)//'/coverage-'// &
-                generation%identity//'.state'
-            call coverage_record_path(trim(coverage_path), generation%identity, &
-                case_name, outcome, coverage_status, message)
-            if (coverage_status /= COVERAGE_OK) then
-                ierr = coverage_status
-                return
-            end if
-            call journal_compact_tail(trim(session%state_dir)// &
-                '/campaign-journal.jsonl', receipt_limit(), status, message)
-            if (status /= JOURNAL_OK) then
-                ierr = status
-                return
-            end if
-        end if
-        call journal_append(trim(journal_path), trim(completion_id), trim(record), &
-            status, message)
-        ierr = status
-    end subroutine record_immediate_case
-
-    subroutine record_build(session, request, generation, exitcode, log_file, sequence, &
-            ierr, message)
-        type(gremlin_session_t), intent(in) :: session
-        type(gremlin_request_t), intent(in) :: request
-        type(generation_t), intent(in) :: generation
-        integer, intent(in) :: exitcode
-        character(len=*), intent(in) :: log_file
-        integer, intent(inout) :: sequence
-        integer, intent(out) :: ierr
-        character(len=*), intent(out) :: message
-        character(len=16) :: outcome
-
-        if (exitcode == 0) then
-            outcome = 'BUILD_PASS'
-        else
-            outcome = 'BUILD_FAIL'
-        end if
-        sequence = sequence + 1
-        call record_immediate_case(session, request, generation, '<build>', exitcode, &
-            trim(outcome), sequence, 0, request%seed, log_file, ierr, message)
-    end subroutine record_build
-
-    subroutine publish_state(session, request, state, active, candidate, current_case, &
-            completed, selected_count, seed, last_outcome, last_exitcode, ierr, message, &
-            status_text_out, diagnostic)
-        type(gremlin_session_t), intent(in) :: session
-        type(gremlin_request_t), intent(in) :: request
-        character(len=*), intent(in) :: state, current_case, last_outcome
-        type(generation_t), intent(in) :: active, candidate
-        integer, intent(in) :: completed, selected_count, seed, last_exitcode
-        integer, intent(out), optional :: ierr
-        character(len=*), intent(out), optional :: message
-        character(len=*), intent(out), optional :: status_text_out
-        character(len=*), intent(in), optional :: diagnostic
-
-        character(len=GREMLIN_STATE_TEXT_MAX) :: status_text
-        type(gremlin_session_t) :: read_session
-        type(gremlin_coverage_view_t) :: coverage_view
-        type(gremlin_readiness_t) :: readiness
-        character(len=PATH_LEN) :: local_message, lifecycle_path, event_message
-        character(len=PATH_LEN) :: diagnostic_text
-        character(len=PATH_LEN) :: coverage_path
-        integer :: status
-        character(len=PATH_LEN) :: retention_root
-        logical :: have_coverage
-
-        diagnostic_text = ''
-        if (present(diagnostic)) diagnostic_text = diagnostic
-        retention_root = trim(active%root)
-        if (len_trim(retention_root) == 0) retention_root = trim(candidate%root)
-        status_text = gremlin_status_json(session, request, request_policy_key(request), &
-            state, active, candidate, active_model_identity(active), current_case, &
-            running_summary_names(:running_summary_count), completed, selected_count, &
-            seed, last_outcome, last_exitcode, gremlin_retention_json(retention_root, &
-            trim(session%state_dir)//'/views'), diagnostic_text)
-        ! Record the lifecycle transition before publishing the state, so any
-        ! reader that observes a state also finds its lifecycle event.
-        local_message = ''
-        status = 0
-        if (status == 0) then
-            call lifecycle_path_for_session(session, request, lifecycle_path, &
-                status, event_message)
-            if (status == 0) then
-                read_session = session
-                read_session%state_dir = lifecycle_path(: &
-                    len_trim(lifecycle_path) - len('/lifecycle.jsonl'))
-                coverage_view = gremlin_coverage_view_t()
-                have_coverage = .false.
-                if (len_trim(active%identity) == HASH_LEN) then
-                    coverage_path = trim(session%state_dir)//'/coverage-'// &
-                        trim(active%identity)//'.state'
-                    call coverage_read_view_path(trim(coverage_path), &
-                        trim(active%identity), coverage_view, status, event_message)
-                    if (status == COVERAGE_OK) then
-                        have_coverage = .true.
-                    else if (status == COVERAGE_NOT_FOUND) then
-                        status = 0
-                        event_message = ''
-                    end if
-                end if
-            end if
-            if (status == 0) then
-                call compute_readiness(read_session, trim(status_text), coverage_view, &
-                    have_coverage, readiness, status, event_message)
-            end if
-            if (status == 0) then
-                call publish_lifecycle_transition(read_session, request, &
-                    trim(lifecycle_path), state, active, candidate, current_case, last_outcome, &
-                    readiness, coverage_view, have_coverage, trim(diagnostic_text), &
-                    status, event_message)
-            end if
-            if (status /= 0) then
-                local_message = 'cannot publish Gremlin lifecycle transition: '// &
-                    trim(event_message)
-            end if
-        end if
-        if (status == 0) &
-            call gremlin_session_publish(session, trim(status_text), status, local_message)
-        if (present(ierr)) ierr = status
-        if (present(message)) message = local_message
-        if (present(status_text_out)) status_text_out = trim(status_text)
-    end subroutine publish_state
-
-    subroutine publish_lifecycle_transition(session, request, path, state, active, &
-            candidate, current_case, last_outcome, readiness, coverage, have_coverage, &
-            diagnostic, ierr, message)
-        type(gremlin_session_t), intent(in) :: session
-        type(gremlin_request_t), intent(in) :: request
-        character(len=*), intent(in) :: path, state, current_case, last_outcome
-        type(generation_t), intent(in) :: active, candidate
-        type(gremlin_readiness_t), intent(in) :: readiness
-        type(gremlin_coverage_view_t), intent(in) :: coverage
-        logical, intent(in) :: have_coverage
-        character(len=*), intent(in) :: diagnostic
-        integer, intent(out) :: ierr
-        character(len=*), intent(out) :: message
-        type(gremlin_lifecycle_event_t) :: previous
-        logical :: found, changed_generation, coverage_changed, previous_pass
-        character(len=32) :: failure_event
-        integer :: status
-        character(len=HASH_LEN) :: previous_generation
-
-        ierr = 0
-        message = ''
-        call read_last_lifecycle_event(path, previous, found, ierr, message)
-        if (ierr /= 0) return
-        previous_generation = ''
-        if (found) previous_generation = previous%active_generation
-        changed_generation = len_trim(active%identity) == HASH_LEN .and. &
-            trim(active%identity) /= trim(previous_generation)
-        if (trim(state) == 'starting') then
-            call append_lifecycle_event(session, request, path, 'session_started', &
-                active, candidate, active%identity, previous_generation, readiness, &
-                coverage, have_coverage, ierr, message)
-        else if (trim(state) == 'building') then
-            call append_lifecycle_event(session, request, path, &
-                'generation_started', active, candidate, candidate%identity, &
-                previous_generation, readiness, coverage, have_coverage, ierr, message)
-        else if (trim(state) == 'build_failed' .or. trim(last_outcome) == 'BUILD_FAIL') then
-            call append_lifecycle_event(session, request, path, &
-                'build_failed', active, candidate, candidate%identity, &
-                previous_generation, readiness, coverage, have_coverage, ierr, message)
-        else if (trim(state) == 'capture_failed') then
-            call append_lifecycle_event(session, request, path, 'capture_failed', &
-                active, candidate, candidate%identity, previous_generation, readiness, &
-                coverage, have_coverage, ierr, message, diagnostic)
-        else if (trim(state) == 'error') then
-            call append_lifecycle_event(session, request, path, 'session_failed', &
-                active, candidate, active%identity, previous_generation, readiness, &
-                coverage, have_coverage, ierr, message)
-        else if (trim(state) == 'stopped') then
-            call append_lifecycle_event(session, request, path, 'session_stopped', &
-                active, candidate, active%identity, previous_generation, readiness, &
-                coverage, have_coverage, ierr, message)
-        end if
-        if (ierr /= 0) return
-
-        if (changed_generation) then
-            call append_lifecycle_event(session, request, path, &
-                'build_passed', active, candidate, candidate%identity, &
-                previous_generation, readiness, coverage, have_coverage, ierr, message)
-            if (ierr /= 0) return
-            if (len_trim(previous_generation) > 0) then
-                call append_lifecycle_event(session, request, path, &
-                    'generation_superseded', active, candidate, candidate%identity, &
-                    previous_generation, readiness, coverage, have_coverage, ierr, message)
-            else
-                call append_lifecycle_event(session, request, path, 'generation_activated', &
-                    active, candidate, active%identity, previous_generation, readiness, &
-                    coverage, have_coverage, ierr, message)
-            end if
-            if (ierr /= 0) return
-        end if
-
-        if (found .and. (readiness%local_gate_green .neqv. &
-            previous%local_gate_green)) then
-            if (readiness%local_gate_green) then
-                call append_lifecycle_event(session, request, path, 'local_gate_green', &
-                    active, candidate, active%identity, previous_generation, readiness, &
-                    coverage, have_coverage, ierr, message)
-            else
-                call append_lifecycle_event(session, request, path, 'local_gate_changed', &
-                    active, candidate, active%identity, previous_generation, readiness, &
-                    coverage, have_coverage, ierr, message)
-            end if
-            if (ierr /= 0) return
-        else if (.not. found .and. readiness%local_gate_green) then
-            call append_lifecycle_event(session, request, path, 'local_gate_green', &
-                active, candidate, active%identity, previous_generation, readiness, &
-                coverage, have_coverage, ierr, message)
-            if (ierr /= 0) return
-        end if
-
-        ! Normal FAIL is retained only after the normal runner's repeat attempt.
-        ! A previous-generation PASS distinguishes a confirmed regression from
-        ! a newly observed failure. Flaky, timeout and infra are factual outcomes.
-        failure_event = ''
-        select case (trim(last_outcome))
-        case ('FAIL')
-            call prior_generation_case_passed(session, active%identity, current_case, &
-                previous_pass, ierr, message)
-            if (ierr /= 0) return
-            failure_event = 'test_failed'
-            if (previous_pass) failure_event = 'regression_confirmed'
-        case ('FLAKY')
-            failure_event = 'test_flaky'
-        case ('TIMEOUT')
-            failure_event = 'test_timeout'
-        case ('INFRA_ERROR', 'INFRA')
-            if (len_trim(current_case) > 0 .and. trim(current_case) /= '<build>') &
-                failure_event = 'test_infra_error'
-        end select
-        if (len_trim(failure_event) > 0 .and. len_trim(active%identity) == HASH_LEN) then
-            call append_lifecycle_event(session, request, path, failure_event, &
-                active, candidate, active%identity, previous_generation, readiness, &
-                coverage, have_coverage, ierr, message)
-            if (ierr /= 0) return
-        end if
-        if (readiness%verification_level >= GREMLIN_VERIFY_ORDINARY .and. &
-            (.not. found .or. (previous%verification_level /= 'ordinary' .and. &
-            previous%verification_level /= 'full'))) then
-            call append_lifecycle_event(session, request, path, 'ordinary_coverage_complete', &
-                active, candidate, active%identity, previous_generation, readiness, &
-                coverage, have_coverage, ierr, message)
-            if (ierr /= 0) return
-        end if
-        if (readiness%fully_verified .and. &
-            (.not. found .or. previous%verification_level /= 'full')) then
-            call append_lifecycle_event(session, request, path, 'full_verification_complete', &
-                active, candidate, active%identity, previous_generation, readiness, &
-                coverage, have_coverage, ierr, message)
-            if (ierr /= 0) return
-        end if
-        if (readiness%phase == GREMLIN_PHASE_QUIESCENT .and. &
-            (.not. found .or. previous%phase /= 'quiescent')) then
-            call append_lifecycle_event(session, request, path, 'session_quiescent', &
-                active, candidate, active%identity, previous_generation, readiness, &
-                coverage, have_coverage, ierr, message)
-            if (ierr /= 0) return
-        else if (found .and. previous%phase == 'quiescent' .and. &
-                readiness%phase /= GREMLIN_PHASE_QUIESCENT) then
-            call append_lifecycle_event(session, request, path, 'session_wake', &
-                active, candidate, active%identity, previous_generation, readiness, &
-                coverage, have_coverage, ierr, message)
-            if (ierr /= 0) return
-        end if
-
-        coverage_changed = have_coverage
-        if (found .and. have_coverage) then
-            coverage_changed = coverage_changed .and. &
-                (coverage%epoch /= previous%epoch .or. &
-                coverage%cursor /= previous%epoch_cursor .or. &
-                readiness%ordinary_passed /= previous%ordinary_passed .or. &
-                readiness%ordinary_required /= previous%ordinary_required .or. &
-                readiness%ordinary_failures /= previous%ordinary_failures)
-        end if
-        if (coverage_changed) then
-            call append_lifecycle_event(session, request, path, 'coverage_updated', &
-                active, candidate, active%identity, previous_generation, readiness, &
-                coverage, have_coverage, ierr, message)
-            if (ierr /= 0) return
-        end if
-    end subroutine publish_lifecycle_transition
-
-    subroutine case_history(journal_path, case_name, generation, digest, in_generation, &
-            other_pass, match_verdict, match_generation, ierr, message)
-        !! One pass over a receipt journal for a case: whether it has a receipt
-        !! in `generation`, whether another generation holds a PASS, and the
-        !! latest verdict and generation among receipts of closure `digest`
-        !! outside `generation`.
-        character(len=*), intent(in) :: journal_path, case_name, generation, digest
-        logical, intent(out) :: in_generation, other_pass
-        character(len=*), intent(out) :: match_verdict
-        character(len=HASH_LEN), intent(out) :: match_generation
-        integer, intent(out) :: ierr
-        character(len=*), intent(out) :: message
-        type(journal_record_t), allocatable :: records(:)
-        character(len=HASH_LEN) :: receipt_generation, receipt_digest
-        character(len=NAME_LEN) :: receipt_case
-        character(len=32) :: verdict
-        integer(int64) :: cursor, next_cursor
-        integer :: i
-        logical :: exists
-
-        in_generation = .false.
-        other_pass = .false.
-        match_verdict = ''
-        match_generation = ''
-        ierr = 0
-        message = ''
-        inquire (file=journal_path, exist=exists)
-        if (.not. exists) return
-        cursor = 0_int64
-        do
-            call journal_read_page(journal_path, cursor, 64, &
-                int(JOURNAL_MAX_RECORD_BYTES, int64)*64_int64, records, next_cursor, &
-                ierr, message)
-            if (ierr /= JOURNAL_OK) return
-            if (size(records) == 0) exit
-            do i = 1, size(records)
-                call gremlin_json_field(records(i)%json, 'case_id', receipt_case)
-                if (trim(receipt_case) /= trim(case_name)) cycle
-                call gremlin_json_field(records(i)%json, 'generation', &
-                    receipt_generation)
-                if (receipt_generation == generation) then
-                    in_generation = .true.
-                    cycle
-                end if
-                call gremlin_json_field(records(i)%json, 'status', verdict)
-                if (len_trim(receipt_generation) == HASH_LEN .and. &
-                    trim(verdict) == 'PASS') other_pass = .true.
-                call gremlin_json_field(records(i)%json, 'closure_digest', &
-                    receipt_digest)
-                if (receipt_digest /= digest) cycle
-                match_verdict = verdict
-                match_generation = receipt_generation
-            end do
-            if (next_cursor <= cursor) then
-                ierr = JOURNAL_INVALID
-                message = 'journal cursor did not advance during receipt history scan'
-                return
-            end if
-            cursor = next_cursor
+            call fs_sleep_ms(50)
         end do
-        ierr = 0
-    end subroutine case_history
-
-    subroutine case_index_path(session, case_name, path)
-        !! One small file per case, so a receipt costs one atomic publish
-        !! whatever the number of cases; the set is bounded by the cases.
-        type(gremlin_session_t), intent(in) :: session
-        character(len=*), intent(in) :: case_name
-        character(len=*), intent(out) :: path
-        character(len=max(1, len_trim(case_name))), allocatable :: parts(:)
-
-        allocate (parts(1))
-        parts(1) = trim(case_name)
-        path = trim(session%state_dir)//'/case-index/'//cache_digest(parts, 1)
-    end subroutine case_index_path
-
-    subroutine case_index_read(session, case_name, entry, found)
-        !! entry: latest receipt (digest, status, generation) and latest PASS
-        !! (digest, generation) of the case, independent of journal compaction.
-        type(gremlin_session_t), intent(in) :: session
-        character(len=*), intent(in) :: case_name
-        type(case_index_entry_t), intent(out) :: entry
-        logical, intent(out) :: found
-        character(len=PATH_LEN) :: path
-        character(len=NAME_LEN + 8*HASH_LEN) :: line
-        integer :: unit, ios, bar(5), k, at
-
-        found = .false.
-        call case_index_path(session, case_name, path)
-        open (newunit=unit, file=trim(path), status='old', action='read', iostat=ios)
-        if (ios /= 0) return
-        read (unit, '(a)', iostat=ios) line
-        close (unit)
-        if (ios /= 0) return
-        at = 0
-        do k = 1, 5
-            bar(k) = index(line(at + 1:), '|')
-            if (bar(k) == 0) return
-            bar(k) = bar(k) + at
-            at = bar(k)
-        end do
-        if (line(bar(5) + 1:len_trim(line)) /= trim(case_name)) return
-        entry%last_digest = line(1:bar(1) - 1)
-        entry%last_status = line(bar(1) + 1:bar(2) - 1)
-        entry%last_generation = line(bar(2) + 1:bar(3) - 1)
-        entry%pass_digest = line(bar(3) + 1:bar(4) - 1)
-        entry%pass_generation = line(bar(4) + 1:bar(5) - 1)
-        found = .true.
-    end subroutine case_index_read
-
-    subroutine case_index_record(session, case_name, generation, digest, status, ierr, &
-            message)
-        type(gremlin_session_t), intent(in) :: session
-        character(len=*), intent(in) :: case_name, generation, digest, status
-        integer, intent(out) :: ierr
-        character(len=*), intent(out) :: message
-        type(case_index_entry_t) :: entry
-        character(len=PATH_LEN) :: path
-        character(len=:), allocatable :: text
-        character(kind=c_char), allocatable :: bytes(:)
-        integer :: k
-        logical :: found
-
-        ierr = 0
-        message = ''
-        if (len_trim(digest) /= HASH_LEN) return
-        call case_index_read(session, case_name, entry, found)
-        if (.not. found) entry = case_index_entry_t()
-        entry%last_digest = digest
-        entry%last_status = status
-        entry%last_generation = generation
-        if (trim(status) == 'PASS') then
-            entry%pass_digest = digest
-            entry%pass_generation = generation
-        end if
-        text = trim(entry%last_digest)//'|'//trim(entry%last_status)//'|'// &
-            trim(entry%last_generation)//'|'//trim(entry%pass_digest)//'|'// &
-            trim(entry%pass_generation)//'|'//trim(case_name)//achar(10)
-        allocate (bytes(len(text)))
-        do k = 1, len(text)
-            bytes(k) = text(k:k)
-        end do
-        call fs_make_dir(trim(session%state_dir)//'/case-index')
-        call case_index_path(session, case_name, path)
-        if (c_publish_file(trim(path)//c_null_char, bytes, &
-                int(size(bytes), c_size_t)) /= 0) then
-            ierr = 1
-            message = 'cannot publish the case receipt index'
-        end if
-    end subroutine case_index_record
-
-    subroutine case_reuse_source(session, generation, case_name, source, ierr, &
-            message)
-        !! The earlier generation whose PASS this case may reuse: the latest
-        !! campaign receipt of the case with the same input closure digest is
-        !! a PASS, and the case has no receipt in this generation yet (a later
-        !! campaign epoch runs it again). '' = run the case. The case index
-        !! answers without reading the journal; a case missing from it (state
-        !! of an older lane) falls back to the retained journal tail.
-        type(gremlin_session_t), intent(in) :: session
-        type(generation_t), intent(in) :: generation
-        character(len=*), intent(in) :: case_name
-        character(len=HASH_LEN), intent(out) :: source
-        integer, intent(out) :: ierr
-        character(len=*), intent(out) :: message
-        type(case_index_entry_t) :: entry
-        character(len=HASH_LEN) :: digest, match_generation
-        character(len=32) :: match_verdict
-        logical :: found, in_generation, other_pass
-
-        source = ''
-        ierr = 0
-        message = ''
-        digest = generation_case_digest(generation, case_name)
-        if (len_trim(digest) /= HASH_LEN) return
-        call case_index_read(session, case_name, entry, found)
-        if (found) then
-            if (entry%last_generation == generation%identity) return
-            if (entry%pass_digest /= digest) return
-            if (entry%last_digest == digest .and. trim(entry%last_status) /= 'PASS') &
-                return
-            source = entry%pass_generation
-            return
-        end if
-        call case_history(trim(session%state_dir)//'/campaign-journal.jsonl', &
-            case_name, generation%identity, digest, in_generation, other_pass, &
-            match_verdict, match_generation, ierr, message)
-        if (ierr /= JOURNAL_OK .or. in_generation) return
-        ierr = 0
-        if (trim(match_verdict) == 'PASS') source = match_generation
-    end subroutine case_reuse_source
-
-    subroutine prior_generation_case_passed(session, generation, case_name, passed, &
-            ierr, message)
-        type(gremlin_session_t), intent(in) :: session
-        character(len=*), intent(in) :: generation, case_name
-        logical, intent(out) :: passed
-        integer, intent(out) :: ierr
-        character(len=*), intent(out) :: message
-        character(len=HASH_LEN) :: match_generation
-        character(len=32) :: match_verdict
-        character(len=PATH_LEN) :: journal_path
-        logical :: in_generation
-
-        passed = .false.
-        if (.not. allocated(session%project_key) .or. &
-            .not. allocated(session%lane_id) .or. &
-            .not. allocated(session%session_id)) then
-            ierr = 1
-            message = 'Gremlin session has no receipt journal identity'
-            return
-        end if
-        call gremlin_get_session_journal_path(trim(session%project_key), &
-            trim(session%lane_id), trim(session%session_id), journal_path, ierr, message)
-        if (ierr /= 0) return
-        call case_history(trim(journal_path), case_name, generation, '', &
-            in_generation, passed, match_verdict, match_generation, ierr, message)
-    end subroutine prior_generation_case_passed
-
-    subroutine read_last_lifecycle_event(path, event, found, ierr, message)
-        character(len=*), intent(in) :: path
-        type(gremlin_lifecycle_event_t), intent(out) :: event
-        logical, intent(out) :: found
-        integer, intent(out) :: ierr
-        character(len=*), intent(out) :: message
-        type(gremlin_lifecycle_event_t), allocatable :: page(:)
-        integer(int64) :: cursor, next_cursor
-        integer :: n_events
-        logical :: has_more
-
-        event = gremlin_lifecycle_event_t()
-        found = .false.
-        cursor = 0_int64
-        ierr = LIFECYCLE_OK
-        message = ''
-        do
-            call gremlin_lifecycle_read_page(path, cursor, 128, &
-                int(LIFECYCLE_MAX_EVENT, int64), page, n_events, next_cursor, &
-                has_more, ierr, message)
-            if (ierr /= LIFECYCLE_OK) return
-            if (n_events > 0) then
-                event = page(n_events)
-                found = .true.
-            end if
-            if (.not. has_more) exit
-            if (next_cursor <= cursor) then
-                ierr = LIFECYCLE_INVALID
-                message = 'lifecycle event cursor did not advance'
-                return
-            end if
-            cursor = next_cursor
-        end do
-    end subroutine read_last_lifecycle_event
-
-    subroutine append_lifecycle_event(session, request, path, event_type, active, &
-            candidate, subject_generation, previous_generation, readiness, coverage, &
-            have_coverage, ierr, message, diagnostic)
-        type(gremlin_session_t), intent(in) :: session
-        type(gremlin_request_t), intent(in) :: request
-        character(len=*), intent(in) :: path, event_type, subject_generation
-        character(len=*), intent(in) :: previous_generation
-        type(generation_t), intent(in) :: active, candidate
-        type(gremlin_readiness_t), intent(in) :: readiness
-        type(gremlin_coverage_view_t), intent(in) :: coverage
-        logical, intent(in) :: have_coverage
-        integer, intent(out) :: ierr
-        character(len=*), intent(out) :: message
-        character(len=*), intent(in), optional :: diagnostic
-        type(gremlin_lifecycle_event_t) :: event
-
-        event%event_type = trim(event_type)
-        event%diagnostic = ''
-        if (present(diagnostic)) event%diagnostic = diagnostic
-        event%generation = trim(subject_generation)
-        event%active_generation = trim(active%identity)
-        event%candidate_generation = trim(candidate%identity)
-        event%previous_generation = trim(previous_generation)
-        event%phase = gremlin_phase_name(readiness%phase)
-        event%health = gremlin_health_name(readiness%health)
-        event%event_epoch = readiness%event_epoch
-        event%requirement_digest = readiness%requirement_digest
-        event%gate_token = readiness%gate_token
-        event%dirty = readiness%dirty
-        event%local_gate_green = readiness%local_gate_green
-        event%verification_level = gremlin_verification_name(readiness%verification_level)
-        event%fully_verified = readiness%fully_verified
-        event%gate_required = readiness%gate_required
-        event%gate_passed = readiness%gate_passed
-        event%ordinary_required = readiness%ordinary_required
-        event%ordinary_passed = readiness%ordinary_passed
-        event%ordinary_failures = readiness%ordinary_failures
-        event%full_required = readiness%full_required
-        event%full_passed = readiness%full_passed
-        event%full_failures = readiness%full_failures
-        if (have_coverage) then
-            event%epoch = coverage%epoch
-            event%epoch_cursor = coverage%cursor
-        end if
-        event%event_id = gremlin_lifecycle_make_id(session%session_id, event)
-        call gremlin_lifecycle_append(path, event, ierr, message)
-    end subroutine append_lifecycle_event
+    end subroutine wait_job
 
     subroutine response_with_events(action, status_text, session, request, failures_only, &
             response, ierr, message)
@@ -4646,172 +1048,6 @@ contains
         message = ''
     end subroutine response_with_events
 
-    subroutine lifecycle_path_for_session(session, request, path, ierr, message)
-        type(gremlin_session_t), intent(in) :: session
-        type(gremlin_request_t), intent(in) :: request
-        character(len=*), intent(out) :: path, message
-        integer, intent(out) :: ierr
-        character(len=PATH_LEN) :: journal_path
-        integer :: suffix_length
-
-        path = ''
-        if (.not. allocated(session%project_key) .or. &
-            .not. allocated(session%session_id)) then
-            ierr = 1
-            message = 'Gremlin session has no lifecycle journal identity'
-            return
-        end if
-        call gremlin_get_session_journal_path(trim(session%project_key), &
-            request%lane_id, trim(session%session_id), journal_path, ierr, message)
-        if (ierr /= 0) return
-        suffix_length = len('/journal.jsonl')
-        if (len_trim(journal_path) <= suffix_length .or. &
-            journal_path(len_trim(journal_path) - suffix_length + 1:) /= '/journal.jsonl') then
-            ierr = 1
-            message = 'Gremlin session receipt journal path is invalid'
-            return
-        end if
-        path = journal_path(:len_trim(journal_path) - suffix_length)//'/lifecycle.jsonl'
-        ierr = 0
-        message = ''
-    end subroutine lifecycle_path_for_session
-
-    subroutine release_generation_lease(lease, held, ierr, message)
-        type(gremlin_lease_t), intent(inout) :: lease
-        logical, intent(inout) :: held
-        integer, intent(out) :: ierr
-        character(len=*), intent(out) :: message
-
-        if (.not. held) then
-            ierr = 0
-            message = ''
-            return
-        end if
-        call gremlin_lease_release(lease, ierr, message)
-        if (ierr == 0) held = .false.
-    end subroutine release_generation_lease
-
-    logical function status_is_failure(status)
-        character(len=*), intent(in) :: status
-
-        status_is_failure = status == 'FAIL' .or. status == 'BUILD_FAIL' .or. &
-            status == 'TIMEOUT' .or. status == 'FLAKY' .or. status == 'INFRA_ERROR'
-    end function status_is_failure
-
-    logical function coverage_outcome(status)
-        character(len=*), intent(in) :: status
-        coverage_outcome = status == 'PASS' .or. status == 'FAIL' .or. &
-            status == 'TIMEOUT' .or. status == 'FLAKY' .or. &
-            status == 'INFRA' .or. status == 'INFRA_ERROR' .or. &
-            status == 'CANCELLED'
-    end function coverage_outcome
-
-    function request_policy_key(request) result(key)
-        type(gremlin_request_t), intent(in) :: request
-        character(len=HASH_LEN) :: key
-
-        character(len=32) :: number
-        character(len=:), allocatable :: canonical
-        integer :: i
-
-        ! jobs 0 (host-derived default) keys like 1: only an explicit fan-out
-        ! makes a lane incompatible with a default start.
-        canonical = 'v1|r='//trim(int_text(request%random_count))// &
-            '|s='//trim(int_text(request%seed))//'|c='// &
-            trim(int_text(request%campaign_seconds))//'|t='// &
-            trim(int_text(request%timeout_seconds))//'|j='// &
-            trim(int_text(max(1, request%jobs)))//'|changed='// &
-            trim(json_bool(request%only_changed))//'|shuffle='// &
-            trim(json_bool(request%shuffle))
-        do i = 1, request%n_targets
-            write (number, '(i0)') len_trim(request%targets(i))
-            canonical = canonical//'|target:'//trim(number)//':'// &
-                trim(request%targets(i))
-        end do
-        do i = 1, request%n_labels
-            canonical = canonical//'|label:'// &
-                trim(int_text(len_trim(request%labels(i))))//':'// &
-                trim(request%labels(i))
-        end do
-        do i = 1, request%n_exclude_labels
-            canonical = canonical//'|exclude:'// &
-                trim(int_text(len_trim(request%exclude_labels(i))))//':'// &
-                trim(request%exclude_labels(i))
-        end do
-        do i = 1, request%n_layers
-            canonical = canonical//'|layer:'// &
-                trim(int_text(len_trim(request%layers(i))))//':'// &
-                trim(request%layers(i))
-        end do
-        if (len_trim(request%filter) > 0) canonical = canonical//'|filter:'// &
-            trim(int_text(len_trim(request%filter)))//':'//trim(request%filter)
-        key = text_digest(canonical)
-    end function request_policy_key
-
-    logical function request_scoped(request)
-        type(gremlin_request_t), intent(in) :: request
-
-        request_scoped = request%n_labels + request%n_exclude_labels + &
-            request%n_layers > 0 .or. len_trim(request%filter) > 0
-    end function request_scoped
-
-    subroutine push_scope_args(packed, n_args, request)
-        !! -L/-LE/--layer arguments of the lane scope, in `fo test` spelling.
-        character(len=:), allocatable, intent(inout) :: packed
-        integer, intent(inout) :: n_args
-        type(gremlin_request_t), intent(in) :: request
-        integer :: i
-
-        do i = 1, request%n_labels
-            call argv_push(packed, n_args, '-L')
-            call argv_push(packed, n_args, trim(request%labels(i)))
-        end do
-        do i = 1, request%n_exclude_labels
-            call argv_push(packed, n_args, '-LE')
-            call argv_push(packed, n_args, trim(request%exclude_labels(i)))
-        end do
-        do i = 1, request%n_layers
-            call argv_push(packed, n_args, '--layer')
-            call argv_push(packed, n_args, trim(request%layers(i)))
-        end do
-        if (len_trim(request%filter) > 0) then
-            call argv_push(packed, n_args, '-E')
-            call argv_push(packed, n_args, trim(request%filter))
-        end if
-    end subroutine push_scope_args
-
-    subroutine scope_model_request(request, model_request)
-        type(gremlin_request_t), intent(in) :: request
-        type(model_request_t), intent(out) :: model_request
-        integer :: i
-
-        allocate (model_request%names(0))
-        allocate (model_request%include_labels(request%n_labels))
-        allocate (model_request%exclude_labels(request%n_exclude_labels))
-        allocate (model_request%layers(request%n_layers))
-        model_request%filter = trim(request%filter)
-        do i = 1, request%n_labels
-            model_request%include_labels(i)%s = trim(request%labels(i))
-        end do
-        do i = 1, request%n_exclude_labels
-            model_request%exclude_labels(i)%s = trim(request%exclude_labels(i))
-        end do
-        do i = 1, request%n_layers
-            model_request%layers(i)%s = trim(request%layers(i))
-        end do
-    end subroutine scope_model_request
-
-    function text_digest(text) result(digest)
-        character(len=*), intent(in) :: text
-        character(len=HASH_LEN) :: digest
-
-        character(len=:), allocatable :: parts(:)
-
-        allocate (character(len=max(1, len(text))) :: parts(1))
-        parts(1) = text
-        digest = cache_digest(parts, 1)
-    end function text_digest
-
     subroutine replace_action(response, action)
         character(len=:), allocatable, intent(inout) :: response
         character(len=*), intent(in) :: action
@@ -4839,292 +1075,13 @@ contains
         end if
     end subroutine release_if_owner
 
-    function int_text(value) result(text)
-        integer, intent(in) :: value
-        character(len=32) :: text
-        write (text, '(i0)') value
-    end function int_text
-
-    function int64_text(value) result(text)
-        integer(int64), intent(in) :: value
-        character(len=32) :: text
-        write (text, '(i0)') value
-    end function int64_text
-
-    function current_test_name(selected, n_selected) result(name)
-        character(len=*), intent(in) :: selected(:)
-        integer, intent(in) :: n_selected
-        character(len=NAME_LEN) :: name
-
-        name = ''
-        if (n_selected <= 0) return
-        name = selected(1)
-    end function current_test_name
-
-    subroutine log_path(session, filename, path)
-        type(gremlin_session_t), intent(in) :: session
-        character(len=*), intent(in) :: filename
-        character(len=*), intent(out) :: path
-
-        path = trim(session%state_dir)//'/logs/'//trim(session%session_id)// &
-            '-'//trim(filename)
-    end subroutine log_path
-
     subroutine poll_launcher(pid)
+        !! Reap this process's owner launcher once it exited.
         integer, intent(in) :: pid
-
         integer :: ignored_exit
         logical :: done
 
-        if (pid <= 0) return
-        call process_poll_pid(pid, done, ignored_exit)
+        if (pid > 0) call process_poll_pid(pid, done, ignored_exit)
     end subroutine poll_launcher
-
-    subroutine cancel_launched_owner(pid, ierr)
-        integer, intent(in) :: pid
-        integer, intent(out) :: ierr
-
-        call cancel_owned_process(pid, ierr)
-    end subroutine cancel_launched_owner
-
-    subroutine cancel_owned_process(pid, ierr)
-        integer, intent(in) :: pid
-        integer, intent(out) :: ierr
-
-        integer :: attempt, exitcode
-        logical :: done
-
-        ierr = 0
-        if (pid <= 0) return
-        do attempt = 1, 3
-            call process_cancel_pid(pid, ierr)
-            if (ierr == 0) return
-            call process_poll_pid(pid, done, exitcode)
-            if (done) then
-                ierr = 0
-                return
-            end if
-            call fs_sleep_ms(50)
-        end do
-    end subroutine cancel_owned_process
-
-
-    subroutine clock_milliseconds(milliseconds)
-        integer(int64), intent(out) :: milliseconds
-        integer(int64) :: count, rate
-
-        call system_clock(count=count, count_rate=rate)
-        milliseconds = 0_int64
-        if (rate <= 0_int64) return
-        milliseconds = (count/rate)*1000_int64 + &
-            modulo(count, rate)*1000_int64/rate
-    end subroutine clock_milliseconds
-
-    subroutine clock_seconds(seconds)
-        real(dp), intent(out) :: seconds
-        integer(int64) :: count, rate
-
-        call system_clock(count=count, count_rate=rate)
-        seconds = 0.0_dp
-        if (rate > 0_int64) seconds = real(count, dp)/real(rate, dp)
-    end subroutine clock_seconds
-
-    real(dp) function elapsed_seconds(started)
-        real(dp), intent(in) :: started
-        real(dp) :: now
-
-        call clock_seconds(now)
-        elapsed_seconds = max(0.0_dp, now - started)
-    end function elapsed_seconds
-
-    integer(int64) function system_clock_count()
-        integer(int64) :: count
-        call system_clock(count=count)
-        system_clock_count = count
-    end function system_clock_count
-
-    function runner_case_outcome(log_file, case_name) result(outcome)
-        character(len=*), intent(in) :: log_file, case_name
-        character(len=16) :: outcome
-        character(len=8192) :: line
-        character(len=:), allocatable :: result_name
-        character(len=32) :: result_status, verdict
-        type(json_parser_t) :: parser
-        type(json_event_t) :: event
-        integer :: unit, ios, depth, matches, tests_count, name_count, status_count
-        logical :: tests_array, test_object, want_tests, want_name, want_status
-        logical :: malformed
-
-        outcome = 'INFRA_ERROR'
-        open (newunit=unit, file=log_file, status='old', iostat=ios)
-        if (ios /= 0) return
-        do
-            read (unit, '(a)', iostat=ios) line
-            if (ios /= 0) exit
-            if (index(adjustl(line), '{') /= 1) cycle
-            outcome = 'INFRA_ERROR'
-            depth = 0
-            matches = 0
-            tests_count = 0
-            name_count = 0
-            status_count = 0
-            malformed = .false.
-            verdict = ''
-            tests_array = .false.
-            test_object = .false.
-            want_tests = .false.
-            want_name = .false.
-            want_status = .false.
-            call json_parser_init_strict(parser, trim(line))
-            do
-                call json_parser_next(parser, event)
-                select case (event%event_type)
-                case (JSON_OBJECT_START)
-                    if (want_name .or. want_status) malformed = .true.
-                    depth = depth + 1
-                    if (depth == 3 .and. tests_array) then
-                        test_object = .true.
-                        result_name = ''
-                        result_status = ''
-                        name_count = 0
-                        status_count = 0
-                    end if
-                    want_tests = .false.
-                    want_name = .false.
-                    want_status = .false.
-                case (JSON_ARRAY_START)
-                    if (want_name .or. want_status) malformed = .true.
-                    if (tests_array .and. depth == 2) malformed = .true.
-                    depth = depth + 1
-                    if (depth == 2 .and. want_tests) tests_array = .true.
-                    want_tests = .false.
-                    want_name = .false.
-                    want_status = .false.
-                case (JSON_OBJECT_END)
-                    if (depth == 3 .and. test_object) then
-                        if (name_count /= 1 .or. status_count /= 1) malformed = .true.
-                        if (name_count == 1 .and. status_count == 1 .and. &
-                            trim(result_name) == trim(case_name)) then
-                            matches = matches + 1
-                            verdict = result_status
-                        end if
-                        test_object = .false.
-                    end if
-                    depth = depth - 1
-                case (JSON_ARRAY_END)
-                    if (depth == 2) tests_array = .false.
-                    depth = depth - 1
-                case (JSON_KEY)
-                    if (.not. allocated(event%string_val)) cycle
-                    if (depth == 1) then
-                        want_tests = event%string_val == 'tests'
-                        if (want_tests) tests_count = tests_count + 1
-                    else if (depth == 3 .and. test_object) then
-                        want_name = event%string_val == 'name'
-                        want_status = event%string_val == 'status'
-                        if (want_name) name_count = name_count + 1
-                        if (want_status) status_count = status_count + 1
-                        if (name_count > 1 .or. status_count > 1) malformed = .true.
-                    end if
-                case (JSON_STRING)
-                    if (tests_array .and. depth == 2) malformed = .true.
-                    if (depth /= 3 .or. .not. test_object) cycle
-                    if (.not. allocated(event%string_val)) cycle
-                    if (want_name) then
-                        result_name = event%string_val
-                    end if
-                    if (want_status) then
-                        if (len(event%string_val) > len(result_status)) malformed = .true.
-                        result_status = event%string_val
-                    end if
-                    want_name = .false.
-                    want_status = .false.
-                case (JSON_ERROR)
-                    exit
-                case (JSON_END_OF_INPUT)
-                    if (tests_count == 1 .and. matches == 1 .and. .not. malformed) then
-                        select case (trim(verdict))
-                        case ('pass')
-                            outcome = 'PASS'
-                        case ('fail')
-                            outcome = 'FAIL'
-                        case ('timeout')
-                            outcome = 'TIMEOUT'
-                        case ('flaky')
-                            outcome = 'FLAKY'
-                        case default
-                            outcome = 'INFRA_ERROR'
-                        end select
-                    end if
-                    exit
-                case default
-                    if (want_name .or. want_status) malformed = .true.
-                    if (tests_array .and. depth == 2) malformed = .true.
-                    want_tests = .false.
-                    want_name = .false.
-                    want_status = .false.
-                end select
-            end do
-        end do
-        close (unit)
-    end function runner_case_outcome
-
-    integer function case_wall_timeout(project_dir, case_name, override) result(seconds)
-        character(len=*), intent(in) :: project_dir, case_name
-        integer, intent(in) :: override
-        type(fpm_config_t), allocatable :: config
-        integer :: ierr, budget
-
-        seconds = override
-        if (seconds > 0) return
-        allocate (config)
-        call fpm_config_parse(project_dir, config, ierr)
-        budget = test_budget_seconds(config, is_slow_test(case_name))
-        seconds = test_wall_cap_seconds(config, budget) + 5
-    end function case_wall_timeout
-
-    subroutine process_wait_bounded(pid, timeout_seconds, exitcode, session, stopped)
-        !! Wait for pid at most timeout_seconds. With a session, a stop request
-        !! cancels the owned process (exitcode 130, stopped = .true.).
-        integer, intent(in) :: pid, timeout_seconds
-        integer, intent(out) :: exitcode
-        type(gremlin_session_t), intent(in), optional :: session
-        logical, intent(out), optional :: stopped
-
-        integer :: cancel_status, stop_error, polls
-        logical :: done, stop_now
-        real(dp) :: started
-        character(len=PATH_LEN) :: stop_message
-
-        if (present(stopped)) stopped = .false.
-        polls = 0
-        call clock_seconds(started)
-        do
-            call process_poll_pid(pid, done, exitcode)
-            if (done) return
-            polls = polls + 1
-            if (present(session) .and. mod(polls, 4) == 0) then
-                call gremlin_session_stop_requested(session, stop_now, stop_error, &
-                    stop_message)
-                if (stop_error == 0 .and. stop_now) then
-                    call cancel_owned_process(pid, cancel_status)
-                    exitcode = 130
-                    if (cancel_status /= 0) exitcode = 125
-                    if (present(stopped)) stopped = .true.
-                    return
-                end if
-            end if
-            if (elapsed_seconds(started) >= real(timeout_seconds, dp)) then
-                call cancel_owned_process(pid, cancel_status)
-                if (cancel_status == 0) then
-                    exitcode = 124
-                else
-                    exitcode = 125
-                end if
-                return
-            end if
-            call fs_sleep_ms(50)
-        end do
-    end subroutine process_wait_bounded
 
 end module fo_gremlin_supervisor
