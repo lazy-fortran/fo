@@ -1390,7 +1390,7 @@ contains
         request%all = include_all
         request%filter = filter_text
         call project_select(b, all_flags, request, only_changed, model, selection, &
-            widen_reasons, ierr, message)
+            widen_reasons, ierr, message, configured=no_build)
         if (ierr /= 0) then
             write (error_unit, '(a)') 'fo: '//message
             stop 1

@@ -204,7 +204,8 @@ contains
         end if
     end subroutine project_build_cases
 
-    subroutine project_resolve(b, flags, request, model, selection, ierr, message)
+    subroutine project_resolve(b, flags, request, model, selection, ierr, message, &
+            configured)
         !! Load the model and select. ierr = 0: the selection is usable (an
         !! empty selection has selection%status = SELECT_EMPTY and the caller
         !! decides). ierr /= 0: message is the diagnostic, without prefix.
@@ -215,9 +216,17 @@ contains
         type(model_selection_t), intent(out) :: selection
         integer, intent(out) :: ierr
         character(len=:), allocatable, intent(out) :: message
+        logical, intent(in), optional :: configured
         type(model_request_t) :: local
+        logical :: reuse
 
-        call project_load(b, flags, model, ierr, message)
+        reuse = .false.
+        if (present(configured)) reuse = configured
+        if (reuse) then
+            call project_load_configured(b, model, ierr, message)
+        else
+            call project_load(b, flags, model, ierr, message)
+        end if
         if (ierr /= 0) return
         call attach_recorded_failures(b, model, request, local)
         call resolve_loaded(model, local, selection, ierr, message)
@@ -311,7 +320,7 @@ contains
     end function has_label
 
     subroutine project_select(b, flags, request, only_changed, model, selection, &
-            widen_reasons, ierr, message)
+            widen_reasons, ierr, message, configured)
         !! The one selection entry of `fo test`, `fo test --list`, the MCP test
         !! tool and `fo check`: project_resolve, or with only_changed the
         !! cases the Git delta of the project and its path dependencies
@@ -325,6 +334,9 @@ contains
         type(string_t), allocatable, intent(out) :: widen_reasons(:)
         integer, intent(out) :: ierr
         character(len=:), allocatable, intent(out) :: message
+        !! Reuse an existing configuration for --no-build. Parallel Gremlin
+        !! children must not rewrite queries or replies in their shared tree.
+        logical, intent(in), optional :: configured
         type(string_t), allocatable :: changed(:)
         character(len=:), allocatable :: reason
         logical :: git_ok, uses_affected, uses_failed
@@ -332,22 +344,24 @@ contains
         call filter_flags(request, uses_affected, uses_failed)
         if (.not. only_changed .and. .not. uses_affected) then
             allocate (widen_reasons(0))
-            call project_resolve(b, flags, request, model, selection, ierr, message)
+            call project_resolve(b, flags, request, model, selection, ierr, message, &
+                configured=configured)
             return
         end if
         call project_changed_files(trim(b%project_dir), changed, git_ok, reason)
         if (git_ok) then
             call project_affected(b, flags, request, changed, model, selection, &
-                widen_reasons, ierr, message, restrict=only_changed)
+                widen_reasons, ierr, message, restrict=only_changed, &
+                configured=configured)
         else
             call project_affected(b, flags, request, changed, model, selection, &
                 widen_reasons, ierr, message, force_reason=reason, &
-                restrict=only_changed)
+                restrict=only_changed, configured=configured)
         end if
     end subroutine project_select
 
     subroutine project_affected(b, flags, request, changed, model, selection, &
-            widen_reasons, ierr, message, force_reason, restrict)
+            widen_reasons, ierr, message, force_reason, restrict, configured)
         !! project_resolve restricted by model_affected to the cases the
         !! changed files affect (`fo test --only-changed`, MCP only_changed,
         !! `fo check`). changed: paths below the project root (relative, or
@@ -368,6 +382,7 @@ contains
         !! .false.: keep the whole selection (only the filter expression
         !! sees the delta, through affected()). Default .true.
         logical, intent(in), optional :: restrict
+        logical, intent(in), optional :: configured
         type(model_request_t) :: local
         integer, allocatable :: project_cases(:), hit(:)
         type(string_t), allocatable :: more(:)
@@ -376,11 +391,17 @@ contains
         type(string_t), allocatable :: kept(:), ignored(:)
         type(model_unit_t), allocatable :: units(:)
         character(len=4096) :: physical
-        logical :: resolved
+        logical :: resolved, reuse
         integer :: k, n
 
         allocate (widen_reasons(0))
-        call project_load(b, flags, model, ierr, message, scanned=extra)
+        reuse = .false.
+        if (present(configured)) reuse = configured
+        if (reuse) then
+            call project_load_configured(b, model, ierr, message, scanned=extra)
+        else
+            call project_load(b, flags, model, ierr, message, scanned=extra)
+        end if
         if (ierr /= 0) return
         allocate (roots(1))
         roots(1)%s = trim(b%project_dir)

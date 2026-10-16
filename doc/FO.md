@@ -213,7 +213,11 @@ fo test --list [--json] [same selection]
   preset filters out and `--all` selects overrides the preset's label filter
   for the run. No label is excluded except through the default exclusions above.
 - `--no-build` runs the selected cases without building (CMake: whatever is
-  built; a missing executable fails the case).
+  built; a missing executable fails the case). When the CMake build location is
+  known, selection reads its existing File API replies without configuring;
+  parallel Gremlin children share those immutable replies. A configure preset
+  without a build-root hint still needs configuration to discover its binary
+  directory; set `FO_CMAKE_BUILD_DIR` to avoid that discovery run.
 - `fo build --tests` builds what every test case needs, slow ones included:
   fpm builds its test programs, CMake builds the plan targets of the model's
   cases (cases a test preset filters out excluded), with the widening rule
