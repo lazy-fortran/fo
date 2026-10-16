@@ -478,13 +478,33 @@ contains
         if (owner_pid < 1_c_int) return
         do attempt = 1, 200
             signal_status = signal_process(owner_pid, 0_c_int)
-            if (signal_status /= 0_c_int) then
+            if (signal_status /= 0_c_int .or. is_zombie(owner_pid)) then
                 success = .true.
                 return
             end if
             call pause_for(50000)
         end do
     end subroutine wait_owner_exit
+
+    logical function is_zombie(pid)
+        !! A detached owner whose parent is a subreaper that has not collected it
+        !! stays a zombie and still answers signal 0; Linux reports it in /proc.
+        integer(c_int), intent(in) :: pid
+        character(len=256) :: line
+        character(len=32) :: path
+        integer :: unit, ios, close_paren
+
+        is_zombie = .false.
+        write(path, '(a,i0,a)') '/proc/', pid, '/stat'
+        open(newunit=unit, file=trim(path), action='read', status='old', iostat=ios)
+        if (ios /= 0) return
+        read(unit, '(a)', iostat=ios) line
+        close(unit)
+        if (ios /= 0) return
+        close_paren = index(line, ')', back=.true.)
+        if (close_paren > 0 .and. close_paren + 2 <= len(line)) &
+            is_zombie = line(close_paren + 2:close_paren + 2) == 'Z'
+    end function is_zombie
 
     subroutine wait_for_receipts(project_path, lane, session_id, wanted, success)
         character(len=*), intent(in) :: project_path, lane, session_id
