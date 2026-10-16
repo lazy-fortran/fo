@@ -1,6 +1,6 @@
 program test_gremlin_library_include_cli
     use fo_test_harness, only: string_list_t, process_result_t, list_add
-    use fo_test_harness, only: write_text, read_text, assert_true
+    use fo_test_harness, only: write_text, read_text, assert_true, assert_process_ok
     use fo_test_harness, only: assert_equal_integer, finish_assertions
     use fo_test_gremlin_oracle, only: gremlin_setup, gremlin_json
     use fo_test_gremlin_oracle, only: gremlin_start_args, gremlin_wait_ms
@@ -252,7 +252,7 @@ contains
         call list_add(args, '--generation')
         call list_add(args, frozen)
         call gremlin_json(driver, project, cache, state, args, response, process, 120000)
-        call assert_true(process%exit_code == 0, 'frozen header generation replays')
+        call assert_process_ok(process, 'frozen header generation replays')
         call assert_true(gremlin_field(response, 'state') == 'PASS', &
             'frozen replay excludes edited live declared header')
         call read_status()
