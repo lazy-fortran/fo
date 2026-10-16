@@ -13,8 +13,6 @@ module fo_change_watch
     private
 
     integer, parameter :: PATH_LEN = 4096
-    integer, parameter, public :: CHANGE_MODIFY = 1
-    integer, parameter, public :: CHANGE_CREATE = 2
     integer, parameter, public :: CHANGE_DELETE = 3
     integer, parameter, public :: CHANGE_RECONCILE = 4
 

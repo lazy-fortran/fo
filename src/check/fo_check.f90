@@ -80,23 +80,6 @@ contains
         character(len=MAX_PATH), optional, intent(out) :: filenames(MAX_NODES)
         logical, optional, intent(out) :: is_test_arr(MAX_NODES)
 
-        call fo_changed_modules_impl(dir, dag, changed_ids, n_changed, &
-            affected_ids, n_affected, n_cached, ierr, &
-            n_in_cycle, filenames, is_test_arr)
-    end subroutine fo_changed_modules
-
-    subroutine fo_changed_modules_impl(dir, dag, changed_ids, n_changed, &
-            affected_ids, n_affected, n_cached, ierr, &
-            n_in_cycle, filenames, is_test_arr)
-        character(len=*), intent(in) :: dir
-        type(dag_t), intent(out) :: dag
-        integer, intent(out) :: changed_ids(MAX_NODES), n_changed
-        integer, intent(out) :: affected_ids(MAX_NODES), n_affected
-        integer, intent(out) :: n_cached, ierr
-        integer, intent(out), optional :: n_in_cycle
-        character(len=MAX_PATH), optional, intent(out) :: filenames(MAX_NODES)
-        logical, optional, intent(out) :: is_test_arr(MAX_NODES)
-
         type(scan_unit_t), allocatable :: units(:)
         type(cache_t) :: c
         integer :: n_units
@@ -178,7 +161,7 @@ contains
                 affected_ids, n_affected)
         end if
 
-    end subroutine fo_changed_modules_impl
+    end subroutine fo_changed_modules
 
     subroutine collect_external_dep_hashes(units, n_units, dag, project_dir, &
             ext_names, ext_keys, n_ext)

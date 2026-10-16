@@ -4,13 +4,11 @@ module fo_run_queue
     private
     public :: run_queue_t
     public :: RUN_IDLE, RUN_RUNNING, RUN_RERUN_PENDING, RUN_FINISHED
-    public :: RUN_ACTIVE
 
     integer, parameter :: RUN_IDLE = 0
     integer, parameter :: RUN_RUNNING = 1
     integer, parameter :: RUN_RERUN_PENDING = 2
     integer, parameter :: RUN_FINISHED = 3
-    integer, parameter :: RUN_ACTIVE = RUN_RUNNING
 
     type :: run_queue_t
         integer :: state = RUN_IDLE

@@ -47,26 +47,10 @@ module fo_test_cases
         type(string_t), allocatable :: sources(:)
     end type case_listing_t
 
-    public :: case_list, case_split, case_matches, case_run_setup
+    public :: case_list, case_matches, case_run_setup
     public :: case_valid_name, case_filter_add
 
 contains
-
-    subroutine case_split(name, exe, case_name)
-        !! name = exe // '::' // case_name; case_name is empty without '::'.
-        character(len=*), intent(in) :: name
-        character(len=:), allocatable, intent(out) :: exe, case_name
-        integer :: p
-
-        p = index(name, CASE_SEP)
-        if (p == 0) then
-            exe = trim(name)
-            case_name = ''
-        else
-            exe = name(1:p - 1)
-            case_name = trim(name(p + len(CASE_SEP):))
-        end if
-    end subroutine case_split
 
     logical function case_valid_name(name) result(ok)
         character(len=*), intent(in) :: name

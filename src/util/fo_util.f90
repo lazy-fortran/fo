@@ -10,7 +10,6 @@ module fo_util
     public :: clean_root_build_artifacts, read_text_file_alloc
     public :: strip_path_prefix_in_str
     public :: strip_toml_comment
-    public :: jsonrpc_error, jsonrpc_null
     public :: json_bool, json_int
     public :: int_text
     public :: wall_time_seconds
@@ -291,26 +290,6 @@ contains
 
         text = buf(1:n)
     end subroutine strip_path_prefix_in_str
-
-    subroutine jsonrpc_error(id_str, code, msg, response)
-        character(len=*), intent(in) :: id_str, msg
-        integer, intent(in) :: code
-        character(len=:), allocatable, intent(out) :: response
-
-        character(len=16) :: code_str
-
-        write (code_str, '(i0)') code
-        response = '{"jsonrpc":"2.0","id":'//trim(id_str)//','// &
-            '"error":{"code":'//trim(code_str)//','// &
-            '"message":"'//trim(msg)//'"}}'
-    end subroutine jsonrpc_error
-
-    subroutine jsonrpc_null(id_str, response)
-        character(len=*), intent(in) :: id_str
-        character(len=:), allocatable, intent(out) :: response
-
-        response = '{"jsonrpc":"2.0","id":'//trim(id_str)//',"result":null}'
-    end subroutine jsonrpc_null
 
     function json_bool(value) result(text)
         logical, intent(in) :: value
