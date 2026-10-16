@@ -1,5 +1,6 @@
 module fo_mcp
     use, intrinsic :: iso_fortran_env, only: int64
+    use fo_progress, only: progress_mute
     use fo_util, only: make_tmpfile, delete_tmpfile, read_text_file_alloc
     use fo_json_object, only: json_object_member, json_value_raw, &
         json_text_has_control, json_skip_value
@@ -62,6 +63,7 @@ contains
         type(mcp_async_state_t) :: async_state
 
         call process_suppress_heartbeats(.true.)
+        call progress_mute()
         framing = MCP_FRAME_UNKNOWN
         do
             call async_poll(async_state)
@@ -687,7 +689,6 @@ contains
         use fx_string, only: string_t
         use fo_test_results, only: test_result_entry_t, parse_test_results, &
             format_test_results_json
-        use fo_progress, only: progress_suppress
         character(len=*), intent(in) :: line, id_str, dir, tmpfile
         character(len=:), allocatable, intent(out) :: response
 
@@ -772,14 +773,12 @@ contains
         if (.not. project_has_model(b)) then
             ! Frozen FO_CMAKE_NATIVE route: the CTest registry is
             ! authoritative.
-            call progress_suppress(.true.)
             if (n_names > 0) then
                 call backend_test_names(b, test_names(1:n_names), n_names, &
                     exitcode, .true., tmpfile)
             else
                 call backend_test(b, exitcode, log_file=tmpfile)
             end if
-            call progress_suppress(.false.)
         else
             ! Same selection as `fo test`: the project model decides.
             allocate (request%names(n_names), request%include_labels(0), &
@@ -811,13 +810,11 @@ contains
                 call make_tool_text_response(id_str, output_text, 1, response)
                 return
             end if
-            call progress_suppress(.true.)
             if (.not. only_changed .and. selection%status /= SELECT_EMPTY) &
                 call project_list_expand(b, '', request, model, selection, ierr, &
                     message, build=.true.)
             call test_cache_run(b, model, selection%cases, '', .false., tmpfile, &
                 exitcode, rerun, selection)
-            call progress_suppress(.false.)
         end if
 
         call parse_test_results(tmpfile, entries, n_entries, ierr)
@@ -828,13 +825,13 @@ contains
             exitcode = 1
         else if (full_json) then
             call format_test_results_json(entries, n_entries, exitcode, &
-                output_text, tmpfile)
+                output_text, tmpfile, log_dir=trim(dir))
         else if (n_entries > 0 .or. (mode_error == 0 .and. mode_count == 1 &
                 .and. json_mode == 'compact')) then
             ! The default is the compact report: an agent gets the verdict,
             ! the failures and a handle, not every passing case.
             call format_test_results_json(entries, n_entries, exitcode, &
-                output_text, tmpfile, compact=.true.)
+                output_text, tmpfile, compact=.true., log_dir=trim(dir))
         else
             call read_text_file_alloc(tmpfile, output_text, ierr)
             if (ierr /= 0) then
