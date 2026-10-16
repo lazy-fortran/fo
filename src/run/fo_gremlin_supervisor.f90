@@ -29,12 +29,19 @@ module fo_gremlin_supervisor
         model_selection_t, SELECT_OK, SELECT_EMPTY
     use fo_gremlin_log_text, only: gremlin_retain_build_log, gremlin_log_tail
     use fo_gremlin_retention, only: gremlin_retention_json
+    use fo_gremlin_status_json, only: gremlin_status_json, gremlin_status_enrich, &
+        gremlin_wait_decorate, gremlin_summary_json, gremlin_events_json, &
+        gremlin_failure_json, simple_response => gremlin_simple_response, &
+        error_response => gremlin_error_response
+    use fo_json_object, only: json_value_raw
+    use fx_json_build, only: json_builder_t, json_new, json_escape_string, &
+        array_open => json_array_start, array_close => json_array_end
     use fo_gremlin_execution_view, only: execution_view_t, execution_view_create, &
         execution_view_release
     use fo_driver, only: driver_pin_t, driver_pin_current, driver_pin_existing
     use fo_change_watch, only: change_watch_t, change_watch_init, &
         change_watch_poll, change_watch_close
-    use fo_gremlin_journal, only: journal_append, journal_read_page, &
+    use fo_gremlin_journal, only: journal_append, journal_read_page, journal_read_all, &
         journal_compact_tail, journal_record_t, JOURNAL_OK, JOURNAL_INVALID, &
         JOURNAL_MAX_RECORD_BYTES
     use fo_gremlin_coverage, only: coverage_epoch_t, coverage_open, &
@@ -76,7 +83,6 @@ module fo_gremlin_supervisor
     use fo_scan_types, only: MAX_PATH
     use fo_util, only: json_bool, json_int
     use fx_dag, only: MAX_NODES
-    use fx_json_build, only: json_escape_string
     use fo_fs, only: fs_make_dir, fs_sleep_ms, fs_remove_tree
     use fo_gremlin_session, only: gremlin_resolve_read_session, &
         gremlin_load_terminal_session, gremlin_get_session_journal_path, &
@@ -86,8 +92,6 @@ module fo_gremlin_supervisor
     private
 
     integer, parameter :: NAME_LEN = 1024, PATH_LEN = 4096
-    integer, parameter :: SUMMARY_DIAGNOSTIC_LIMIT = 1024
-    character(len=*), parameter :: SUMMARY_TRUNCATION = '...[truncated]'
     integer, parameter :: GREMLIN_HISTORY_LIMIT = 128
     integer, parameter :: GREMLIN_POLICY_RECEIPT_LIMIT = 512
     integer, parameter :: GREMLIN_MIN_RECEIPT_LIMIT = 16
@@ -119,13 +123,13 @@ module fo_gremlin_supervisor
         character(len=HASH_LEN) :: pass_digest = '', pass_generation = ''
     end type case_index_entry_t
 
-    !! Running-case summary (JSON) of the owner process, set by
-    !! set_running_summary and embedded in every published state.
+    !! Running cases of the owner process, set by set_running_summary and
+    !! embedded in every published state.
     integer, save :: running_summary_count = 0
     !! Parallel fan-out of this owner; > 1 makes the lane hold the whole host
     !! heavy-work capacity (see gremlin_heavy_work_weight).
     integer, save :: lane_admission_jobs = 1
-    character(len=2048), save :: running_summary_cases = ''
+    character(len=NAME_LEN), save :: running_summary_names(GREMLIN_MAX_LANE_JOBS) = ''
 
     interface
         integer(c_int) function c_publish_file(path, data, data_len) &
@@ -500,7 +504,7 @@ contains
                 return
             end if
         end if
-        enriched_status = status_with_coverage(trim(status_text), coverage_view, &
+        enriched_status = gremlin_status_enrich(trim(status_text), coverage_view, &
             readiness, have_coverage)
         if (trim(request%detail) == 'summary') then
             call compact_summary(enriched_status, session, 'status', &
@@ -714,138 +718,28 @@ contains
         call gremlin_readiness_compute(input, readiness)
     end subroutine compute_readiness
 
-    function status_with_coverage(status_text, view, readiness, have_coverage) &
-            result(enriched)
-        character(len=*), intent(in) :: status_text
-        type(gremlin_coverage_view_t), intent(in) :: view
-        type(gremlin_readiness_t), intent(in) :: readiness
-        logical, intent(in) :: have_coverage
-        character(len=:), allocatable :: enriched
-        character(len=:), allocatable :: coverage_json
-        character(len=16) :: phase, health, verification
-
-        phase = gremlin_phase_name(readiness%phase)
-        health = gremlin_health_name(readiness%health)
-        verification = gremlin_verification_name(readiness%verification_level)
-        enriched = status_text(:len_trim(status_text) - 1)// &
-            ',"phase":"'//trim(phase)//'","health":"'//trim(health)// &
-            '","dirty":'//trim(json_bool(readiness%dirty))// &
-            ',"local_gate_green":'//trim(json_bool(readiness%local_gate_green))// &
-            ',"verification_level":"'//trim(verification)// &
-            '","fully_verified":'//trim(json_bool(readiness%fully_verified))// &
-            ',"gate_token_version":1,"gate_token":"'// &
-            trim(readiness%gate_token)//'","requirement_digest":"'// &
-            trim(readiness%requirement_digest)//'","event_epoch":'// &
-            trim(json_int(readiness%event_epoch))// &
-            ',"gate_required":'//trim(json_int(readiness%gate_required))// &
-            ',"gate_passed":'//trim(json_int(readiness%gate_passed))// &
-            ',"ordinary_required":'//trim(json_int(readiness%ordinary_required))// &
-            ',"ordinary_passed":'//trim(json_int(readiness%ordinary_passed))// &
-            ',"ordinary_failures":'//trim(json_int(readiness%ordinary_failures))// &
-            ',"full_required":'//trim(json_int(readiness%full_required))// &
-            ',"full_passed":'//trim(json_int(readiness%full_passed))// &
-            ',"full_failures":'//trim(json_int(readiness%full_failures))
-        if (have_coverage) then
-            coverage_json = '{"ordinary":'// &
-                verification_counts(view%ordinary_eligible_count, &
-                view%ordinary_pass_count, view%ordinary_failure_count, &
-                view%ordinary_timeout_count, view%ordinary_infra_count, &
-                view%ordinary_flaky_count)//',"full":'// &
-                verification_counts(view%eligible_count, view%pass_count, &
-                readiness%full_failures, view%timeout_count, view%infra_count, &
-                view%flaky_count)//',"generation_id":"'//trim(view%generation_id)// &
-                '","inventory_digest":"'//trim(view%inventory_digest)// &
-                '","epoch":'//trim(json_int(view%epoch))// &
-                ',"seed":'//trim(json_int(view%seed))// &
-                ',"cursor":'//trim(json_int(view%cursor))// &
-                ',"eligible":'//trim(json_int(view%eligible_count))// &
-                ',"completed":'//trim(json_int(view%completed_count))// &
-                ',"pass":'//trim(json_int(view%pass_count))// &
-                ',"fail":'//trim(json_int(view%fail_count))// &
-                ',"timeout":'//trim(json_int(view%timeout_count))// &
-                ',"flaky":'//trim(json_int(view%flaky_count))// &
-                ',"infra":'//trim(json_int(view%infra_count))// &
-                ',"running":'//trim(json_int(view%running_count))// &
-                ',"cancelled":'//trim(json_int(view%cancelled_count))// &
-                ',"unknown":'//trim(json_int(view%unknown_count))// &
-                ',"remaining":'//trim(json_int(view%remaining_count))// &
-                ',"ordinary_required":'//trim(json_int(readiness%ordinary_required))// &
-                ',"ordinary_passed":'//trim(json_int(readiness%ordinary_passed))// &
-                ',"ordinary_verified":'//trim(json_bool( &
-                readiness%verification_level >= 2))// &
-                ',"full_required":'//trim(json_int(readiness%full_required))// &
-                ',"full_passed":'//trim(json_int(readiness%full_passed))// &
-                ',"fully_verified":'//trim(json_bool(readiness%fully_verified))// &
-                ',"ordinary_complete":'//trim(json_bool(view%ordinary_complete))// &
-                ',"full_coverage":'//trim(json_bool(view%full_coverage))// &
-                ',"green":'//trim(json_bool(view%green))//'}'
-            enriched = enriched//',"coverage":'//coverage_json
-        end if
-        enriched = enriched//'}'
-    end function status_with_coverage
-
-    function verification_counts(eligible, passed, failures, timeouts, infra, flaky) &
-            result(json)
-        integer, intent(in) :: eligible, passed, failures, timeouts, infra, flaky
-        character(len=:), allocatable :: json
-        integer :: remaining
-
-        remaining = max(0, eligible - passed - failures)
-        json = '{"eligible":'//trim(json_int(eligible))// &
-            ',"pass":'//trim(json_int(passed))// &
-            ',"fail":'//trim(json_int(max(0, failures - timeouts - infra - flaky)))// &
-            ',"timeout":'//trim(json_int(timeouts))// &
-            ',"infra_error":'//trim(json_int(infra))// &
-            ',"flaky":'//trim(json_int(flaky))// &
-            ',"unknown":'//trim(json_int(remaining))// &
-            ',"remaining":'//trim(json_int(remaining))//'}'
-    end function verification_counts
-
     subroutine compact_summary(status_text, session, action, response, &
             ierr, message)
+        !! The summary document; with failure evidence it names this session's
+        !! newest failure receipt of the reported generation.
         character(len=*), intent(in) :: status_text, action
         type(gremlin_session_t), intent(in) :: session
         character(len=:), allocatable, intent(out) :: response
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
 
+        type(journal_record_t), allocatable :: records(:)
         character(len=4096) :: value
-        character(len=PATH_LEN) :: journal_state_dir
+        character(len=PATH_LEN) :: journal_state_dir, log_file
         character(len=HASH_LEN) :: generation
+        character(len=NAME_LEN) :: field, case_id
         character(len=32) :: health, last_outcome
-        integer :: failure_count, ios
+        integer :: failure_count, ios, i
         logical :: failure_evidence
-        character(len=:), allocatable :: compact, latest
-        character(len=32), parameter :: strings(*) = [character(len=32) :: &
-            'session_id', 'lane_id', 'state', 'phase', 'health', 'current_test', &
-            'active_generation', 'candidate_generation', 'last_outcome', &
-            'diagnostic', 'verification_level', 'requirement_digest', 'wait_until']
-        character(len=32), parameter :: scalars(*) = [character(len=32) :: &
-            'input_changed', 'dirty', 'local_gate_green', 'fully_verified', &
-            'completed', 'selected', 'seed', 'last_exitcode', 'event_epoch', &
-            'gate_required', 'gate_passed', 'ordinary_required', 'ordinary_passed', &
-            'ordinary_failures', 'full_required', 'full_passed', 'full_failures', &
-            'wait_satisfied', 'wait_timed_out', 'wait_terminal', 'failure_observed']
-        integer :: i
+        character(len=:), allocatable :: latest
 
         ierr = 0
         message = ''
-        compact = '{"action":"'//trim(action)//'","detail":"summary"'
-        do i = 1, size(strings)
-            call gremlin_json_field(status_text, trim(strings(i)), value, .true.)
-            if (len_trim(value) == 0) cycle
-            if (trim(strings(i)) == 'diagnostic' .and. &
-                    len_trim(value) > SUMMARY_DIAGNOSTIC_LIMIT) &
-                value = value(:SUMMARY_DIAGNOSTIC_LIMIT - len(SUMMARY_TRUNCATION))// &
-                    SUMMARY_TRUNCATION
-            compact = compact//',"'//trim(strings(i))//'":"'// &
-                trim(json_escape_string(trim(value)))//'"'
-        end do
-        do i = 1, size(scalars)
-            call gremlin_json_field(status_text, trim(scalars(i)), value, .true.)
-            if (len_trim(value) == 0) cycle
-            compact = compact//',"'//trim(scalars(i))//'":'//trim(value)
-        end do
         generation = ''
         health = ''
         last_outcome = ''
@@ -868,73 +762,26 @@ contains
             call gremlin_session_state_dir(trim(session%project_key), &
                 trim(session%lane_id), journal_state_dir, ierr, message)
             if (ierr /= 0) return
-            call latest_generation_failure(trim(journal_state_dir), &
-                trim(session%session_id), trim(generation), latest, ierr, message)
-            if (ierr /= 0) return
+            if (len_trim(generation) == HASH_LEN) then
+                call journal_read_all(trim(journal_state_dir)// &
+                    '/campaign-journal.jsonl', records, ierr, message)
+                if (ierr /= JOURNAL_OK) return
+                do i = 1, size(records)
+                    call gremlin_json_field(records(i)%json, 'session_id', field)
+                    if (trim(field) /= trim(session%session_id)) cycle
+                    call gremlin_json_field(records(i)%json, 'generation', field)
+                    if (trim(field) /= trim(generation)) cycle
+                    call gremlin_json_field(records(i)%json, 'status', field)
+                    if (.not. status_is_failure(trim(field))) cycle
+                    call gremlin_json_field(records(i)%json, 'case_id', case_id)
+                    call gremlin_json_field(records(i)%json, 'log_path', log_file)
+                    latest = gremlin_failure_json(generation, case_id, field, log_file)
+                end do
+            end if
         end if
-        if (len(latest) > 0) compact = compact//',"latest_failure":'//latest
-        compact = compact//',"retrieval_hint":"Use detail=full for complete status or '
-        compact = compact//'action=events/failures with cursors for event pages."}'
-        response = compact
+        response = gremlin_summary_json(status_text, action, latest)
     end subroutine compact_summary
 
-    subroutine latest_generation_failure(state_dir, session_id, generation, result, &
-            ierr, message)
-        character(len=*), intent(in) :: state_dir, session_id, generation
-        character(len=:), allocatable, intent(out) :: result
-        integer, intent(out) :: ierr
-        character(len=*), intent(out) :: message
-
-        type(journal_record_t), allocatable :: records(:)
-        character(len=128) :: record_session_id, record_generation
-        character(len=NAME_LEN) :: status, case_id
-        character(len=PATH_LEN) :: log_path
-        integer(int64) :: cursor, next_cursor, page_bytes
-        integer :: i, journal_status, n_read, n_page
-
-        result = ''
-        ierr = JOURNAL_OK
-        message = ''
-        if (len_trim(generation) /= HASH_LEN) return
-        cursor = 0_int64
-        n_read = 0
-        do while (n_read < receipt_limit())
-            n_page = min(64, receipt_limit() - n_read)
-            page_bytes = int(n_page, int64) * int(JOURNAL_MAX_RECORD_BYTES, int64)
-            call journal_read_page(trim(state_dir)//'/campaign-journal.jsonl', &
-                cursor, n_page, page_bytes, records, next_cursor, journal_status, &
-                message)
-            if (journal_status /= JOURNAL_OK) then
-                ierr = journal_status
-                return
-            end if
-            do i = 1, size(records)
-                record_session_id = ''
-                record_generation = ''
-                status = ''
-                call gremlin_json_field(records(i)%json, 'session_id', &
-                    record_session_id)
-                call gremlin_json_field(records(i)%json, 'generation', &
-                    record_generation)
-                call gremlin_json_field(records(i)%json, 'status', status)
-                if (trim(record_session_id) /= trim(session_id)) cycle
-                if (trim(record_generation) /= trim(generation)) cycle
-                if (.not. status_is_failure(trim(status))) cycle
-                case_id = ''
-                log_path = ''
-                call gremlin_json_field(records(i)%json, 'case_id', case_id)
-                call gremlin_json_field(records(i)%json, 'log_path', log_path)
-                result = '{"generation":"'// &
-                    trim(json_escape_string(trim(generation)))// &
-                    '","case_id":"'//trim(json_escape_string(trim(case_id)))// &
-                    '","status":"'//trim(json_escape_string(trim(status)))// &
-                    '","log_path":"'//trim(json_escape_string(trim(log_path)))//'"}'
-            end do
-            n_read = n_read + size(records)
-            if (next_cursor <= cursor .or. size(records) < n_page) exit
-            cursor = next_cursor
-        end do
-    end subroutine latest_generation_failure
 
     subroutine handle_events(project_dir, request, response, exitcode)
         character(len=*), intent(in) :: project_dir
@@ -1062,15 +909,8 @@ contains
                 durable_failure_report, failure_exitcode)
             if (failure_exitcode /= 0) durable_failure_report = ''
         end if
-        decorated = status_json(:len(status_json) - 1)// &
-            ',"wait_until":"'//trim(json_escape_string(wait_name))//'",'// &
-            '"wait_satisfied":'//trim(json_bool(satisfied))//','// &
-            '"wait_timed_out":'//trim(json_bool(timed_out))//','// &
-            '"wait_terminal":'//trim(json_bool(terminal))//','// &
-            '"failure_observed":'//trim(json_bool(failed))
-        if (len(durable_failure_report) > 1) decorated = decorated// &
-            ',"durable_failure_report":'//durable_failure_report
-        decorated = decorated//'}'
+        decorated = gremlin_wait_decorate(status_json, wait_name, satisfied, &
+            timed_out, terminal, failed, durable_failure_report)
         if (trim(request%detail) == 'summary') then
             call gremlin_resolve_read_session(project_dir, request, session, &
                 status_text, owner_pid, is_live, ierr, message)
@@ -3601,16 +3441,11 @@ contains
         type(child_t), intent(in) :: children(:)
         integer :: i
 
-        running_summary_count = running_count(children)
-        running_summary_cases = ''
+        running_summary_count = 0
         do i = 1, size(children)
             if (children(i)%pid <= 0) cycle
-            if (len_trim(running_summary_cases) + len_trim(children(i)%case_name) + 6 &
-                    > len(running_summary_cases)) exit
-            if (len_trim(running_summary_cases) > 0) running_summary_cases = &
-                trim(running_summary_cases)//','
-            running_summary_cases = trim(running_summary_cases)//'"'// &
-                trim(json_escape_string(trim(children(i)%case_name)))//'"'
+            running_summary_count = running_summary_count + 1
+            running_summary_names(running_summary_count) = children(i)%case_name
         end do
     end subroutine set_running_summary
 
@@ -4227,52 +4062,18 @@ contains
         character(len=PATH_LEN) :: diagnostic_text
         character(len=PATH_LEN) :: coverage_path
         integer :: status
-        character(len=PATH_LEN) :: active_project, candidate_project
         character(len=PATH_LEN) :: retention_root
         logical :: have_coverage
 
-        active_project = ''
-        candidate_project = ''
         diagnostic_text = ''
         if (present(diagnostic)) diagnostic_text = diagnostic
-        if (len_trim(active%identity) > 0) active_project = trim(active%project_root)
-        if (len_trim(candidate%identity) > 0) candidate_project = trim(candidate%project_root)
         retention_root = trim(active%root)
         if (len_trim(retention_root) == 0) retention_root = trim(candidate%root)
-        status_text ='{"protocol":1,"session_id":"'// &
-            trim(json_escape_string(session%session_id))//'","lane_id":"'// &
-            trim(json_escape_string(request%lane_id))//'","policy_key":"'// &
-            request_policy_key(request)//'","state":"'//trim(state)// &
-            '","driver_path":"'// &
-            trim(json_escape_string(trim(session%driver_path)))// &
-            '","driver_digest":"'//trim(session%driver_digest)// &
-            '","driver_size":'//trim(int64_text(session%driver_size))// &
-            ',"active_driver_digest":"'//trim(active%driver_digest)// &
-            '","active_driver_size":'//trim(int64_text(active%driver_size))// &
-            ',"candidate_driver_digest":"'//trim(candidate%driver_digest)// &
-            '","candidate_driver_size":'// &
-            trim(int64_text(candidate%driver_size))// &
-            ',"active_generation":"'//trim(active%identity)// &
-            '","active_model":"'//trim(active_model_identity(active))// &
-            '","active_model_generation":"'//trim(active%model_generation)// &
-            '","candidate_generation":"'//trim(candidate%identity)// &
-            '","active_project":"'//trim(json_escape_string(active_project))// &
-            '","candidate_project":"'//trim(json_escape_string(candidate_project))// &
-            '","current_test":"'//trim(json_escape_string(current_case))// &
-            '","running":'//trim(json_int(running_summary_count))// &
-            ',"running_cases":['//trim(running_summary_cases)// &
-            '],"completed":'//trim(json_int(completed))// &
-            ',"selected":'//trim(json_int(selected_count))// &
-            ',"seed":'//trim(json_int(seed))//',"last_outcome":"'// &
-            trim(last_outcome)//'","last_exitcode":'// &
-            trim(json_int(last_exitcode))//',"gate_required":'// &
-            trim(json_int(request%gate_required_count))// &
-            ',"requirement_digest":"'//request%requirement_digest// &
-            '","event_epoch":'//trim(json_int(request%event_epoch))// &
-            ',"input_changed":'//trim(json_bool(request%input_changed))// &
-            ',"retention":'//gremlin_retention_json(retention_root, &
-            trim(session%state_dir)//'/views')// &
-            ',"diagnostic":"'//trim(json_escape_string(trim(diagnostic_text)))//'"}'
+        status_text = gremlin_status_json(session, request, request_policy_key(request), &
+            state, active, candidate, active_model_identity(active), current_case, &
+            running_summary_names(:running_summary_count), completed, selected_count, &
+            seed, last_outcome, last_exitcode, gremlin_retention_json(retention_root, &
+            trim(session%state_dir)//'/views'), diagnostic_text)
         ! Record the lifecycle transition before publishing the state, so any
         ! reader that observes a state also finds its lifecycle event.
         local_message = ''
@@ -4796,19 +4597,15 @@ contains
 
         type(journal_record_t), allocatable :: records(:)
         type(gremlin_lifecycle_event_t), allocatable :: lifecycle_events(:)
-        integer(int64) :: next_cursor, file_size
-        integer(int64) :: next_lifecycle_cursor
-        integer :: journal_status, i, emitted, n_lifecycle, lifecycle_status
-        logical :: exists, has_more
-        logical :: lifecycle_has_more
+        type(json_builder_t) :: events, lifecycle
+        integer(int64) :: next_cursor, file_size, next_lifecycle_cursor
+        integer :: i, n_lifecycle
+        logical :: exists, has_more, lifecycle_has_more
         character(len=16) :: row_status
-        character(len=PATH_LEN) :: lifecycle_path, lifecycle_message
-        character(len=:), allocatable :: base
+        character(len=PATH_LEN) :: lifecycle_path
 
         call journal_read_page(session%state_dir//'/journal.jsonl', request%cursor, &
-            request%max_records, request%max_bytes, records, next_cursor, &
-            journal_status, message)
-        ierr = journal_status
+            request%max_records, request%max_bytes, records, next_cursor, ierr, message)
         if (ierr /= JOURNAL_OK) return
         file_size = 0_int64
         inquire (file=session%state_dir//'/journal.jsonl', exist=exists, &
@@ -4820,50 +4617,31 @@ contains
         end if
         has_more = .false.
         if (exists) has_more = next_cursor < file_size
-        base = trim(status_text)
-        if (len(base) < 2) then
-            base = '{"protocol":1,"session_id":"'// &
-                trim(json_escape_string(session%session_id))//'","lane_id":"'// &
-                trim(json_escape_string(request%lane_id))//'","state":"unknown",'// &
-                '"active_generation":"","candidate_generation":"","completed":0,'// &
-                '"selected":0,"seed":0,"last_outcome":"NONE","last_exitcode":0}'
-        end if
-        response = '{"action":"'//trim(action)//'",'//base(2:len(base) - 1)// &
-            ',"events":['
-        emitted = 0
+        events = json_new()
+        call array_open(events)
         do i = 1, size(records)
             if (failures_only) then
                 call gremlin_json_field(records(i)%json, 'status', row_status)
                 if (.not. status_is_failure(trim(row_status))) cycle
             end if
-            if (emitted > 0) response = response//','
-            response = response//records(i)%json
-            emitted = emitted + 1
+            call json_value_raw(events, records(i)%json)
         end do
-        response = response//'],"next_cursor":'//trim(int64_text(next_cursor))// &
-            ',"has_more":'//trim(json_bool(has_more))
-        call lifecycle_path_for_session(session, request, lifecycle_path, &
-            lifecycle_status, lifecycle_message)
-        if (lifecycle_status /= 0) then
-            ierr = lifecycle_status
-            message = trim(lifecycle_message)
-            return
-        end if
+        call array_close(events)
+        call lifecycle_path_for_session(session, request, lifecycle_path, ierr, message)
+        if (ierr /= 0) return
         call gremlin_lifecycle_read_page(trim(lifecycle_path), request%lifecycle_cursor, &
             request%max_records, request%max_bytes, lifecycle_events, n_lifecycle, &
-            next_lifecycle_cursor, lifecycle_has_more, lifecycle_status, message)
-        if (lifecycle_status /= LIFECYCLE_OK) then
-            ierr = lifecycle_status
-            return
-        end if
-        response = response//',"lifecycle_events":['
+            next_lifecycle_cursor, lifecycle_has_more, ierr, message)
+        if (ierr /= LIFECYCLE_OK) return
+        lifecycle = json_new()
+        call array_open(lifecycle)
         do i = 1, n_lifecycle
-            if (i > 1) response = response//','
-            response = response//lifecycle_events(i)%json
+            call json_value_raw(lifecycle, lifecycle_events(i)%json)
         end do
-        response = response//'],"next_lifecycle_cursor":'// &
-            trim(int64_text(next_lifecycle_cursor))// &
-            ',"lifecycle_has_more":'//trim(json_bool(lifecycle_has_more))//'}'
+        call array_close(lifecycle)
+        response = gremlin_events_json(action, status_text, session%session_id, &
+            request%lane_id, events, next_cursor, has_more, lifecycle, &
+            next_lifecycle_cursor, lifecycle_has_more)
         ierr = 0
         message = ''
     end subroutine response_with_events
@@ -5033,24 +4811,6 @@ contains
         parts(1) = text
         digest = cache_digest(parts, 1)
     end function text_digest
-
-    subroutine simple_response(action, lane_id, session_id, state, response)
-        character(len=*), intent(in) :: action, lane_id, session_id, state
-        character(len=:), allocatable, intent(out) :: response
-
-        response = '{"action":"'//trim(json_escape_string(action))// &
-            '","lane_id":"'//trim(json_escape_string(lane_id))// &
-            '","session_id":"'//trim(json_escape_string(session_id))// &
-            '","state":"'//trim(json_escape_string(state))//'"}'
-    end subroutine simple_response
-
-    subroutine error_response(action, message, response)
-        character(len=*), intent(in) :: action, message
-        character(len=:), allocatable, intent(out) :: response
-
-        response = '{"action":"'//trim(json_escape_string(action))// &
-            '","error":"'//trim(json_escape_string(message))//'"}'
-    end subroutine error_response
 
     subroutine replace_action(response, action)
         character(len=:), allocatable, intent(inout) :: response

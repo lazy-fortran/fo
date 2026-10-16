@@ -3,7 +3,8 @@ module fo_gremlin_journal
     use, intrinsic :: iso_fortran_env, only: int64
     implicit none
     private
-    public :: journal_append, journal_read_page, journal_compact_tail, journal_record_t
+    public :: journal_append, journal_read_page, journal_read_all, journal_compact_tail
+    public :: journal_record_t
     public :: JOURNAL_OK, JOURNAL_INVALID, JOURNAL_IO_ERROR
     public :: JOURNAL_CONFLICT, JOURNAL_TOO_LARGE
     public :: JOURNAL_MAX_RECORD_BYTES
@@ -265,5 +266,40 @@ contains
             call move_alloc(exact, records)
         end if
     end subroutine journal_read_page
+
+    subroutine journal_read_all(path, records, status, message)
+        !! Every record of a journal in order; an absent journal has none.
+        character(len=*), intent(in) :: path
+        type(journal_record_t), allocatable, intent(out) :: records(:)
+        integer, intent(out) :: status
+        character(len=*), intent(out) :: message
+        type(journal_record_t), allocatable :: page(:), grown(:)
+        integer(int64) :: cursor, next_cursor
+        integer :: i, n
+
+        allocate (records(0))
+        cursor = 0_int64
+        do
+            call journal_read_page(path, cursor, 64, &
+                int(JOURNAL_MAX_RECORD_BYTES, int64)*64_int64, page, next_cursor, &
+                status, message)
+            if (status /= JOURNAL_OK .or. size(page) == 0) return
+            if (next_cursor <= cursor) then
+                status = JOURNAL_INVALID
+                message = 'Gremlin journal cursor did not advance'
+                return
+            end if
+            n = size(records)
+            allocate (grown(n + size(page)))
+            do i = 1, n
+                call move_alloc(records(i)%json, grown(i)%json)
+            end do
+            do i = 1, size(page)
+                call move_alloc(page(i)%json, grown(n + i)%json)
+            end do
+            call move_alloc(grown, records)
+            cursor = next_cursor
+        end do
+    end subroutine journal_read_all
 
 end module fo_gremlin_journal
