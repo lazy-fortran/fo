@@ -3357,7 +3357,12 @@ static int monitor_run(int argc, char **argv) {
     for (;;) {
         pid_t waited;
         if (monitor_stop) break;
-        waited = wait4(target, &status, WNOHANG, &usage);
+        /* Reap every orphan adopted by this subreaper while it waits, so
+           exited descendants never linger as zombies that still answer
+           kill(pid, 0). The target's status is kept when it is reaped. */
+        waited = wait4(-1, &status, WNOHANG, &usage);
+        while (waited > 0 && waited != target)
+            waited = wait4(-1, &status, WNOHANG, &usage);
         if (waited == target) {
             target_done = 1;
             cpu_ms = (long long)usage.ru_utime.tv_sec * 1000LL +
