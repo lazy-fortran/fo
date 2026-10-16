@@ -88,7 +88,9 @@ contains
         requested = 0_c_int64_t
         call gremlin_freshness_update(path, 1, requested, ierr)
         if (ierr /= 0) return
-        do attempt = 1, 40
+        ! The owner answers from its poll loop; on a loaded host that can take
+        ! well over 200 ms, and a missed answer would report a fresh lane as dirty.
+        do attempt = 1, 400
             acknowledged = 0_c_int64_t
             call gremlin_freshness_update(path, 3, acknowledged, ierr)
             if (ierr == 0 .and. acknowledged >= requested) then

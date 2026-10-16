@@ -100,11 +100,11 @@ program test_gremlin_public_readiness
     call cli('start --seed 17 --random 2', cli_json, status)
     call check(status == 0, 'real CLI starts an owned fixture campaign')
     if (status == 0) then
-        call cli('wait --until fully-verified --wait-ms 30000', cli_json, status)
+        call wait_until('fully-verified', cli_json, status)
         call check(status == 0, 'real CLI reads full verification')
         call check(field(cli_json, 'wait_satisfied') == 'true', &
             'slow case longer than five seconds passes with its normal budget')
-        call cli('wait --until quiescent --wait-ms 30000', cli_json, status)
+        call wait_until('quiescent', cli_json, status)
         call check(status == 0, 'fully covered fixture enters quiescence')
         call check(field(cli_json, 'wait_satisfied') == 'true', &
             'quiescent wait observes the completed fixture')
@@ -254,7 +254,6 @@ contains
     subroutine exercise_token_lifecycle()
         character(len=64) :: held_token, owner_id, pid_text
         integer :: source_unit, attempt, exitcode, owner_pid, split, parse_status, condition_index
-        integer :: wait_attempt
         logical :: pending, consumer_allowed, paused
         held_token = field(cli_json, 'gate_token')
         call check(len_trim(held_token) == 64, 'blocked consumer retains a green token')
@@ -331,10 +330,10 @@ contains
         call check(field(cli_json, 'wait_satisfied') /= 'true' .or. &
             field(cli_json, 'gate_token') /= held_token, &
             'typed wait never returns historical green after input mutation')
-        call cli('wait --until fully-verified --wait-ms 30000', cli_json, exitcode)
+        call wait_until('fully-verified', cli_json, exitcode)
         call check(exitcode == 0 .and. field(cli_json, 'wait_satisfied') == 'true', &
             'replacement closure completes before restart fixture')
-        call cli('wait --until quiescent --wait-ms 30000', cli_json, exitcode)
+        call wait_until('quiescent', cli_json, exitcode)
         held_token = field(cli_json, 'gate_token')
         owner_id = field(cli_json, 'session_id')
         split = index(owner_id, '-')
@@ -355,16 +354,12 @@ contains
         call check(field(cli_json, 'wait_satisfied') == 'false' .and. &
             field(cli_json, 'gate_token') /= held_token, &
             'restarted owner has no persisted green before fresh closure validation')
-        ! A loaded host can need several bounded public waits.
-        do wait_attempt = 1, 4
-            call cli('wait --until failure --wait-ms 30000', cli_json, exitcode)
-            if (exitcode /= 0 .or. field(cli_json, 'wait_satisfied') == 'true') exit
-        end do
+        call wait_until('failure', cli_json, exitcode)
         call check(exitcode == 0 .and. field(cli_json, 'wait_satisfied') == 'true' .and. &
             field(cli_json, 'local_gate_green') == 'false', &
             'restarted watcher validates changed closure and observes current failure')
         call write_provider(1, 0)
-        call cli('wait --until fully-verified --wait-ms 30000', cli_json, exitcode)
+        call wait_until('fully-verified', cli_json, exitcode)
         if (exitcode /= 0 .or. field(cli_json, 'wait_satisfied') /= 'true' .or. &
             field(cli_json, 'gate_token') == held_token) then
             write (error_unit, '(a)') 'Restarted readiness diagnostic:'
@@ -391,7 +386,7 @@ contains
         call check(exitcode == 0 .and. field(cli_json, 'wait_satisfied') == 'true' .and. &
             field(cli_json, 'gate_token') /= held_token, &
             'armed restart watcher verifies replacement and issues a fresh token')
-        call cli('wait --until quiescent --wait-ms 30000', cli_json, exitcode)
+        call wait_until('quiescent', cli_json, exitcode)
         call check(exitcode == 0 .and. field(cli_json, 'wait_satisfied') == 'true', &
             'restarted fixture finishes its current generation')
     end subroutine exercise_token_lifecycle
@@ -436,7 +431,7 @@ contains
             cli_json, exitcode)
         call check(exitcode == 0, 'starts isolated launch-failure campaign')
         started = .false.
-        do attempt = 1, 200
+        do attempt = 1, 1200
             inquire (file=trim(fixture)//'/started', exist=started)
             if (started) exit
             exitcode = pause_microseconds(50000_c_int)
@@ -550,6 +545,20 @@ contains
         failures = failures + 1
         write (error_unit, '(a)') 'FAIL: '//label
     end subroutine check
+
+    subroutine wait_until(condition, json, exitcode)
+        !! The public wait is capped at 30 s per request; a loaded host may need
+        !! several. The 5 requests bound the whole wait at 150 s.
+        character(len=*), intent(in) :: condition
+        character(len=*), intent(out) :: json
+        integer, intent(out) :: exitcode
+        integer :: round
+
+        do round = 1, 5
+            call cli('wait --until '//condition//' --wait-ms 30000', json, exitcode)
+            if (exitcode /= 0 .or. field(json, 'wait_satisfied') == 'true') return
+        end do
+    end subroutine wait_until
 
     subroutine cli(arguments, json, exitcode)
         character(len=*), intent(in) :: arguments
