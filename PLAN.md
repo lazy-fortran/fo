@@ -1,6 +1,6 @@
 # Fo delivery goals
 
-Updated 2026-10-16 at main `21e4822` (audit of 2026-10-15 at `342da71`).
+Updated 2026-10-16 at main `20c7374` (audit of 2026-10-15 at `342da71`).
 Issues define observable success and this plan orders delivery. Apply
 [goals and architectural freedom](doc/GOAL_DRIVEN_DEVELOPMENT.md), choose the
 smallest complete change, and preserve supported behaviour and independent
@@ -119,6 +119,36 @@ packages are on main:
   - The pFUnit profile for GORILLA.
   - Windows qualification.
   - Further #205 reduction.
+
+### Since `21e4822` (2026-10-16, end of session)
+
+- **Gremlin lifecycle (`ee2412e`):**
+  - Task-owned lanes (`--owner task`, MCP `lifetime:"task"`; #142).
+  - Lanes stop when their state directory disappears, and fixtures stop their lanes even after failures.
+  - Admission garbage collection.
+  - Verdict-first status/wait with failing-case excerpts and `since=` deltas (#218 closed).
+- **Process liveness (`20c7374`):** a zombie no longer counts as alive, and the Linux capture monitor reaps every adopted orphan (`test_process_monitor_reaps`).
+- **Test isolation (`947a249`):** every test process gets a private Gremlin admission domain, so other sessions' long-running lanes can no longer starve fixtures.
+- **AFS:** Fx `eda9d6e` publishes store objects by same-directory copy when cross-directory links fail, and fo reports the store status and cache root on failure (`c54bc9c`). faepkub4 works with its default AFS cache.
+- **Evidence at `20c7374`:**
+  - Darwin full default suite 179/179 (369 s wall).
+  - Linux full default suite 178 pass, 1 flaky (`test_native_contained_capture`).
+- **Deployed:**
+  - faepmac1 `/opt/homebrew/bin/fo` at `20c7374`.
+  - mailuefterl `~/.local/bin/fo` at `20c7374`.
+  - faepkub4 `~/.local/bin/fo` at `ee2412e` or later, built natively there.
+- **Still open:**
+  - The Linux flake in `test_native_contained_capture`.
+  - #205 net code reduction (73k lines).
+  - The GORILLA pFUnit profile and the other ITpPlasma CMake profiles (#198).
+  - Compiler-result reuse (#199).
+  - veggies, pFUnit and Fortuno case adapters.
+  - Windows qualification (#139, #142).
+  - Storage budgets (#168).
+  - One-shot run isolation within one checkout (#170, #166).
+  - Manifest forms (#201).
+  - Optional audits (#145, #190).
+  - Test-code reduction (#184).
 
 ## Stage 1: fix every known bug
 
@@ -243,7 +273,7 @@ Coverage-based selection (testmon style) remains an opt-in audit experiment, nev
 | Optional audits (never gates) | #145 (also the real-Fluff deep-lint run), #190 |
 
 Closed by the audit: #161, #211 and #59 (the real-Fluff run moved to #145).
-Closed by delivery since: #214, #150, #155, #216 and #129.
+Closed by delivery since: #214, #150, #155, #216, #129, #163 and #218.
 In progress: #217 case discovery (M), #138/#189 one-shot PASS cache, filters,
 JUnit and partitions (N), #163/#184 shell-free tests (P).
 Every open issue has a 2026-10-15 audit comment stating what is delivered, what
