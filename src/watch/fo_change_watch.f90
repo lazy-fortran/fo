@@ -98,6 +98,8 @@ module fo_change_watch
         logical, allocatable :: active(:)
         integer :: n_roots = 0
         character(len=PATH_LEN) :: excluded_root = ''
+        !! Root set of the live native stream; unset until one is registered.
+        character(len=:), allocatable :: native_root_set
     end type change_watch_t
 
     public :: change_watch_init, change_watch_add_root, change_watch_add_context
@@ -410,8 +412,24 @@ contains
         integer, intent(out) :: ierr
         character(len=*), intent(out), optional :: message
         integer :: i, first_active
+        character(len=:), allocatable :: root_set
 
         if (present(message)) message = ''
+        ! Re-registering replaces the native stream, and a replacement stream
+        ! starts at "now": changes still queued in the old stream would be
+        ! dropped. Every capture re-declares its roots, so an unchanged set must
+        ! keep the live stream or an edit made during a capture is never seen.
+        root_set = trim(watch%excluded_root)//c_null_char
+        do i = 1, watch%n_roots
+            if (watch%active(i)) root_set = root_set//trim(watch%roots(i))//c_null_char
+        end do
+        if (allocated(watch%native_root_set)) then
+            if (watch%native_root_set == root_set) then
+                ierr = 0
+                return
+            end if
+            deallocate(watch%native_root_set)
+        end if
         call native_clear(watch%native)
         ierr = native_exclude(watch%native, trim(watch%excluded_root)//c_null_char)
         if (ierr /= 0) return
@@ -430,6 +448,7 @@ contains
             end if
         end do
         ierr = native_reconcile(watch%native)
+        if (ierr == 0) watch%native_root_set = root_set
         if (ierr /= 0 .and. present(message)) then
             message = native_error_detail(watch%native)
             if (len_trim(message) == 0 .and. first_active > 0) &
@@ -502,6 +521,7 @@ contains
         if (allocated(watch%active)) deallocate(watch%active)
         watch%n_roots = 0
         watch%excluded_root = ''
+        if (allocated(watch%native_root_set)) deallocate(watch%native_root_set)
     end subroutine change_watch_close
 
     function provider_error(operation, root, error) result(message)
