@@ -15,7 +15,7 @@ module fo_fake_tool
     !! by blanks, double quotes group a word, a literal backslash-n is a newline,
     !! backslash-quote is a quote and backslash-dollar a dollar sign that is kept
     !! for the next stage (see install). Words expand $NAME, ${NAME:-default},
-    !! $ARGS (all arguments, space-joined), $ARG1..$ARG9, $OUT (the word after
+    !! $ARGS (all arguments, space-joined), $ARG1..$ARG9, $LAST, $OUT (the word after
     !! -o), $PID, $PGID, $PPID, $? (status of the last run) and variables made with set;
     !! a lone $@ is every argument.
     !!
@@ -642,6 +642,10 @@ contains
             return
         case ('PID')
             value = integer_text(process_getpid())
+            return
+        case ('LAST')
+            value = ''
+            if (size(state%args) > 0) value = state%args(size(state%args))%text
             return
         case ('PGID')
             value = integer_text(int(c_getpgrp()))

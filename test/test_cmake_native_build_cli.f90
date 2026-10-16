@@ -26,12 +26,15 @@ program test_cmake_native_build_cli
     use fo_test_json, only: json_value_t, json_parse, json_member, json_element
     use fo_test_json, only: json_size, json_string_value
     use fo_test_twin, only: twin_write, twin_case_count, twin_case_name
+    use fo_fs, only: fs_find_executable
+    use fo_fake_tool, only: fake_tool_dispatch, install_fake_tool
     implicit none
 
     character(:), allocatable :: driver, scratch, cache, fortran, shim_dir
     character(:), allocatable :: cmake_log, compile_log
     character(len=1), parameter :: nl = achar(10)
 
+    call fake_tool_dispatch()
     call resolve_driver(driver)
     call make_scratch('fo-cmake-native-build', scratch)
     cache = join_path(scratch, 'fo-cache')
@@ -58,103 +61,25 @@ contains
     function find_tool(name) result(path)
         character(len=*), intent(in) :: name
         character(:), allocatable :: path
-        type(string_list_t) :: command
-        type(process_result_t) :: observed
+        character(len=4096) :: found
+        logical :: located
 
-        call list_add(command, 'sh')
-        call list_add(command, '-c')
-        call list_add(command, 'command -v '//name)
-        call run_process(command, scratch, observed)
         path = ''
-        if (observed%exit_code /= 0) return
-        path = trim(observed%stdout)
-        if (index(path, nl) > 0) path = path(:index(path, nl) - 1)
+        call fs_find_executable(name, found, located)
+        if (located) path = trim(found)
     end function find_tool
 
     subroutine build_shims()
-        !! One compiled Fortran program, installed as `cmake` (refuses and
-        !! records `--build`, passes everything else to the real cmake) and as
-        !! `gfortran-count` (records each compile, then runs the real gfortran).
-        type(string_list_t) :: command
-        type(process_result_t) :: observed
-        character(:), allocatable :: source
-
-        source = join_path(scratch, 'shim.f90')
-        call write_lines(source, [character(len=100) :: &
-            'program shim', &
-            'implicit none', &
-            'character(len=4096) :: arg, program_name, real_tool, log_name', &
-            'character(len=:), allocatable :: command, last, joined', &
-            'integer :: i, status, unit, slash', &
-            'logical :: compiling, is_cmake', &
-            'call get_command_argument(0, program_name)', &
-            'slash = index(trim(program_name), "/", back=.true.)', &
-            'is_cmake = trim(program_name(slash + 1:)) == "cmake"', &
-            'if (is_cmake) then', &
-            '  call get_environment_variable("FO_TEST_REAL_CMAKE", real_tool)', &
-            '  call get_environment_variable("FO_TEST_CMAKE_LOG", log_name)', &
-            'else', &
-            '  call get_environment_variable("FO_TEST_REAL_FC", real_tool)', &
-            '  call get_environment_variable("FO_TEST_FC_LOG", log_name)', &
-            'end if', &
-            'command = "''"//trim(real_tool)//"''"', &
-            'joined = ""', &
-            'compiling = .false.', &
-            'last = ""', &
-            'do i = 1, command_argument_count()', &
-            '  call get_command_argument(i, arg)', &
-            '  if (trim(arg) == "-c") compiling = .true.', &
-            '  last = trim(arg)', &
-            '  joined = joined//" "//trim(arg)', &
-            '  command = command//" ''"//quoted(trim(arg))//"''"', &
-            'end do', &
-            'if (is_cmake .and. command_argument_count() > 0) then', &
-            '  call get_command_argument(1, arg)', &
-            '  if (trim(arg) == "--build") then', &
-            '    open (newunit=unit, file=trim(log_name), position="append", &', &
-            '        status="unknown")', &
-            '    write (unit, "(a)") trim(joined)', &
-            '    close (unit)', &
-            '    call get_environment_variable("FO_TEST_CMAKE_PASS", arg)', &
-            '    if (len_trim(arg) == 0) call exit(97)', &
-            '  end if', &
-            'else if (.not. is_cmake .and. compiling .and. len_trim(log_name) > 0) then', &
-            '  open (newunit=unit, file=trim(log_name), position="append", &', &
-            '      status="unknown")', &
-            '  write (unit, "(a)") "COMPILE "//last', &
-            '  close (unit)', &
-            'end if', &
-            'call execute_command_line(command, exitstat=status)', &
-            'call exit(status)', &
-            'contains', &
-            'function quoted(text) result(r)', &
-            '  character(len=*), intent(in) :: text', &
-            '  character(len=:), allocatable :: r', &
-            '  integer :: k', &
-            '  r = ""', &
-            '  do k = 1, len(text)', &
-            '    if (text(k:k) == "''") then', &
-            '      r = r//"''"//achar(92)//"''''"', &
-            '    else', &
-            '      r = r//text(k:k)', &
-            '    end if', &
-            '  end do', &
-            'end function quoted', &
-            'end program shim'])
-        call list_add(command, fortran)
-        call list_add(command, source)
-        call list_add(command, '-o')
-        call list_add(command, join_path(shim_dir, 'cmake'))
-        call write_text(join_path(shim_dir, '.keep'), '')
-        call run_process(command, scratch, observed)
-        call assert_process_ok(observed, 'compile the cmake shim')
-        command = string_list_t()
-        call list_add(command, fortran)
-        call list_add(command, source)
-        call list_add(command, '-o')
-        call list_add(command, join_path(shim_dir, 'gfortran-count'))
-        call run_process(command, scratch, observed)
-        call assert_process_ok(observed, 'compile the compiler shim')
+        !! Fake tools: `cmake` records and refuses `--build` (passing everything
+        !! else to the real cmake) and `gfortran-count` records each compile, then
+        !! runs the real gfortran.
+        call install_fake_tool(join_path(shim_dir, 'cmake'), &
+            'if $ARG1 = --build append $FO_TEST_CMAKE_LOG " $ARGS\n"' // nl // &
+            'if $ARG1 = --build if ${FO_TEST_CMAKE_PASS:-} = "" exit 97' // nl // &
+            'exec $FO_TEST_REAL_CMAKE $@')
+        call install_fake_tool(join_path(shim_dir, 'gfortran-count'), &
+            'if " $ARGS " ~ " -c " if ${FO_TEST_FC_LOG:-} != "" append $FO_TEST_FC_LOG ' // &
+            '"COMPILE $LAST\n"' // nl // 'exec $FO_TEST_REAL_FC $@')
     end subroutine build_shims
 
     function fo_environment(delegate, with_shims) result(environment)
