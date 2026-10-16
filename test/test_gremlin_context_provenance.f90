@@ -318,6 +318,11 @@ contains
         call generation_manifest_load(store_root, manifest_id, value, &
             input_inventory, ierr, manifest_message)
         call assert_true(ierr == 0, 'loads generation manifest: '//trim(manifest_message))
+        ! A failed load leaves the text unallocated; later comparisons must
+        ! record a failure rather than dereference it.
+        if (ierr /= 0) value = generation_manifest_metadata_t(execution_identity='', &
+            toolchain='', flags='', environment='', driver_digest='', &
+            base_commit='', patch_digest='')
         if (ierr == 0) then
             call assert_equal_string(value%execution_identity, generation_id, &
                 'manifest identity matches the public generation identifier')
