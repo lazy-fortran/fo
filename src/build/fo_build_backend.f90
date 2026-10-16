@@ -389,7 +389,7 @@ contains
     end subroutine backend_test
 
     subroutine backend_test_names(self, names, n_names, exitcode, include_slow, &
-            log_file, flags, use_cache, no_build)
+            log_file, flags, use_cache, no_build, build_only)
         !! Exact named fpm tests (the model's selection, run by
         !! project_run_cases) and the registered cases of the frozen
         !! FO_CMAKE_NATIVE route, which has no project model. Slow handling
@@ -403,6 +403,8 @@ contains
         character(len=*), intent(in), optional :: flags
         logical, intent(in), optional :: use_cache
         logical, intent(in), optional :: no_build
+        !! Build what the named tests need and return, without running.
+        logical, intent(in), optional :: build_only
 
         integer :: lock_ierr
         logical :: slow, skip_build
@@ -441,6 +443,9 @@ contains
             end select
             call release_project_lock(lock_dir)
             if (exitcode /= 0) return
+        end if
+        if (present(build_only)) then
+            if (build_only) return
         end if
 
         select case (self%kind)

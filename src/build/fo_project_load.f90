@@ -895,7 +895,7 @@ contains
         if (present(build)) then
             if (build) then
                 call make_tmpfile('fo-expand-build', log_file)
-                call project_build_cases(b, model, selection%cases, flags, &
+                call build_selected(b, model, selection%cases, flags, &
                     trim(log_file), code)
                 call delete_tmpfile(trim(log_file))
                 if (code /= 0) return
@@ -930,6 +930,33 @@ contains
         call expand_listed(b, flags, model, all, n_expanded, ierr, message, &
             from_root, to_root)
     end subroutine project_expand_cases
+
+    subroutine build_selected(b, model, cases, flags, log_file, exitcode)
+        !! The build the run itself would do for these cases and no more: the
+        !! named fpm tests (their closures only), the plan targets on CMake.
+        type(backend_t), intent(inout) :: b
+        type(project_model_t), intent(in) :: model
+        integer, intent(in) :: cases(:)
+        character(len=*), intent(in) :: flags, log_file
+        integer, intent(out) :: exitcode
+        character(len=:), allocatable :: names(:)
+        integer :: k, width
+
+        if (b%kind /= BACKEND_NATIVE) then
+            call project_build_cases(b, model, cases, flags, log_file, exitcode)
+            return
+        end if
+        width = 1
+        do k = 1, size(cases)
+            width = max(width, len(model%cases(cases(k))%name))
+        end do
+        allocate (character(len=width) :: names(size(cases)))
+        do k = 1, size(cases)
+            names(k) = model%cases(cases(k))%name
+        end do
+        call backend_test_names(b, names, size(names), exitcode, .true., log_file, &
+            flags=flags, build_only=.true.)
+    end subroutine build_selected
 
     subroutine expand_listed(b, flags, model, cases, n_expanded, ierr, message, &
             from_root, to_root)
