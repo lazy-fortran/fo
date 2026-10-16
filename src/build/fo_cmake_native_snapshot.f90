@@ -52,6 +52,23 @@ contains
         text = json_to_string(json)
     end subroutine
 
+    subroutine append_text_item(items, text)
+        !! Append text to a deferred-length character list. An element-wise copy
+        !! instead of an array constructor: constructors mixing a list with an
+        !! element of another length truncate with gfortran 16.1.
+        character(:), allocatable, intent(inout) :: items(:)
+        character(len=*), intent(in) :: text
+        character(:), allocatable :: grown(:)
+        integer :: n
+
+        if (.not. allocated(items)) allocate (character(len=len(text)) :: items(0))
+        n = size(items)
+        allocate (character(len=max(len(items), len(text))) :: grown(n + 1))
+        if (n > 0) grown(:n) = items
+        grown(n + 1) = text
+        call move_alloc(grown, items)
+    end subroutine append_text_item
+
     subroutine native_snapshot_read(context, plan)
         type(cmake_context_t), intent(inout) :: context
         type(cm_plan_t), intent(inout) :: plan
@@ -120,11 +137,11 @@ contains
                             return
                         end if
                         if (section == 'configure_arguments') then
-                            context%extra_args = [character(len=4096) :: &
-                                context%extra_args, event%string_val]
+                            call append_text_item(context%extra_args, &
+                                event%string_val)
                         else
-                            context%build_targets = [character(len=4096) :: &
-                                context%build_targets, event%string_val]
+                            call append_text_item(context%build_targets, &
+                                event%string_val)
                         end if
                     case default
                         plan%error = 'native CMake: unsupported frozen context section'
