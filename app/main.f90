@@ -27,7 +27,7 @@ program fo_main
         project_select, project_run_affected, &
         project_load, project_inventory_cases, project_build_cases, &
         project_list_expand
-    use fo_test_budget, only: test_set_retry_options
+    use fo_test_budget, only: test_set_retry_options, test_strict_flaky
     use fo_fmt, only: fmt_sources, FMT_SELECT_ALL, FMT_SELECT_FILES, FMT_SELECT_CHANGED, &
         write_git_changed_source_list
     use fo_process, only: process_exit, process_run_argv_logged, argv_push, &
@@ -1375,7 +1375,7 @@ contains
             call report_test_result(exitcode, test_log, &
                 (n_arg_names == 0 .and. .not. verbose) .or. quiet, use_json, &
                 require_results=n_arg_names > 0, json_full=json_full, &
-                full_text=verbose)
+                full_text=verbose, project_dir=b%project_dir)
             call delete_tmpfile(test_log)
             return
         end if
@@ -1480,7 +1480,7 @@ contains
             (random_count == 0 .and. n_arg_names == 0 .and. .not. filtered .and. &
             .not. verbose .and. .not. only_changed) .or. quiet, use_json, &
             require_results=.true., json_full=json_full, full_text=verbose, &
-            junit_path=junit_path)
+            junit_path=junit_path, project_dir=b%project_dir)
         call delete_tmpfile(test_log)
     end subroutine cmd_test
 
@@ -1510,7 +1510,8 @@ contains
 
         call parse_test_results(log_file, entries, n_entries, ierr)
         if (ierr /= 0) n_entries = 0
-        call junit_write(path, entries, n_entries, log_file, ierr)
+        call junit_write(path, entries, n_entries, log_file, ierr, &
+            test_strict_flaky())
         if (ierr /= 0) then
             write (error_unit, '(a)') 'fo: cannot write JUnit report '//path
             call process_exit(2)
@@ -1603,7 +1604,7 @@ contains
     end function env_flag
 
     subroutine report_test_result(exitcode, test_log, summary_mode, use_json, &
-            require_results, json_full, full_text, junit_path)
+            require_results, json_full, full_text, junit_path, project_dir)
         !! One report for a run: compact JSON by default for --json, the legacy
         !! full JSON for --json=full, and human text that ends in the verdict
         !! line. Failure output is excerpted unless full_text (--verbose).
@@ -1613,6 +1614,7 @@ contains
         logical, intent(in) :: use_json
         logical, intent(in), optional :: require_results, json_full, full_text
         character(len=*), intent(in), optional :: junit_path
+        character(len=*), intent(in), optional :: project_dir
 
         type(test_result_entry_t), allocatable :: entries(:)
         integer :: n_entries, parse_ierr
@@ -1672,13 +1674,13 @@ contains
             compact = .true.
             if (present(json_full)) compact = .not. json_full
             call format_test_results_json(entries, n_entries, exitcode, &
-                json_output, test_log, compact)
+                json_output, test_log, compact, project_dir)
             write (output_unit, '(a)') json_output
         else if (n_entries > 0) then
             bounded = .true.
             if (present(full_text)) bounded = .not. full_text
             call format_test_results_text(entries, n_entries, test_log, &
-                summary_mode, human_output, bounded)
+                summary_mode, human_output, bounded, project_dir)
             if (len_trim(human_output) > 0) then
                 write (output_unit, '(a)') human_output
             end if

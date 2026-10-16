@@ -1,7 +1,10 @@
 module fo_test_results
     use, intrinsic :: iso_fortran_env, only: iostat_end, iostat_eor, real64
     use, intrinsic :: ieee_arithmetic, only: ieee_is_finite
+    use, intrinsic :: iso_c_binding, only: c_long_long
     use fo_util, only: json_int, read_text_file_alloc, temporary_root
+    use fo_util, only: make_tmpfile
+    use fo_fs, only: fs_make_dir, fs_collect_files, fs_stat, fs_remove_file
     use fx_json_build, only: json_escape_string
     implicit none
     private
@@ -450,7 +453,7 @@ contains
     end subroutine extract_word
 
     subroutine format_test_results_text(entries, n_entries, log_file, &
-            summary_mode, output, bounded)
+            summary_mode, output, bounded, log_dir)
         !! Whole human report, ending in the verdict line. A bounded buffer
         !! would drop late failures and the verdict once diagnostics pass its
         !! length, so the result is allocatable. With bounded, a failing case's
@@ -462,7 +465,8 @@ contains
         logical, intent(in) :: summary_mode
         character(len=:), allocatable, intent(out) :: output
         logical, optional, intent(in) :: bounded
-
+        !! Project directory whose build tree keeps the retained failure logs.
+        character(len=*), optional, intent(in) :: log_dir
         integer :: i, n_pass, n_fail, n_skip, n_untested, n_flaky
         real(real64) :: total_secs
         character(len=:), allocatable :: line, captured, excerpt, source_log, handle
@@ -475,7 +479,7 @@ contains
         source_log = log_file
         handle = ''
         if (limit_output .and. (n_fail > 0 .or. n_flaky > 0)) then
-            handle = retain_log(log_file)
+            handle = retain_log(log_file, log_dir)
             if (len(handle) > 0) source_log = handle
         end if
 
@@ -634,7 +638,7 @@ contains
     end function is_ctest_summary_line
 
     subroutine format_test_results_json(entries, n_entries, exit_code, output, &
-            log_file, compact)
+            log_file, compact, log_dir)
         !! Legacy full report by default: every case with its complete output.
         !! With compact, the one report shared by `fo test --json` and the MCP
         !! test tool: verdict first, passing cases counted not listed, bounded
@@ -645,6 +649,7 @@ contains
         character(len=:), allocatable, intent(out) :: output
         character(len=*), optional, intent(in) :: log_file
         logical, optional, intent(in) :: compact
+        character(len=*), optional, intent(in) :: log_dir
         character(len=:), allocatable :: captured
 
         integer :: i, n_pass, n_fail, n_skip, n_untested, n_flaky, read_error
@@ -653,7 +658,7 @@ contains
         if (present(compact)) then
             if (compact) then
                 call format_compact_json(entries, n_entries, exit_code, output, &
-                    log_file)
+                    log_file, log_dir)
                 return
             end if
         end if
@@ -705,7 +710,7 @@ contains
         output = output//'}'
     end subroutine format_test_results_json
 
-    subroutine format_compact_json(entries, n_entries, exit_code, output, log_file)
+    subroutine format_compact_json(entries, n_entries, exit_code, output, log_file, log_dir)
         !! Keys: v verdict line, ok, pass/fail/skip (untested, flaky when
         !! nonzero), wall_s or sum_s (the run's wall clock, or the sum of the
         !! per-case times when the wall clock is unknown), exit, log (retained
@@ -717,7 +722,7 @@ contains
         integer, intent(in) :: n_entries, exit_code
         character(len=:), allocatable, intent(out) :: output
         character(len=*), optional, intent(in) :: log_file
-
+        character(len=*), optional, intent(in) :: log_dir
         integer :: i, n_pass, n_fail, n_skip, n_untested, n_flaky, read_error
         integer :: n_listed
         real(real64) :: total_secs, wall
@@ -734,7 +739,7 @@ contains
         if (present(log_file)) then
             source_log = log_file
             wall = read_wall_seconds(log_file)
-            if (failing) handle = retain_log(log_file)
+            if (failing) handle = retain_log(log_file, log_dir)
             if (len(handle) > 0) source_log = handle
         end if
         output = '{"v":"'//verdict_line(n_pass, n_fail, n_skip, n_untested, &
@@ -908,20 +913,56 @@ contains
         close (u)
     end function read_wall_seconds
 
-    function retain_log(log_file) result(handle)
-        !! Copy the run's full log to `fo-test-last.log` in the temporary root,
-        !! so the report can name a path that outlives the run. One file, the
-        !! last failing run wins. Empty when the copy fails.
+    function retain_log(log_file, log_dir) result(handle)
+        !! Copy the run's full log to its own file `build/fo/test-logs/<id>.log`
+        !! of the project (the temporary root without log_dir), so the report can
+        !! name a path that outlives the run and no concurrent run overwrites.
+        !! The newest RETAINED_LOGS files stay. Empty when the copy fails.
         character(len=*), intent(in) :: log_file
+        character(len=*), intent(in), optional :: log_dir
         character(len=:), allocatable :: handle
 
-        character(len=:), allocatable :: text
-        integer :: ierr, u, ios
+        integer, parameter :: RETAINED_LOGS = 10
+        character(len=:), allocatable :: text, dir
+        character(len=512) :: unique
+        character(len=512), allocatable :: items(:)
+        integer(c_long_long) :: mtime(64), oldest, ignored
+        integer :: ierr, u, ios, n, i, victim, slash
+        logical :: ok
 
         handle = ''
         call read_text_file_alloc(log_file, text, ierr)
         if (ierr /= 0) return
-        handle = temporary_root()//'/fo-test-last.log'
+        if (present(log_dir)) then
+            dir = trim(log_dir)//'/build/fo/test-logs'
+        else
+            dir = temporary_root()//'/fo-test-logs'
+        end if
+        call fs_make_dir(dir, ierr)
+        if (ierr /= 0) return
+        ! Drop the oldest logs so that, with the new one, RETAINED_LOGS remain.
+        allocate (items(64))
+        call fs_collect_files(dir, '', '.log', '', items, n, .false.)
+        do while (n >= RETAINED_LOGS)
+            victim = 0
+            oldest = huge(oldest)
+            do i = 1, n
+                call fs_stat(trim(items(i)), mtime(i), ignored, ok)
+                if (.not. ok) mtime(i) = -1_c_long_long
+                if (mtime(i) >= oldest) cycle
+                oldest = mtime(i)
+                victim = i
+            end do
+            if (victim == 0) exit
+            call fs_remove_file(trim(items(victim)))
+            items(victim) = items(n)
+            n = n - 1
+        end do
+        ! A process-unique, per-call name from the shared temporary-name scheme.
+        call make_tmpfile('log', unique)
+        slash = index(unique, '/', back=.true.)
+        unique = unique(slash + 1:len_trim(unique) - 4)
+        handle = dir//'/'//trim(unique)//'.log'
         open (newunit=u, file=handle, status='replace', action='write', &
             access='stream', form='unformatted', iostat=ios)
         if (ios /= 0) then

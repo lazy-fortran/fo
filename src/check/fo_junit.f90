@@ -2,8 +2,10 @@ module fo_junit
     !! JUnit XML of a test run for the user's own CI: one testcase per result
     !! of the shared test results (PASS, reused, flaky, FAIL, TIMEOUT, skipped
     !! and untested cases alike). FAIL is a <failure>, TIMEOUT an <error>, SKIP
-    !! and UNTESTED are <skipped>; a reused case and a flaky case pass and say
-    !! so in their <system-out>.
+    !! and UNTESTED are <skipped>; a reused case passes and says so in its
+    !! <system-out>. A flaky case passes with a <flakyFailure> (Surefire and
+    !! nextest spelling) unless the run is strict (--strict-flaky), where it is a
+    !! <failure> like the run's exit status.
     use, intrinsic :: iso_fortran_env, only: real64
     use fo_test_results, only: test_result_entry_t, extract_captured_stdout
     use fo_util, only: make_sibling_tmpfile, delete_tmpfile
@@ -18,19 +20,20 @@ module fo_junit
 
 contains
 
-    subroutine junit_write(path, entries, n_entries, log_file, ierr)
+    subroutine junit_write(path, entries, n_entries, log_file, ierr, strict_flaky)
         !! Write the report of entries(1:n_entries) to path atomically.
         !! log_file holds the captured output of failing cases.
         character(len=*), intent(in) :: path, log_file
         type(test_result_entry_t), intent(in) :: entries(:)
         integer, intent(in) :: n_entries
         integer, intent(out) :: ierr
+        logical, intent(in), optional :: strict_flaky
         character(len=:), allocatable :: text
         character(len=4096) :: temporary
         integer :: unit, ios
 
         ierr = 1
-        call junit_xml(entries, n_entries, log_file, text)
+        call junit_xml(entries, n_entries, log_file, text, strict_flaky)
         call make_sibling_tmpfile(path, temporary)
         open (newunit=unit, file=trim(temporary), status='new', action='write', &
             access='stream', form='unformatted', iostat=ios)
@@ -41,16 +44,20 @@ contains
         if (ierr /= 0) call delete_tmpfile(trim(temporary))
     end subroutine junit_write
 
-    subroutine junit_xml(entries, n_entries, log_file, text)
+    subroutine junit_xml(entries, n_entries, log_file, text, strict_flaky)
         type(test_result_entry_t), intent(in) :: entries(:)
         integer, intent(in) :: n_entries
         character(len=*), intent(in) :: log_file
         character(len=:), allocatable, intent(out) :: text
+        logical, intent(in), optional :: strict_flaky
         character(len=:), allocatable :: body, captured, reason
         character(len=*), parameter :: nl = achar(10)
         integer :: i, n_fail, n_error, n_skip
         real(real64) :: total
+        logical :: strict
 
+        strict = .false.
+        if (present(strict_flaky)) strict = strict_flaky
         n_fail = 0
         n_error = 0
         n_skip = 0
@@ -93,8 +100,22 @@ contains
                     'at an unchanged input closure; not run</system-out>'//nl// &
                     '    </testcase>'//nl
             case ('FLAKY')
-                body = body//'>'//nl//'      <system-out>flaky: failed first, '// &
-                    'passed on retry</system-out>'//nl//'    </testcase>'//nl
+                reason = 'flaky: failed first, passed on retry'
+                call extract_captured_stdout(log_file, entries(i)%name, captured)
+                if (len(captured) > MAX_OUTPUT_BYTES) captured = &
+                    captured(1:MAX_OUTPUT_BYTES)//nl//'[output truncated]'
+                if (strict) then
+                    n_fail = n_fail + 1
+                    body = body//'>'//nl//'      <failure message="'// &
+                        xml_escape(reason//' (--strict-flaky)')// &
+                        '" type="FLAKY">'//xml_escape(captured)//'</failure>'//nl// &
+                        '    </testcase>'//nl
+                else
+                    body = body//'>'//nl//'      <flakyFailure message="'// &
+                        xml_escape(reason)//'" type="FLAKY">'// &
+                        xml_escape(captured)//'</flakyFailure>'//nl// &
+                        '    </testcase>'//nl
+                end if
             case default
                 body = body//'/>'//nl
             end select

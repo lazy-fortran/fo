@@ -78,6 +78,7 @@ contains
         exitcode = 0
         if (n_run > 0) then
             call make_tmpfile('fo-test-run', run_log)
+            call system_clock(clock0, rate)
             call project_run_cases(b, model, to_run(1:n_run), flags, no_build, &
                 trim(run_log), exitcode, selection)
         end if
@@ -86,8 +87,13 @@ contains
         if (ios == 0) then
             write (unit, '(a)', advance='no') reused_lines
             if (n_run > 0) then
+                call system_clock(clock1)
                 call read_text_file_alloc(trim(run_log), text, ierr)
                 if (ierr == 0) write (unit, '(a)') text
+                ! A runner without a run-level clock (CTest) or a record lost
+                ! in the log still has the wall time fo measured around it.
+                if (.not. has_wall_record(text)) write (unit, '(a,f0.2)') &
+                    'TEST_WALL ', real(clock1 - clock0)/real(max(1, rate))
             else
                 call system_clock(clock1)
                 write (unit, '(a,f0.2)') 'TEST_WALL ', &
@@ -99,6 +105,16 @@ contains
         call delete_tmpfile(trim(run_log))
         call record_results(dir, model, digests, log_file)
     end subroutine test_cache_run
+
+    logical function has_wall_record(text)
+        !! A `TEST_WALL` record starting a line of the run log.
+        character(len=:), allocatable, intent(in) :: text
+
+        has_wall_record = .false.
+        if (.not. allocated(text)) return
+        has_wall_record = index(text, 'TEST_WALL ') == 1 .or. &
+            index(text, achar(10)//'TEST_WALL ') > 0
+    end function has_wall_record
 
     subroutine model_digests(b, model, flags, digests)
         !! Input closure digest of every model case; '' = never reused.

@@ -397,8 +397,8 @@ times (`summed`). Per-case slow-test warnings are CPU time and say `CPU`.
 
   The report stays under about 4 KiB for one failing case; only the first ten
   failing cases carry `out`, the others name, status and time. `log` is the full
-  log of the last failing run, `fo-test-last.log` in the temporary directory
-  (overwritten by the next failing run): read it, or rerun one case with
+  log of the last failing run, `build/fo/test-logs/<id>.log` of the project
+  (one file per failing run, the newest ten kept): read it, or rerun one case with
   `fo test NAME`.
 - `fo test --json=full` and MCP `json="full"` return the complete structured
   report with every failing and passing entry and its whole output, growing with
