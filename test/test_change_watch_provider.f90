@@ -237,6 +237,7 @@ contains
         call change_watch_add_context(watch, context, ierr, error_text)
         call require(ierr == 0, 'custom output and nested provider declarations')
         call settle_events()
+        captures = 0
         call fs_write_text(output//'/generated.f90', 'generated output')
         call assert_idle('custom CMake build output')
         call fs_write_text(authored, 'known23')
