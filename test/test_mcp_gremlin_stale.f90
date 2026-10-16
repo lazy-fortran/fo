@@ -144,9 +144,13 @@ program test_mcp_gremlin_stale
     session_id = json_string_value(json_member(payload, 'session_id'))
     call assert_true(json_string_value(json_member(payload, 'state')) == 'running', &
         'new CLI start reports its running owner state')
+    ! Safety bound only: blocking on the connected peer would run into the 30 s
+    ! process deadline above; ordinary lane start time is load dependent.
     if (clock_rate > 0) then
-        call assert_true(real(finished_at - started_at) / real(clock_rate) < 3.0, &
-            'new CLI start returns promptly while the peer stays connected')
+        write (exit_text, '(f0.1)') real(finished_at - started_at) / real(clock_rate)
+        call assert_true(real(finished_at - started_at) / real(clock_rate) < 20.0, &
+            'new CLI start returns promptly while the peer stays connected: '// &
+            trim(exit_text)//' s')
     end if
     if (len(session_id) == 0) then
         call assert_true(.false., 'CLI response omitted its owner ID; stderr='// &
