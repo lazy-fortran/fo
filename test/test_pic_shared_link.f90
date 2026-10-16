@@ -6,10 +6,10 @@ program test_pic_shared_link
     use fo_compiler_dialect, only: compiler_dialect, compiler_dialect_t
     use fo_fs, only: fs_make_dir, fs_remove_tree
     use fo_util, only: make_tmpfile
+    use fo_test_harness, only: run_list, argv
     implicit none
 
     character(len=512) :: dir, library
-    character(len=2048) :: cmd
     integer :: st
     logical :: ok, macos
 
@@ -37,23 +37,21 @@ program test_pic_shared_link
     ! so the probe compiles the module and its user separately and links both.
     if (.not. macos) then
         call compile_pair('nofpic', '')
-        write (cmd, '(a)') 'cd "'//trim(dir)//'" && gcc -shared -o nofpic.so '// &
-            'nofpic_mod.o nofpic_use.o > /dev/null 2>&1'
-        call execute_command_line(cmd, exitstat=st)
+        call run_list(argv('gcc', '-shared', '-o', 'nofpic.so', &
+            'nofpic_mod.o', 'nofpic_use.o'), st, cwd=trim(dir))
         call check('shared link WITHOUT -fPIC is refused', st /= 0)
     end if
 
     call compile_pair('fpic', '-fPIC')
     if (macos) then
         library = trim(dir)//'/libfpic.dylib'
-        write (cmd, '(a)') 'cd "'//trim(dir)//'" && gfortran -dynamiclib -o "'// &
-            trim(library)//'" fpic_mod.o fpic_use.o > /dev/null 2>&1'
+        call run_list(argv('gfortran', '-dynamiclib', '-o', &
+            trim(library), 'fpic_mod.o', 'fpic_use.o'), st, cwd=trim(dir))
     else
         library = trim(dir)//'/libfpic.so'
-        write (cmd, '(a)') 'cd "'//trim(dir)//'" && gcc -shared -o "'// &
-            trim(library)//'" fpic_mod.o fpic_use.o > /dev/null 2>&1'
+        call run_list(argv('gcc', '-shared', '-o', trim(library), &
+            'fpic_mod.o', 'fpic_use.o'), st, cwd=trim(dir))
     end if
-    call execute_command_line(cmd, exitstat=st)
     call check('shared link WITH -fPIC succeeds', st == 0)
     if (st == 0) call check_consumer()
 
@@ -85,16 +83,16 @@ contains
     subroutine compile_pair(stem, extra)
         !! Compile module then user, in that order: the user needs the .mod.
         character(len=*), intent(in) :: stem, extra
-        character(len=2048) :: c
+        character(len=64) :: flag
         integer :: st
 
-        write (c, '(a)') 'cd "'//trim(dir)//'" && gfortran -c -O0 '//trim(extra)// &
-            ' '//stem//'_mod.f90 -o '//stem//'_mod.o'
-        call execute_command_line(c//' > /dev/null 2>&1', exitstat=st)
+        flag = '-O0'
+        if (len_trim(extra) > 0) flag = trim(extra)
+        call run_list(argv('gfortran', '-c', '-O0', flag, &
+            stem//'_mod.f90', '-o', stem//'_mod.o'), st, cwd=trim(dir))
         call check('module compiles ('//stem//')', st == 0)
-        write (c, '(a)') 'cd "'//trim(dir)//'" && gfortran -c -O0 '//trim(extra)// &
-            ' -I. '//stem//'_use.f90 -o '//stem//'_use.o'
-        call execute_command_line(c//' > /dev/null 2>&1', exitstat=st)
+        call run_list(argv('gfortran', '-c', '-O0', flag, '-I.', &
+            stem//'_use.f90', '-o', stem//'_use.o'), st, cwd=trim(dir))
         call check('user compiles ('//stem//')', st == 0)
     end subroutine compile_pair
 
@@ -112,13 +110,11 @@ contains
         write (u, '(a)') '    if (useit() /= 2) error stop 1'
         write (u, '(a)') 'end program consumer'
         close (u)
-        write (cmd, '(a)') 'cd "'//trim(dir)//'" && gfortran consumer.f90 "'// &
-            trim(library)//'" "-Wl,-rpath,'//trim(dir)// &
-            '" -o consumer > /dev/null 2>&1'
-        call execute_command_line(cmd, exitstat=status)
+        call run_list(argv('gfortran', 'consumer.f90', trim(library), &
+            '-Wl,-rpath,'//trim(dir), '-o', 'consumer'), status, cwd=trim(dir))
         call check('external shared-library consumer links', status == 0)
         if (status /= 0) return
-        call execute_command_line('"'//trim(dir)//'/consumer"', exitstat=status)
+        call run_list(argv(trim(dir)//'/consumer'), status, cwd=trim(dir))
         call check('external shared-library consumer returns 2', status == 0)
     end subroutine check_consumer
 

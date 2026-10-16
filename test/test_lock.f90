@@ -3,6 +3,8 @@ program test_lock
     use fo_lock, only: lock_write, lock_check
     use fo_process, only: process_getpid
     use fo_util, only: read_text_file
+    use fo_fs, only: fs_make_dir, fs_remove_tree, fs_remove_file, fs_stat, fs_sleep_ms
+    use fo_test_harness, only: run_git
     implicit none
     integer :: n_pass, n_fail
 
@@ -34,7 +36,8 @@ contains
     subroutine test_lock_write_stable()
         character(len=512) :: base, libdir, appdir, lock_path
         character(len=32768) :: text
-        integer :: ierr, t1, t2
+        integer :: ierr
+        integer(8) :: t1, t2
 
         call make_git_project(base, libdir, appdir)
         call lock_write(appdir, '', ierr)
@@ -48,13 +51,13 @@ contains
         call assert(index(text, 'rev = "') > 0, 'lock records git revision')
 
         t1 = file_mtime(lock_path)
-        call execute_command_line('sleep 1')
+        call fs_sleep_ms(1100)
         call lock_write(appdir, '', ierr)
         t2 = file_mtime(lock_path)
         call assert(ierr == 0, 'second lock write succeeds')
         call assert(t1 > 0 .and. t1 == t2, 'unchanged lock is not rewritten')
 
-        call execute_command_line('rm -rf '//trim(base))
+        call fs_remove_tree(trim(base))
     end subroutine test_lock_write_stable
 
     subroutine test_lock_detects_git_drift()
@@ -70,30 +73,28 @@ contains
         open (newunit=u, file=trim(libdir)//'/src/depmod.f90', position='append')
         write (u, '(a)') '! drift'
         close (u)
-        call execute_command_line('git -C '//trim(libdir)//' add src/depmod.f90')
-        call execute_command_line('git -C '//trim(libdir)// &
-            ' -c user.email=fo@example.invalid -c user.name=fo -c commit.gpgsign=false commit -q -m drift')
+        call git_in(libdir, [character(len=64) :: 'add', 'src/depmod.f90'])
+        call git_in(libdir, [character(len=64) :: 'commit', '-q', '-m', 'drift'])
 
         call lock_check(appdir, '', ok, message)
         call assert(.not. ok, 'lock check fails after git dependency moves')
         call assert(index(message, 'fo.lock is out of date') > 0, &
             'lock check reports stale lock')
 
-        call execute_command_line('rm -rf '//trim(base))
+        call fs_remove_tree(trim(base))
     end subroutine test_lock_detects_git_drift
 
     subroutine test_lock_honors_explicit_rev()
-        character(len=512) :: base, libdir, appdir, rev_path
+        character(len=512) :: base, libdir, appdir
         character(len=32768) :: rev, text
         character(len=256) :: message
         integer :: ierr, u, nl
+        character(:), allocatable :: git_output
         logical :: ok
 
         call make_git_project(base, libdir, appdir)
-        call make_tmp_path('fo_lock_rev', rev_path)
-        call execute_command_line('git -C '//trim(libdir)//' rev-parse HEAD > '// &
-            trim(rev_path))
-        call read_text_file(rev_path, rev)
+        call run_git(libdir, [character(len=16) :: 'rev-parse', 'HEAD'], ierr, git_output)
+        rev = git_output
         nl = index(rev, new_line('a'))
         if (nl > 0) rev = rev(:nl - 1)
         open (newunit=u, file=trim(appdir)//'/fpm.toml', status='replace')
@@ -113,13 +114,12 @@ contains
         open (newunit=u, file=trim(libdir)//'/src/depmod.f90', position='append')
         write (u, '(a)') '! drift after pin'
         close (u)
-        call execute_command_line('git -C '//trim(libdir)//' add src/depmod.f90')
-        call execute_command_line('git -C '//trim(libdir)// &
-            ' -c user.email=fo@example.invalid -c user.name=fo -c commit.gpgsign=false commit -q -m drift')
+        call git_in(libdir, [character(len=64) :: 'add', 'src/depmod.f90'])
+        call git_in(libdir, [character(len=64) :: 'commit', '-q', '-m', 'drift'])
         call lock_check(appdir, '', ok, message)
         call assert(ok, 'explicit revision is stable when remote HEAD moves')
 
-        call execute_command_line('rm -rf '//trim(base)//' '//trim(rev_path))
+        call fs_remove_tree(trim(base))
     end subroutine test_lock_honors_explicit_rev
 
     subroutine make_git_project(base, libdir, appdir)
@@ -129,8 +129,8 @@ contains
         call make_tmp_path('fo_lock_project', base)
         libdir = trim(base)//'/lib'
         appdir = trim(base)//'/app'
-        call execute_command_line('mkdir -p '//trim(libdir)//'/src '// &
-            trim(appdir)//'/app')
+        call fs_make_dir(trim(libdir)//'/src')
+        call fs_make_dir(trim(appdir)//'/app')
         open (newunit=u, file=trim(libdir)//'/fpm.toml', status='replace')
         write (u, '(a)') 'name = "deplib"'
         close (u)
@@ -138,11 +138,9 @@ contains
         write (u, '(a)') 'module depmod'
         write (u, '(a)') 'end module depmod'
         close (u)
-        call execute_command_line('git -C '//trim(libdir)//' init -q')
-        call execute_command_line('git -C '//trim(libdir)// &
-            ' -c user.email=fo@example.invalid -c user.name=fo add fpm.toml src/depmod.f90')
-        call execute_command_line('git -C '//trim(libdir)// &
-            ' -c user.email=fo@example.invalid -c user.name=fo -c commit.gpgsign=false commit -q -m init')
+        call git_in(libdir, [character(len=64) :: 'init', '-q'])
+        call git_in(libdir, [character(len=64) :: 'add', 'fpm.toml', 'src/depmod.f90'])
+        call git_in(libdir, [character(len=64) :: 'commit', '-q', '-m', 'init'])
         open (newunit=u, file=trim(appdir)//'/fpm.toml', status='replace')
         write (u, '(a)') 'name = "depapp"'
         write (u, '(a)') 'version = "0.1.0"'
@@ -151,22 +149,24 @@ contains
         close (u)
     end subroutine make_git_project
 
-    integer function file_mtime(path) result(t)
+    integer(8) function file_mtime(path) result(t)
         character(len=*), intent(in) :: path
-        character(len=512) :: tmp
-        integer :: u, ios
+        integer(8) :: bytes
+        logical :: ok
 
-        t = 0
-        call make_tmp_path('fo_lock_mtime', tmp)
-        call execute_command_line('(stat -c %Y "'//trim(path)//'" 2>/dev/null || '// &
-            'stat -f %m "'//trim(path)//'" 2>/dev/null) > '//trim(tmp))
-        open (newunit=u, file=trim(tmp), status='old', iostat=ios)
-        if (ios == 0) then
-            read (u, *, iostat=ios) t
-            close (u)
-        end if
-        call execute_command_line('rm -f '//trim(tmp))
+        call fs_stat(trim(path), t, bytes, ok)
+        if (.not. ok) t = 0
     end function file_mtime
+
+    subroutine git_in(dir, arguments)
+        !! Run git in dir with fixed committer identity; fixtures must succeed.
+        character(len=*), intent(in) :: dir
+        character(len=*), intent(in) :: arguments(:)
+        integer :: status
+
+        call run_git(dir, arguments, status)
+        call assert(status == 0, 'git '//trim(arguments(1))//' in lock fixture')
+    end subroutine git_in
 
     subroutine make_tmp_path(prefix, path)
         character(len=*), intent(in) :: prefix

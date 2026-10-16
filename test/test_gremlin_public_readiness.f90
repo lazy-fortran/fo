@@ -1,14 +1,18 @@
 program test_gremlin_public_readiness
     use, intrinsic :: iso_fortran_env, only: error_unit, int64
-    use, intrinsic :: iso_c_binding, only: c_int
+    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
+    use fo_fs, only: fs_make_dir, fs_remove_tree
+    use fo_test_harness, only: string_list_t, list_add, add_words, run_list, run_list, argv
     implicit none
 
-    character(len=4096) :: root, fixture, prefix, cli_file, rpc_file, rpc_input, driver_path
+    character(len=4096) :: root, fixture, driver_path
     character(len=4096) :: primary_fixture, state_directory, tmp_root
     character(len=65536) :: cli_json, rpc_json, output
     character(len=32) :: conditions(5)
     character(len=64) :: previous_generation, receipt_cursor, event_cursor
     character(len=128) :: event_session
+    character(len=:), allocatable :: tool_text
+    type(string_list_t) :: fo_environment
     integer :: unit, ios, status, failures, i
     integer(int64) :: clock
     logical :: driver_exists
@@ -20,6 +24,12 @@ program test_gremlin_public_readiness
             integer(c_int), value :: pid, signal
             integer(c_int) :: rc
         end function signal_process
+        function change_mode(path, mode) bind(C, name='chmod') result(rc)
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: path(*)
+            integer(c_int), value :: mode
+            integer(c_int) :: rc
+        end function change_mode
         function pause_microseconds(duration) bind(C, name='usleep') result(rc)
             import :: c_int
             integer(c_int), value :: duration
@@ -42,22 +52,18 @@ program test_gremlin_public_readiness
     write (fixture, '(a,a,i0)') trim(tmp_root), '/fo-public-readiness-', clock
     primary_fixture = fixture
     state_directory = trim(fixture)//'-state'
-    prefix = 'cd '//quote(trim(root))//' && FO_JOBS=1 FO_DISABLE_SELF_REFRESH=1 '// &
-        'FO_GREMLIN_STATE_DIR='//quote(trim(state_directory))//' '// &
-        quote(trim(driver_path))//' '
-    cli_file = trim(fixture)//'-cli.json'
-    rpc_file = trim(fixture)//'-rpc.json'
-    rpc_input = trim(fixture)//'-rpc-input.jsonl'
+    call list_add(fo_environment, 'FO_JOBS=1')
+    call list_add(fo_environment, 'FO_DISABLE_SELF_REFRESH=1')
+    call list_add(fo_environment, 'FO_GREMLIN_STATE_DIR='//trim(state_directory))
     stop_signal = 19_c_int
     continue_signal = 18_c_int
-    call command('uname -s > '//quote(trim(cli_file)), status)
-    call read_output(cli_file, output)
-    if (trim(output) == 'Darwin') then
+    call run_list(argv('uname', '-s'), status, tool_text)
+    if (trim(tool_text) == 'Darwin' // new_line('a')) then
         stop_signal = 17_c_int
         continue_signal = 19_c_int
     end if
-    call command('mkdir -p '//quote(trim(fixture)//'/test')//' '// &
-        quote(trim(fixture)//'/src'), status)
+    call fs_make_dir(trim(fixture)//'/test', status)
+    if (status == 0) call fs_make_dir(trim(fixture)//'/src', status)
     if (status /= 0) stop 1
     open (newunit=unit, file=trim(fixture)//'/fpm.toml', status='replace')
     write (unit, '(a)') 'name = "public_readiness_fixture"'
@@ -193,17 +199,14 @@ program test_gremlin_public_readiness
     call check(status == 0, 'owned fixture campaign stops through the public CLI')
     if (status == 0) call exercise_infra_failure()
     if (status == 0 .and. failures == 0) then
-        call command('rm -rf '//quote(trim(primary_fixture))//' '// &
-            quote(trim(fixture))//' '//quote(trim(state_directory))//' '// &
-            quote(trim(cli_file))//' '//quote(trim(rpc_file))//' '// &
-            quote(trim(rpc_input))//' '//quote(trim(primary_fixture)//'-once'), status)
+        call fs_remove_tree(trim(primary_fixture), status)
+        call fs_remove_tree(trim(fixture))
+        call fs_remove_tree(trim(state_directory))
+        call fs_remove_tree(trim(primary_fixture)//'-once')
     else
         write (error_unit, '(a)') 'Preserving failed public-readiness fixture:'
         write (error_unit, '(a)') 'fixture='//trim(primary_fixture)
         write (error_unit, '(a)') 'state='//trim(state_directory)
-        write (error_unit, '(a)') 'cli='//trim(cli_file)
-        write (error_unit, '(a)') 'mcp='//trim(rpc_file)
-        write (error_unit, '(a)') 'mcp_input='//trim(rpc_input)
     end if
     if (failures > 0) stop 1
     print '(a)', 'Public readiness: typed waits, token invalidation/restart and exact verdict events PASS'
@@ -267,9 +270,9 @@ contains
         write (pid_text, '(i0)') owner_pid
         paused = .false.
         do attempt = 1, 20
-            call command('ps -o stat= -p '//trim(pid_text)//' > '// &
-                quote(trim(cli_file)), exitcode)
-            call read_output(cli_file, output)
+            call run_list(argv('ps', '-o', 'stat=', '-p', trim(pid_text)), &
+                exitcode, tool_text)
+            output = tool_text
             output = adjustl(output)
             paused = output(1:1) == 'T'
             if (paused) exit
@@ -399,7 +402,7 @@ contains
         integer :: source_unit, attempt, exitcode, split
         logical :: started
         fixture = trim(primary_fixture)//'-infra'
-        call command('mkdir -p '//quote(trim(fixture)//'/test'), exitcode)
+        call fs_make_dir(trim(fixture)//'/test', exitcode)
         call check(exitcode == 0, 'creates isolated launch-failure fixture')
         open (newunit=source_unit, file=trim(fixture)//'/fpm.toml', status='replace')
         write (source_unit, '(a)') 'name = "public_infra_fixture"'
@@ -448,12 +451,12 @@ contains
                 logs = log_file(:split - 1)
                 call remember_cursors()
                 previous_generation = ''
-                call command('chmod 000 '//quote(trim(logs)), exitcode)
+                exitcode = int(change_mode(trim(logs)//c_null_char, int(o'000', c_int)))
                 call check(exitcode == 0, 'denies next launch its isolated log output')
                 call await_event('test_infra_error')
                 call check(field(cli_json, 'local_gate_green') == 'false', &
                     'infrastructure launch failure clears the gate')
-                call command('chmod 700 '//quote(trim(logs)), exitcode)
+                exitcode = int(change_mode(trim(logs)//c_null_char, int(o'700', c_int)))
                 call check(exitcode == 0, 'restores owned log directory permissions')
             end if
         end if
@@ -548,14 +551,6 @@ contains
         write (error_unit, '(a)') 'FAIL: '//label
     end subroutine check
 
-    subroutine command(text, exitcode)
-        character(len=*), intent(in) :: text
-        integer, intent(out) :: exitcode
-        integer :: launch_error
-        call execute_command_line(text, exitstat=exitcode, cmdstat=launch_error)
-        if (launch_error /= 0) exitcode = launch_error
-    end subroutine command
-
     subroutine cli(arguments, json, exitcode)
         character(len=*), intent(in) :: arguments
         character(len=*), intent(out) :: json
@@ -565,58 +560,60 @@ contains
         if (index(trim(arguments), 'status') == 1 .or. &
                 index(trim(arguments), 'wait') == 1) &
             full_arguments = trim(arguments)//' --detail full'
-        call command(trim(prefix)//' gremlin '//trim(full_arguments)//' --dir '// &
-            quote(trim(fixture))//' --lane public-readiness > '// &
-            quote(trim(cli_file)), exitcode)
-        call read_output(cli_file, json)
+        call run_driver('gremlin '//trim(full_arguments)//' --dir '//trim(fixture)// &
+            ' --lane public-readiness', exitcode, json)
     end subroutine cli
 
     subroutine mcp(action, condition, json, exitcode)
         character(len=*), intent(in) :: action, condition
         character(len=*), intent(out) :: json
         integer, intent(out) :: exitcode
-        integer :: rpc_unit
-        character(len=:), allocatable :: parameters
+        character(len=:), allocatable :: parameters, requests
+        character(len=1), parameter :: lf = achar(10)
         parameters = '"action":"gremlin_'//action//'","dir":"'//trim(fixture)// &
             '","lane_id":"public-readiness"'
         if (action == 'status' .or. action == 'wait') parameters = parameters// &
             ',"detail":"full"'
         if (len_trim(condition) > 0) parameters = parameters// &
             ',"wait_until":"'//condition//'","wait_ms":0'
-        open (newunit=rpc_unit, file=trim(rpc_input), status='replace')
-        write (rpc_unit, '(a)') '{"jsonrpc":"2.0","id":1,"method":"initialize",'// &
+        requests = '{"jsonrpc":"2.0","id":1,"method":"initialize",'// &
             '"params":{"protocolVersion":"2024-11-05","capabilities":{},'// &
-            '"clientInfo":{"name":"independent-fortran-oracle","version":"1"}}}'
-        write (rpc_unit, '(a)') '{"jsonrpc":"2.0","method":"notifications/initialized"}'
-        write (rpc_unit, '(a)') '{"jsonrpc":"2.0","id":2,"method":"tools/call",'// &
-            '"params":{"name":"fo","arguments":{'//parameters//'}}}'
-        write (rpc_unit, '(a)') '{"jsonrpc":"2.0","id":3,"method":"shutdown"}'
-        write (rpc_unit, '(a)') '{"jsonrpc":"2.0","method":"exit"}'
-        close (rpc_unit)
-        call command(trim(prefix)//' mcp-server < '//quote(trim(rpc_input))// &
-            ' > '//quote(trim(rpc_file)), exitcode)
-        call read_output(rpc_file, output)
+            '"clientInfo":{"name":"independent-fortran-oracle","version":"1"}}}'//lf// &
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}'//lf// &
+            '{"jsonrpc":"2.0","id":2,"method":"tools/call",'// &
+            '"params":{"name":"fo","arguments":{'//parameters//'}}}'//lf// &
+            '{"jsonrpc":"2.0","id":3,"method":"shutdown"}'//lf// &
+            '{"jsonrpc":"2.0","method":"exit"}'//lf
+        call run_driver('mcp-server', exitcode, output, requests)
         json = field(output, 'text')
     end subroutine mcp
 
-    subroutine read_output(filename, text)
-        character(len=*), intent(in) :: filename
+    subroutine run_driver(arguments, exitcode, text, input)
+        !! Run the pinned driver in the project directory; text receives its
+        !! standard output with the line breaks removed.
+        character(len=*), intent(in) :: arguments
+        integer, intent(out) :: exitcode
         character(len=*), intent(out) :: text
-        integer :: file_unit, read_status, used
-        character(len=65536) :: line
+        character(len=*), intent(in), optional :: input
+        type(string_list_t) :: invocation
+        character(len=:), allocatable :: standard_output
+        character(len=:), allocatable :: ignored_errors
+        integer :: i, used
+
+        call list_add(invocation, trim(driver_path))
+        call add_words(invocation, arguments)
+        call run_list(invocation, exitcode, standard_output, errors=ignored_errors, &
+            cwd=trim(root), environment=fo_environment, input=input, timeout_ms=-1)
+        if (exitcode < 0) exitcode = 127
         text = ''
         used = 0
-        open (newunit=file_unit, file=trim(filename), status='old', iostat=read_status)
-        if (read_status /= 0) return
-        do
-            read (file_unit, '(a)', iostat=read_status) line
-            if (read_status /= 0) exit
-            if (used + len_trim(line) > len(text)) exit
-            text(used + 1:used + len_trim(line)) = trim(line)
-            used = used + len_trim(line)
+        do i = 1, len(standard_output)
+            if (standard_output(i:i) == achar(10)) cycle
+            if (used >= len(text)) exit
+            used = used + 1
+            text(used:used) = standard_output(i:i)
         end do
-        close (file_unit)
-    end subroutine read_output
+    end subroutine run_driver
 
     function field(json, key) result(value)
         character(len=*), intent(in) :: json, key
@@ -651,19 +648,4 @@ contains
             cursor = cursor + 1
         end do
     end function field
-
-    function quote(text) result(quoted)
-        character(len=*), intent(in) :: text
-        character(len=:), allocatable :: quoted
-        integer :: i
-        quoted = "'"
-        do i = 1, len(text)
-            if (text(i:i) == "'") then
-                quoted = quoted//"'"//'"'//"'"//'"'//"'"
-            else
-                quoted = quoted//text(i:i)
-            end if
-        end do
-        quoted = quoted//"'"
-    end function quote
 end program test_gremlin_public_readiness

@@ -6,6 +6,7 @@ program test_clean_stale
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
     use fo_clean_stale, only: clean_stale_select, clean_stale_plan, clean_stale_run
     use fo_fs, only: fs_make_dir, fs_write_text, fs_remove_tree
+    use fo_test_harness, only: set_mtime
     implicit none
     integer :: n_pass, n_fail
 
@@ -123,11 +124,8 @@ contains
     subroutine backdate(path)
         character(len=*), intent(in) :: path
 
-        integer :: rc
-        character(len=700) :: cmd
-
-        cmd = 'touch -d 2020-01-01T00:00:00 '//trim(path)
-        call execute_command_line(cmd, exitstat=rc)
+        ! 2020-01-01T00:00:00Z
+        call set_mtime(trim(path), 1577836800000000000_8)
     end subroutine backdate
 
     logical function exists(path) result(yes)

@@ -10,8 +10,13 @@ program test_backend
     use fo_fpm_config, only: fpm_config_t
     use fo_process, only: process_getpid, process_getcwd, &
         process_run_argv_logged, argv_push
-    use fo_fs, only: fs_find_executable, fs_identity, fs_stat
+    use fo_fs, only: fs_find_executable, fs_identity, fs_stat, fs_remove_file, &
+        fs_remove_tree, fs_make_dir, fs_copy_exec, fs_collect_files, &
+        fs_dir_entry_count
+    use fo_test_harness, only: string_list_t, list_add, spawn_process, &
+        poll_process, sleep_ms, run_git
     use fo_exec_target, only: resolve_exec_target
+    use fo_fs, only: fs_collect_files, fs_copy_exec, fs_dir_entry_count, fs_make_dir, fs_remove_tree
     implicit none
     integer :: n_pass, n_fail
 
@@ -78,7 +83,7 @@ contains
             'native tests run after the materialization lock is released')
 
         call remove_tree(project_dir)
-        call execute_command_line('rm -f '//trim(log_file))
+        call fs_remove_file(trim(log_file))
     end subroutine test_native_test_runs_without_build_lock
 
     subroutine test_native_combined_build_keeps_apps()
@@ -111,7 +116,7 @@ contains
             'combined native build keeps application targets')
 
         call remove_tree(project_dir)
-        call execute_command_line('rm -f '//trim(log_file))
+        call fs_remove_file(trim(log_file))
     end subroutine test_native_combined_build_keeps_apps
 
     subroutine test_native_honors_auto_executables()
@@ -165,7 +170,7 @@ contains
             'only the explicit app program is linked')
 
         call remove_tree(base)
-        call execute_command_line('rm -f '//trim(log_file))
+        call fs_remove_file(trim(log_file))
     end subroutine test_native_honors_auto_executables
 
     subroutine test_detect_cmake_override()
@@ -246,13 +251,13 @@ contains
         integer :: u
 
         call make_tmp_path('fo_test_clean_keep', project_dir)
-        call execute_command_line('mkdir -p '//trim(project_dir)//'/build/fo')
+        call fs_make_dir(trim(project_dir)//'/build/fo')
         marker = trim(project_dir)//'/build/fo/marker'
         open (newunit=u, file=trim(marker), status='replace')
         write (u, '(a)') 'x'
         close (u)
         call cache_store_root(root)
-        call execute_command_line('mkdir -p '//trim(root))
+        call fs_make_dir(trim(root))
         sentinel = trim(root)//'/clean_sentinel'
         open (newunit=u, file=trim(sentinel), status='replace')
         write (u, '(a)') 'x'
@@ -277,9 +282,9 @@ contains
         integer :: u
 
         call make_tmp_path('fo_test_clean_purge', project_dir)
-        call execute_command_line('mkdir -p '//trim(project_dir))
+        call fs_make_dir(trim(project_dir))
         call cache_store_root(root)
-        call execute_command_line('mkdir -p '//trim(root))
+        call fs_make_dir(trim(root))
         sentinel = trim(root)//'/purge_sentinel'
         open (newunit=u, file=trim(sentinel), status='replace')
         write (u, '(a)') 'x'

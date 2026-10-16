@@ -16,7 +16,9 @@ program test_clean_help
     use fo_util, only: temporary_root
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
     use, intrinsic :: iso_c_binding, only: c_long_long
-    use fo_fs, only: fs_make_dir, fs_write_text, fs_remove_tree
+    use fo_fs, only: fs_make_dir, fs_write_text, fs_remove_tree, fs_stat
+    use fo_process, only: process_getcwd
+    use fo_test_harness, only: run_list, argv
     implicit none
     integer :: n_pass, n_fail
     character(len=512) :: fo_bin
@@ -84,16 +86,10 @@ program test_clean_help
 contains
 
     logical function path_exists(target)
-        !! fo_fs exposes no `fs_exists` predicate (its surface is fs_make_dir,
-        !! fs_write_text, fs_remove_tree, fs_stat, ...), so existence is asked of
-        !! the shell. `execute_command_line` is an intrinsic **subroutine**, not a
-        !! function: the status arrives through exitstat=, and using it in an
-        !! expression is a compile error, not a missing USE.
         character(len=*), intent(in) :: target
-        integer :: rc
+        integer(c_long_long) :: mtime_ns, size_bytes
 
-        call execute_command_line('test -e "'//trim(target)//'"', exitstat=rc)
-        path_exists = (rc == 0)
+        call fs_stat(trim(target), mtime_ns, size_bytes, path_exists)
     end function path_exists
 
     function locate_fo_binary() result(path)
@@ -121,16 +117,8 @@ contains
             end if
         end if
         pwd = ''
-        call execute_command_line('pwd >'//temporary_root()//'/fo_clean_help_pwd.txt', &
-            exitstat=stat)
-        open (newunit=u, file=temporary_root()//'/fo_clean_help_pwd.txt', &
-             status='old', &
-             action='read', iostat=io)
-        if (io == 0) then
-            read (u, '(a)', iostat=io) line
-            if (io == 0) pwd = trim(line)
-            close (u)
-        end if
+        call process_getcwd(pwd, stat)
+        if (stat /= 0) pwd = ''
         if (len_trim(pwd) == 0) return
         do i = 1, size(cands)
             if (path_exists(trim(pwd)//'/'//cands(i))) then
@@ -144,34 +132,36 @@ contains
         character(len=*), intent(in) :: flags
         logical, intent(in) :: in_root
         character(len=:), allocatable, intent(out) :: out
-        character(len=4096) :: cmd, line
+        character(:), allocatable :: text, directory
+        character(len=4096) :: line
         character(len=32768) :: acc
-        integer :: unit, io, len
+        integer :: io, start, finish
 
         acc = ''
-        cmd = trim(fo_bin)//' clean'
-        if (len_trim(flags) > 0) cmd = trim(cmd)//' '//trim(flags)
-        if (in_root) cmd = 'cd '//trim(root)//' && '//trim(cmd)
-        cmd = trim(cmd)//' >'//temporary_root()//'/fo_clean_help_out.txt 2>&1'
-        call execute_command_line(cmd, exitstat=io)
+        directory = '.'
+        if (in_root) directory = root
+        if (len_trim(flags) > 0) then
+            call run_list(argv(trim(fo_bin), 'clean', trim(flags)), io, &
+                text, cwd=directory)
+        else
+            call run_list(argv(trim(fo_bin), 'clean'), io, text, &
+                cwd=directory)
+        end if
         ! Leave `out` unallocated and let assignment set the length.
         ! `allocate(character(len=0) :: out)` pins the length at zero, so the
         ! later `out = trim(acc)` is an illegal reallocation of a fixed-length
         ! allocatable scalar and aborts at runtime - which is what happened when
         ! the test ran without FO_BIN in the environment, where this path was
         ! first reached after the file read.
-        open (newunit=unit, file=temporary_root()//'/fo_clean_help_out.txt', &
-             status='old', &
-             action='read', iostat=io)
-        if (io /= 0) return
-        do
-            read (unit, '(a)', iostat=io) line
-            if (io /= 0) exit
-            len = len_trim(line)
-            if (len == 0) cycle
+        start = 1
+        do while (start <= len(text))
+            finish = index(text(start:), new_line('a'))
+            finish = merge(len(text), start + finish - 2, finish == 0)
+            line = text(start:finish)
+            start = finish + 2
+            if (len_trim(line) == 0) cycle
             acc = trim(acc)//trim(line)//new_line('a')
         end do
-        close (unit)
         out = trim(acc)
     end subroutine run_fo
 

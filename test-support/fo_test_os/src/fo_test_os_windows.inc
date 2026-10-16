@@ -486,4 +486,18 @@ int fo_test_touch_directory(const char *path) {
     return changed && closed ? 0 : -1;
 }
 
+int fo_test_set_mtime(const char *path, long long mtime_ns) {
+    wchar_t *wide = fx_win32_utf16(path);
+    HANDLE handle = wide ? CreateFileW(wide, FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE |
+        FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL) : INVALID_HANDLE_VALUE;
+    free(wide);
+    if (handle == INVALID_HANDLE_VALUE) return -1;
+    ULARGE_INTEGER ticks;
+    ticks.QuadPart = (ULONGLONG)(mtime_ns / 100) + 116444736000000000ULL;
+    FILETIME stamp = { ticks.LowPart, ticks.HighPart };
+    BOOL changed = SetFileTime(handle, NULL, NULL, &stamp);
+    BOOL closed = CloseHandle(handle);
+    return changed && closed ? 0 : -1;
+}
+
 #include "fo_test_os_permissions_windows.inc"

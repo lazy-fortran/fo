@@ -3,6 +3,7 @@ program test_compiler_dialect
     use fo_compiler_dialect, only: compiler_dialect, compiler_dialect_t, &
         COMPILER_GFORTRAN, COMPILER_NVFORTRAN, COMPILER_IFX, COMPILER_FLANG
     use fo_fs, only: fs_collect_mod_dirs
+    use fo_test_harness, only: string_list_t, list_add, add_words, run_list
     use fo_util, only: make_tmpfile, delete_tmpfile
     implicit none
 
@@ -79,7 +80,8 @@ contains
         !! nvfortran when that compiler is the active test lane.  This is an
         !! independent compiler oracle for the 26.5 EXIT-token regression.
         type(compiler_dialect_t) :: dialect
-        character(len=512) :: compiler, object_path, command
+        character(len=512) :: compiler, object_path
+        type(string_list_t) :: invocation
         character(len=512) :: module_dirs(64), dependency_module_dir
         character(len=256) :: source
         integer :: i, status, exitcode, n_module_dirs
@@ -114,11 +116,16 @@ contains
             else
                 source = 'src/build/fo_ffc_cli.f90'
             end if
-            command = trim(compiler)//' -Mfree -Mbackslash -Mpreprocess '// &
-                '-module build/fo/mod -Ibuild/fo/mod -I'// &
-                trim(dependency_module_dir)//' -c '//trim(source)// &
-                ' -o '//trim(object_path)
-            call execute_command_line(trim(command), exitstat=exitcode)
+            invocation = string_list_t()
+            call list_add(invocation, trim(compiler))
+            call add_words(invocation, '-Mfree -Mbackslash -Mpreprocess -module build/fo/mod ' // &
+                '-Ibuild/fo/mod')
+            call list_add(invocation, '-I'//trim(dependency_module_dir))
+            call list_add(invocation, '-c')
+            call list_add(invocation, trim(source))
+            call list_add(invocation, '-o')
+            call list_add(invocation, trim(object_path))
+            call run_list(invocation, exitcode)
             call check(exitcode == 0, 'nvfortran compiles '//trim(source))
             call delete_tmpfile(object_path)
         end do

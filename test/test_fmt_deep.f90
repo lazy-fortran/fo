@@ -200,15 +200,13 @@ contains
         character(len=512) :: log_file
         character(len=:), allocatable :: packed
         character(len=32) :: arg
-        integer :: n_args, exitcode, i
+        character(len=4096) :: line
+        integer :: n_args, exitcode, i, unit, ios
 
         call make_tmpfile('test_process_many_argv_log', log_file)
         n_args = 0
         packed = ''
-        call argv_push(packed, n_args, 'sh')
-        call argv_push(packed, n_args, '-c')
-        call argv_push(packed, n_args, 'test "${250}" = arg250')
-        call argv_push(packed, n_args, 'argv-test')
+        call argv_push(packed, n_args, '/bin/echo')
         do i = 1, 250
             write (arg, '("arg",i0)') i
             call argv_push(packed, n_args, trim(arg))
@@ -217,7 +215,14 @@ contains
         call process_run_argv_logged('', packed, n_args, trim(log_file), &
             .false., 5, exitcode)
 
-        call assert(exitcode == 0, 'argv growth: many tokens execute correctly')
+        line = ''
+        open (newunit=unit, file=trim(log_file), status='old', iostat=ios)
+        if (ios == 0) then
+            read (unit, '(a)', iostat=ios) line
+            close (unit)
+        end if
+        call assert(exitcode == 0 .and. index(trim(line), ' arg250') > 0, &
+            'argv growth: many tokens execute correctly')
         call delete_tmpfile(log_file)
     end subroutine test_process_argv_many_tokens
 

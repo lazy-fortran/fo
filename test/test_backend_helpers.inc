@@ -65,7 +65,7 @@
         integer(c_int) :: ierr
 
         call make_tmp_path('fo_backend_cache', cache_dir)
-        call execute_command_line('mkdir -p '//trim(cache_dir))
+        call fs_make_dir(trim(cache_dir))
         ierr = setenv('FO_CACHE_DIR'//c_null_char, &
                       trim(cache_dir)//c_null_char, 1_c_int)
     end subroutine isolate_backend_cache
@@ -116,7 +116,7 @@
         character(len=512) :: project_dir
 
         call make_tmp_path('fo_test_fpm', project_dir)
-        call execute_command_line('mkdir -p '//trim(project_dir))
+        call fs_make_dir(trim(project_dir))
         open (newunit=u, file=trim(project_dir)//'/fpm.toml', status='replace')
         write (u, '(a)') 'name = "test"'
         close (u)
@@ -124,7 +124,7 @@
         b = detect_backend(project_dir)
         call assert(b%kind == BACKEND_NATIVE, 'detect fpm.toml -> native project')
 
-        call execute_command_line('rm -rf '//trim(project_dir))
+        call fs_remove_tree(trim(project_dir))
     end subroutine test_detect_fpm
 
     subroutine test_detect_fpm_preferred_over_cmake()
@@ -208,7 +208,7 @@
         character(len=512) :: project_dir
 
         call make_tmp_path('fo_test_fpm_parent', project_dir)
-        call execute_command_line('mkdir -p '//trim(project_dir)//'/src/nested')
+        call fs_make_dir(trim(project_dir)//'/src/nested')
         open (newunit=u, file=trim(project_dir)//'/fpm.toml', status='replace')
         write (u, '(a)') 'name = "test"'
         close (u)
@@ -218,7 +218,7 @@
         call assert(trim(b%project_dir) == trim(project_dir), &
             'detected project root')
 
-        call execute_command_line('rm -rf '//trim(project_dir))
+        call fs_remove_tree(trim(project_dir))
     end subroutine test_detect_fpm_from_child
 
     subroutine test_detect_cmake_from_child()
@@ -227,7 +227,7 @@
         character(len=512) :: project_dir
 
         call make_tmp_path('fo_test_cmake_parent', project_dir)
-        call execute_command_line('mkdir -p '//trim(project_dir)//'/src/nested')
+        call fs_make_dir(trim(project_dir)//'/src/nested')
         open (newunit=u, file=trim(project_dir)//'/CMakeLists.txt', &
             status='replace')
         write (u, '(a)') 'cmake_minimum_required(VERSION 3.20)'
@@ -238,7 +238,7 @@
         call assert(trim(b%project_dir) == trim(project_dir), &
             'detected CMake project root')
 
-        call execute_command_line('rm -rf '//trim(project_dir))
+        call fs_remove_tree(trim(project_dir))
     end subroutine test_detect_cmake_from_child
 
     subroutine test_detect_none()
@@ -246,13 +246,13 @@
         character(len=512) :: project_dir
 
         call make_tmp_path('fo_test_none', project_dir)
-        call execute_command_line('mkdir -p '//trim(project_dir))
+        call fs_make_dir(trim(project_dir))
 
         b = detect_backend(project_dir)
         call assert(b%kind == BACKEND_NONE, 'detect none')
         call assert(len_trim(b%project_dir) == 0, 'detect none has no project root')
 
-        call execute_command_line('rm -rf '//trim(project_dir))
+        call fs_remove_tree(trim(project_dir))
     end subroutine test_detect_none
 
     subroutine test_nproc()
@@ -287,7 +287,7 @@
         call assert(exitcode /= 0, 'gfortran test --all includes slow tests')
 
         call remove_tree(project_dir)
-        call execute_command_line('rm -f '//trim(log_file))
+        call fs_remove_file(trim(log_file))
     end subroutine test_fpm_skips_slow_by_default
 
     subroutine test_cmake_build_and_test()
@@ -301,7 +301,7 @@
 
         call make_tmp_path('fo_test_cmake_build', project_dir)
         call make_tmp_path('fo_backend_cmake_build', log_file)
-        call execute_command_line('mkdir -p '//trim(project_dir))
+        call fs_make_dir(trim(project_dir))
         open (newunit=u, file=trim(project_dir)//'/CMakeLists.txt', &
             status='replace')
         write (u, '(a)') 'cmake_minimum_required(VERSION 3.20)'
@@ -340,7 +340,7 @@
             'CMake passing test has its name and status')
 
         call remove_tree(project_dir)
-        call execute_command_line('rm -f '//trim(log_file))
+        call fs_remove_file(trim(log_file))
     end subroutine test_cmake_build_and_test
 
     subroutine test_cmake_context_cxx_runtime()
@@ -376,10 +376,7 @@
             'CMake-built CXX executable runs and creates its runtime sentinel')
 
         call backend_build(b, exitcode, log_file=log_file)
-        ! Ninja reports `no work to do`; fo's native build compiles nothing.
-        call assert(exitcode == 0 .and. &
-            (file_contains(log_file, 'no work to do') .or. &
-             file_contains(log_file, 'native CMake compiled 0 source file(s)')), &
+        call assert(exitcode == 0 .and. file_contains(log_file, 'no work to do'), &
             'a repeated CMake build leaves the up-to-date CXX target alone')
         call write_cpp_runtime(source_file, 'edited')
         call backend_build(b, exitcode, log_file=log_file)
@@ -395,7 +392,7 @@
             'the configured generator is retained in the selected build directory')
 
         call remove_tree(project_dir)
-        call execute_command_line('rm -f '//trim(log_file))
+        call fs_remove_file(trim(log_file))
     end subroutine test_cmake_context_cxx_runtime
 
     subroutine write_cpp_runtime(path, text)
@@ -492,7 +489,7 @@
         call remove_tree(project_dir)
         call remove_tree(external_root)
         call remove_tree(wrong_root)
-        call execute_command_line('rm -f '//trim(log_file))
+        call fs_remove_file(trim(log_file))
     end subroutine test_cmake_preset_external_root_hint
 
     subroutine test_cmake_named_test_rebuilds_changed_source()
@@ -503,7 +500,7 @@
 
         call make_tmp_path('fo_test_cmake_named_rebuild', project_dir)
         call make_tmp_path('fo_backend_cmake_named_rebuild', log_file)
-        call execute_command_line('mkdir -p '//trim(project_dir))
+        call fs_make_dir(trim(project_dir))
         open (newunit=u, file=trim(project_dir)//'/CMakeLists.txt', &
             status='replace')
         write (u, '(a)') 'cmake_minimum_required(VERSION 3.20)'
@@ -533,7 +530,7 @@
             'CMake named test rejects a changed source that does not compile')
 
         call remove_tree(project_dir)
-        call execute_command_line('rm -f '//trim(log_file))
+        call fs_remove_file(trim(log_file))
     end subroutine test_cmake_named_test_rebuilds_changed_source
 
     subroutine test_cmake_named_rejects_source_name()
@@ -546,7 +543,7 @@
 
         call make_tmp_path('fo_test_cmake_affected', project_dir)
         call make_tmp_path('fo_backend_cmake_affected', log_file)
-        call execute_command_line('mkdir -p '//trim(project_dir))
+        call fs_make_dir(trim(project_dir))
         open (newunit=u, file=trim(project_dir)//'/CMakeLists.txt', &
             status='replace')
         write (u, '(a)') 'cmake_minimum_required(VERSION 3.20)'
@@ -569,7 +566,7 @@
             'CMake named dispatch rejects an unmatched source name')
 
         call remove_tree(project_dir)
-        call execute_command_line('rm -f '//trim(log_file))
+        call fs_remove_file(trim(log_file))
     end subroutine test_cmake_named_rejects_source_name
 
     subroutine test_gfortran_named_tests_select_requested()
@@ -590,7 +587,7 @@
             'gfortran named log includes selected test output')
 
         call remove_tree(project_dir)
-        call execute_command_line('rm -f '//trim(log_file))
+        call fs_remove_file(trim(log_file))
     end subroutine test_gfortran_named_tests_select_requested
 
     subroutine test_gfortran_named_test_restores_cached_object()
@@ -614,7 +611,7 @@
             'gfortran named test second run restores test object')
 
         call remove_tree(project_dir)
-        call execute_command_line('rm -f '//trim(log_file))
+        call fs_remove_file(trim(log_file))
     end subroutine test_gfortran_named_test_restores_cached_object
 
     subroutine test_gfortran_recovers_from_root_mod_shadow()
@@ -665,7 +662,7 @@
             'stale root module is removed after matched failure')
 
         call remove_tree(project_dir)
-        call execute_command_line('rm -f '//trim(log_file))
+        call fs_remove_file(trim(log_file))
     end subroutine test_gfortran_recovers_from_root_mod_shadow
 
     subroutine test_gfortran_restores_deleted_outputs()
@@ -681,9 +678,8 @@
         call gfortran_build(project_dir, log_file, exitcode, n_first)
         call assert(exitcode == 0 .and. n_first > 0, &
             'gfortran restore fixture first build compiles')
-        call execute_command_line('rm -rf '//trim(project_dir)// &
-            '/build/fo/obj '//trim(project_dir)// &
-            '/build/fo/mod', wait=.true.)
+        call fs_remove_tree(trim(project_dir)//'/build/fo/obj')
+        call fs_remove_tree(trim(project_dir)//'/build/fo/mod')
         call gfortran_build(project_dir, log_file, exitcode, n_restore)
         call assert(exitcode == 0 .and. n_restore == 0, &
             'deleted outputs restore without recompiling')
@@ -694,7 +690,7 @@
             'deleted object and module outputs are restored')
 
         call remove_tree(project_dir)
-        call execute_command_line('rm -f '//trim(log_file))
+        call fs_remove_file(trim(log_file))
     end subroutine test_gfortran_restores_deleted_outputs
 
     subroutine test_gfortran_app_main_keeps_package_name()
@@ -745,7 +741,8 @@
             'non-main app program is named by its source stem')
 
         call remove_tree(project_dir)
-        call execute_command_line('rm -f '//trim(log_file)//' '//trim(out_file))
+        call fs_remove_file(trim(log_file))
+        call fs_remove_file(trim(out_file))
     end subroutine test_gfortran_app_main_keeps_package_name
 
     subroutine run_capture(exe, out_file, first_line)
@@ -758,8 +755,7 @@
         first_line = ''
         inquire (file=trim(exe), exist=exists)
         if (.not. exists) return
-        call execute_command_line('"'//trim(exe)//'" > "'//trim(out_file)// &
-            '" 2>/dev/null', wait=.true.)
+        call run_to_file(trim(exe), trim(out_file))
         open (newunit=u, file=trim(out_file), status='old', iostat=ios)
         if (ios /= 0) return
         read (u, '(a)', iostat=ios) first_line
@@ -786,7 +782,7 @@
             'changed flags miss action cache')
 
         call remove_tree(project_dir)
-        call execute_command_line('rm -f '//trim(log_file))
+        call fs_remove_file(trim(log_file))
     end subroutine test_gfortran_flags_change_action_id
 
     subroutine test_gfortran_compiler_identity_changes_action_id()
@@ -812,7 +808,7 @@
             'changed compiler identity misses action cache')
 
         call remove_tree(project_dir)
-        call execute_command_line('rm -f '//trim(log_file))
+        call fs_remove_file(trim(log_file))
     end subroutine test_gfortran_compiler_identity_changes_action_id
 
     subroutine rewrite_lib_unique(project_dir)
@@ -849,7 +845,7 @@
             'private implementation change does not rebuild dependent')
 
         call remove_tree(project_dir)
-        call execute_command_line('rm -f '//trim(log_file))
+        call fs_remove_file(trim(log_file))
     end subroutine test_gfortran_private_change_keeps_dependent_cached
 
     subroutine test_gfortran_interface_change_rebuilds_dependent()
@@ -869,7 +865,7 @@
             'interface change rebuilds dependent module')
 
         call remove_tree(project_dir)
-        call execute_command_line('rm -f '//trim(log_file))
+        call fs_remove_file(trim(log_file))
     end subroutine test_gfortran_interface_change_rebuilds_dependent
 
     subroutine test_gfortran_parallel_test_loop_restores_cached_objects()
@@ -890,7 +886,7 @@
             'parallel gfortran test second run restores tests')
 
         call remove_tree(project_dir)
-        call execute_command_line('rm -f '//trim(log_file))
+        call fs_remove_file(trim(log_file))
     end subroutine test_gfortran_parallel_test_loop_restores_cached_objects
 
     subroutine test_gfortran_test_links_helper_modules_and_lib()
@@ -910,7 +906,7 @@
             'test links module-only test helper and test_ library module')
 
         call remove_tree(project_dir)
-        call execute_command_line('rm -f '//trim(log_file))
+        call fs_remove_file(trim(log_file))
     end subroutine test_gfortran_test_links_helper_modules_and_lib
 
     subroutine test_gfortran_named_test_links_helper_modules()
@@ -930,7 +926,7 @@
             'named test links module-only test helper')
 
         call remove_tree(project_dir)
-        call execute_command_line('rm -f '//trim(log_file))
+        call fs_remove_file(trim(log_file))
     end subroutine test_gfortran_named_test_links_helper_modules
 
     subroutine test_gfortran_builds_path_dependency()
@@ -949,8 +945,8 @@
         appdir = trim(base)//'/app'
         call make_tmp_path('fo_backend_pathdep', log_file)
 
-        call execute_command_line('mkdir -p '//trim(libdir)//'/src '// &
-            trim(appdir)//'/app')
+        call fs_make_dir(trim(libdir)//'/src')
+        call fs_make_dir(trim(appdir)//'/app')
         open (newunit=u, file=trim(libdir)//'/fpm.toml', status='replace')
         write (u, '(a)') 'name = "deplib"'
         close (u)
@@ -982,8 +978,7 @@
         call assert(exitcode == 0, 'project with path dependency builds + links')
 
         outfile = trim(base)//'/out.txt'
-        call execute_command_line(trim(appdir)//'/build/fo/bin/depapp > '// &
-            trim(outfile))
+        call run_to_file(trim(appdir)//'/build/fo/bin/depapp', trim(outfile))
         line = ''
         open (newunit=u, file=trim(outfile), status='old', iostat=ios)
         if (ios == 0) then
@@ -1010,7 +1005,7 @@
             'warm rebuild leaves the unchanged binary unrelinked (link cache)')
 
         call remove_tree(base)
-        call execute_command_line('rm -f '//trim(log_file))
+        call fs_remove_file(trim(log_file))
     end subroutine test_gfortran_builds_path_dependency
 
     subroutine test_gfortran_names_binary_from_manifest_executable()
@@ -1053,7 +1048,7 @@
         call assert(.not. pkg_exists, 'no package-named binary when name is set')
 
         call remove_tree(base)
-        call execute_command_line('rm -f '//trim(log_file))
+        call fs_remove_file(trim(log_file))
     end subroutine test_gfortran_names_binary_from_manifest_executable
 
     subroutine test_gfortran_path_dep_ignores_coexisting_fpm_tree()
@@ -1118,12 +1113,10 @@
         call assert(len_trim(depobj) > 0, 'native dep object present in build/fo/obj')
         fakedir = trim(appdir)//'/build/gfortran_FADE/coexapp'
         call make_dir(fakedir)
-        call execute_command_line('cp "'//trim(depobj)//'" "'//trim(fakedir)// &
-            '/.._mylib_src_foo.f90.o"')
+        call copy_file(trim(depobj), trim(fakedir)//'/.._mylib_src_foo.f90.o')
         ! Drop the linked binary so the rebuild must relink from the object set
         ! (which now includes the harvested duplicate) rather than cache-hit.
-        call execute_command_line('rm -f "'//trim(appdir)// &
-            '/build/fo/bin/coexapp"')
+        call fs_remove_file(trim(appdir)//'/build/fo/bin/coexapp')
         block
             logical :: fake_exists
             inquire (file=trim(fakedir)//'/.._mylib_src_foo.f90.o', &
@@ -1136,8 +1129,7 @@
             'harvested duplicate of a native dep object is not double-linked')
 
         outfile = trim(base)//'/out.txt'
-        call execute_command_line(trim(appdir)//'/build/fo/bin/coexapp > '// &
-            trim(outfile))
+        call run_to_file(trim(appdir)//'/build/fo/bin/coexapp', trim(outfile))
         line = ''
         open (newunit=u, file=trim(outfile), status='old', iostat=ios)
         if (ios == 0) then
@@ -1148,7 +1140,7 @@
             'coexist-tree binary links dep once and prints the dep value')
 
         call remove_tree(base)
-        call execute_command_line('rm -f '//trim(log_file))
+        call fs_remove_file(trim(log_file))
     end subroutine test_gfortran_path_dep_ignores_coexisting_fpm_tree
 
     subroutine test_gfortran_test_link_ignores_coexisting_fpm_tree()
@@ -1210,8 +1202,7 @@
         call assert(len_trim(depobj) > 0, 'native dep object present after test build')
         fakedir = trim(appdir)//'/build/gfortran_FADE/coexapp'
         call make_dir(fakedir)
-        call execute_command_line('cp "'//trim(depobj)//'" "'//trim(fakedir)// &
-            '/.._mylib_src_foo.f90.o"')
+        call copy_file(trim(depobj), trim(fakedir)//'/.._mylib_src_foo.f90.o')
         ! use_cache=.false. forces a real link (a cache hit would otherwise skip
         ! relinking the test binary and hide the duplicate-object regression).
         call backend_test(b, exitcode, log_file=log_file, use_cache=.false.)
@@ -1219,7 +1210,7 @@
             'test links dep once despite coexisting fpm tree')
 
         call remove_tree(base)
-        call execute_command_line('rm -f '//trim(log_file))
+        call fs_remove_file(trim(log_file))
     end subroutine test_gfortran_test_link_ignores_coexisting_fpm_tree
 
     subroutine test_gfortran_test_drops_stale_path_dep_objects()
@@ -1247,7 +1238,7 @@
             'test link drops stale object from old path dependency')
 
         call remove_tree(base)
-        call execute_command_line('rm -f '//trim(log_file))
+        call fs_remove_file(trim(log_file))
     end subroutine test_gfortran_test_drops_stale_path_dep_objects
 
     subroutine write_switch_dep(depdir, value)
@@ -1329,7 +1320,7 @@
             'link failure names the unresolved symbol in the build log')
 
         call remove_tree(project_dir)
-        call execute_command_line('rm -f '//trim(log_file))
+        call fs_remove_file(trim(log_file))
     end subroutine test_gfortran_link_failure_reports_fail
 
     subroutine test_gfortran_bootstraps_git_dependency()
@@ -1383,8 +1374,9 @@
         call set_env('PATH', trim(wrapper_dir)//':/usr/bin:/bin:'// &
             trim(prior_path))
 
-        call execute_command_line('mkdir -p "'//trim(leafdir)//'/src" "'// &
-            trim(libdir)//'/src" "'//trim(appdir)//'/app"')
+        call fs_make_dir(trim(leafdir)//'/src')
+        call fs_make_dir(trim(libdir)//'/src')
+        call fs_make_dir(trim(appdir)//'/app')
         open (newunit=u, file=trim(leafdir)//'/fpm.toml', status='replace')
         write (u, '(a)') 'name = "leafdep"'
         close (u)
@@ -1477,8 +1469,7 @@
         call assert(n_calls == 0, 'warm git dependency build invokes no FPM process')
 
         outfile = trim(base)//'/out.txt'
-        call execute_command_line(trim(appdir)//'/build/fo/bin/depapp > '// &
-            trim(outfile))
+        call run_to_file(trim(appdir)//'/build/fo/bin/depapp', trim(outfile))
         line = ''
         open (newunit=u, file=trim(outfile), status='old', iostat=ios)
         if (ios == 0) then
@@ -1489,8 +1480,8 @@
             'binary links nested Fortran and C dependency sources and prints 13')
 
         call remove_tree(base)
-        call execute_command_line('rm -f '//trim(log_file))
-        call execute_command_line('rm -f '//trim(compile_log))
+        call fs_remove_file(trim(log_file))
+        call fs_remove_file(trim(compile_log))
         if (path_status == 0) then
             call set_env('PATH', trim(prior_path))
         else
@@ -1503,11 +1494,7 @@
     subroutine commit_local_dependency(dependency_dir)
         character(len=*), intent(in) :: dependency_dir
 
-        call execute_command_line('git -C "'//trim(dependency_dir)//'" init -q')
-        call execute_command_line('git -C "'//trim(dependency_dir)// &
-            '" -c user.email=fo@example.invalid -c user.name=fo add fpm.toml src')
-        call execute_command_line('git -C "'//trim(dependency_dir)// &
-            '" -c user.email=fo@example.invalid -c user.name=fo -c commit.gpgsign=false commit -q -m init')
+        call git_commit_fixture(trim(dependency_dir))
     end subroutine commit_local_dependency
 
     subroutine compile_fpm_command_fixture(executable, compiler, source_root, &
@@ -1535,6 +1522,8 @@
         integer :: exitcode, u, ios
         character(len=512) :: base, libdir, appdir, log_file, outfile
         character(len=64) :: line
+        character(len=512) :: found(64)
+        integer :: n_found, k
 
         call make_tmp_path('fo_test_partial_gitdep', base)
         libdir = trim(base)//'/lib'
@@ -1560,11 +1549,7 @@
         write (u, '(a)') '  end function public_value'
         write (u, '(a)') 'end module dep_public'
         close (u)
-        call execute_command_line('git -C "'//trim(libdir)//'" init -q')
-        call execute_command_line('git -C "'//trim(libdir)// &
-            '" -c user.email=fo@example.invalid -c user.name=fo add fpm.toml src')
-        call execute_command_line('git -C "'//trim(libdir)// &
-            '" -c user.email=fo@example.invalid -c user.name=fo -c commit.gpgsign=false commit -q -m init')
+        call git_commit_fixture(trim(libdir))
 
         open (newunit=u, file=trim(appdir)//'/fpm.toml', status='replace')
         write (u, '(a)') 'name = "depapp"'
@@ -1581,23 +1566,30 @@
         b = detect_backend(appdir)
         call backend_build(b, exitcode, log_file=log_file)
         call assert(exitcode == 0, 'two-module git dependency builds initially')
-        call execute_command_line('find "'//trim(appdir)//'/build" '// &
-            '-name "dep_public.mod" -exec cp "{}" "'//trim(base)// &
-            '/dep_public.mod.saved" \;')
+        call fs_collect_files(trim(appdir)//'/build', 'dep_public', '.mod', '', &
+            found, n_found)
+        call assert(n_found >= 1, 'built dep_public interface is found')
+        if (n_found >= 1) call copy_file(trim(found(1)), &
+            trim(base)//'/dep_public.mod.saved')
 
         ! Preserve dep_leaf in the fpm profile while deleting dep_public. The
         ! previous bootstrap heuristic saw the surviving object and skipped
         ! rebuilding, leaving the app with no dep_public.mod.
         call remove_tree(trim(appdir)//'/build/fo')
-        call execute_command_line('find "'//trim(appdir)//'/build" '// &
-            '\( -name "dep_public.mod" -o -name "*dep_public*.o" \) -delete')
+        call fs_collect_files(trim(appdir)//'/build', 'dep_public', '.mod', '', found, n_found)
+        do k = 1, n_found
+            call fs_remove_file(trim(found(k)))
+        end do
+        call fs_collect_files(trim(appdir)//'/build', 'dep_public', '.o', '', found, n_found)
+        do k = 1, n_found
+            call fs_remove_file(trim(found(k)))
+        end do
         call backend_build(b, exitcode, log_file=log_file)
         call assert(exitcode == 0, &
             'native dependency DAG repairs a partial fpm artifact profile')
 
         outfile = trim(base)//'/out.txt'
-        call execute_command_line(trim(appdir)//'/build/fo/bin/depapp > "'// &
-            trim(outfile)//'"')
+        call run_to_file(trim(appdir)//'/build/fo/bin/depapp', trim(outfile))
         line = ''
         open (newunit=u, file=trim(outfile), status='old', iostat=ios)
         if (ios == 0) then
@@ -1611,14 +1603,16 @@
         ! an incomplete fpm profile. Restore only the saved interface; the
         ! native DAG must compile the provider so public_value still links.
         call remove_tree(trim(appdir)//'/build/fo')
-        call execute_command_line('find "'//trim(appdir)//'/build" '// &
-            '-name "dep_leaf.mod" -execdir cp "'//trim(base)// &
-            '/dep_public.mod.saved" dep_public.mod \;')
+        call fs_collect_files(trim(appdir)//'/build', 'dep_leaf', '.mod', '', &
+            found, n_found)
+        do k = 1, n_found
+            call copy_file(trim(base)//'/dep_public.mod.saved', &
+                found(k)(:index(found(k), '/', back=.true.))//'dep_public.mod')
+        end do
         call backend_build(b, exitcode, log_file=log_file)
         call assert(exitcode == 0, &
             'native dependency DAG repairs a missing provider object')
-        call execute_command_line(trim(appdir)//'/build/fo/bin/depapp > "'// &
-            trim(outfile)//'"')
+        call run_to_file(trim(appdir)//'/build/fo/bin/depapp', trim(outfile))
         line = ''
         open (newunit=u, file=trim(outfile), status='old', iostat=ios)
         if (ios == 0) then
@@ -1629,7 +1623,7 @@
             'object-repaired git dependency preserves executable behaviour')
 
         call remove_tree(base)
-        call execute_command_line('rm -f '//trim(log_file))
+        call fs_remove_file(trim(log_file))
     end subroutine test_gfortran_repairs_partial_git_dependency_artifacts
 
     subroutine test_gfortran_worktree_path_dep_bootstraps_git_dependency()
@@ -1654,8 +1648,7 @@
         call assert(exitcode == 0, &
             'worktree path dependency bootstraps transitive git dependency')
         outfile = trim(base)//'/out.txt'
-        call execute_command_line(trim(worktree)// &
-            '/build/fo/bin/worktree_app > '//trim(outfile))
+        call run_to_file(trim(worktree)//'/build/fo/bin/worktree_app', trim(outfile))
         line = ''
         open (newunit=u, file=trim(outfile), status='old', iostat=ios)
         if (ios == 0) then
@@ -1665,7 +1658,7 @@
         call assert(trim(adjustl(line)) == '21', &
             'worktree binary links and runs transitive git dependency')
         call remove_tree(base)
-        call execute_command_line('rm -f '//trim(log_file))
+        call fs_remove_file(trim(log_file))
     end subroutine test_gfortran_worktree_path_dep_bootstraps_git_dependency
 
     subroutine make_external_git_dependency(gitdep)
@@ -1685,11 +1678,7 @@
         write (u, '(a)') 'end function external_value'
         write (u, '(a)') 'end module external_mod'
         close (u)
-        call execute_command_line('git -C '//trim(gitdep)//' init -q')
-        call execute_command_line('git -C '//trim(gitdep)// &
-            ' -c user.email=fo@example.invalid -c user.name=fo add fpm.toml src')
-        call execute_command_line('git -C '//trim(gitdep)// &
-            ' -c user.email=fo@example.invalid -c user.name=fo -c commit.gpgsign=false commit -q -m init')
+        call git_commit_fixture(trim(gitdep))
     end subroutine make_external_git_dependency
 
     subroutine make_transitive_path_dependency(pathdep, gitdep)
@@ -1755,8 +1744,8 @@
         appdir = trim(base)//'/app'
         call make_tmp_path('fo_backend_depmarker', log_file)
 
-        call execute_command_line('mkdir -p '//trim(libdir)//'/src '// &
-            trim(appdir)//'/app')
+        call fs_make_dir(trim(libdir)//'/src')
+        call fs_make_dir(trim(appdir)//'/app')
         open (newunit=u, file=trim(libdir)//'/fpm.toml', status='replace')
         write (u, '(a)') 'name = "grid_test_kit"'
         close (u)
@@ -1781,11 +1770,7 @@
         write (u, '(a)') '  end function app_value'
         write (u, '(a)') 'end module app_ops'
         close (u)
-        call execute_command_line('git -C '//trim(libdir)//' init -q')
-        call execute_command_line('git -C '//trim(libdir)// &
-            ' -c user.email=fo@example.invalid -c user.name=fo add fpm.toml src')
-        call execute_command_line('git -C '//trim(libdir)// &
-            ' -c user.email=fo@example.invalid -c user.name=fo -c commit.gpgsign=false commit -q -m init')
+        call git_commit_fixture(trim(libdir))
 
         open (newunit=u, file=trim(appdir)//'/fpm.toml', status='replace')
         write (u, '(a)') 'name = "depapp"'
@@ -1806,8 +1791,7 @@
             'git-dep library objects with _app_/_test_ basenames link')
 
         outfile = trim(base)//'/out.txt'
-        call execute_command_line(trim(appdir)//'/build/fo/bin/depapp > '// &
-            trim(outfile))
+        call run_to_file(trim(appdir)//'/build/fo/bin/depapp', trim(outfile))
         line = ''
         open (newunit=u, file=trim(outfile), status='old', iostat=ios)
         if (ios == 0) then
@@ -1818,7 +1802,7 @@
             'binary links marker-named dep objects and runs')
 
         call remove_tree(base)
-        call execute_command_line('rm -f '//trim(log_file))
+        call fs_remove_file(trim(log_file))
     end subroutine test_gfortran_dep_library_object_marker_not_dropped
 
     subroutine test_gfortran_test_builds_dev_dependency()
@@ -1836,8 +1820,8 @@
         appdir = trim(base)//'/app'
         call make_tmp_path('fo_backend_devdep', log_file)
 
-        call execute_command_line('mkdir -p '//trim(libdir)//'/src '// &
-            trim(appdir)//'/test')
+        call fs_make_dir(trim(libdir)//'/src')
+        call fs_make_dir(trim(appdir)//'/test')
         open (newunit=u, file=trim(libdir)//'/fpm.toml', status='replace')
         write (u, '(a)') 'name = "devhelper"'
         close (u)
@@ -1866,7 +1850,7 @@
             'fo test compiles+links a dev-dependency module')
 
         call remove_tree(base)
-        call execute_command_line('rm -f '//trim(log_file))
+        call fs_remove_file(trim(log_file))
     end subroutine test_gfortran_test_builds_dev_dependency
 
     subroutine test_gfortran_bootstraps_git_dev_dependency_closure()
@@ -2035,13 +2019,13 @@
         call assert(checkout_marker_identity(marker) == cold_identity, &
             'warm dev source edit does not refetch checkout')
 
-        call execute_command_line('rm -f "'//trim(leafdir)//'/fpm.toml"')
+        call fs_remove_file(trim(leafdir)//'/fpm.toml')
         call backend_test(b, exitcode, log_file=log_file)
         call assert(exitcode /= 0, &
             'malformed transitive dependency cannot produce a current test pass')
         call remove_tree(base)
-        call execute_command_line('rm -f "'//trim(log_file)//'" "'// &
-            trim(compile_log)//'"')
+        call fs_remove_file(trim(log_file))
+        call fs_remove_file(trim(compile_log))
         call set_env('PATH', trim(prior_path))
     end subroutine test_gfortran_bootstraps_git_dev_dependency_closure
 
@@ -2106,56 +2090,50 @@
         !! depending on backend object filenames. Mach-O adds a leading underscore.
         character(len=*), intent(in) :: dir, symbol
         character(len=*), intent(out) :: path
-        character(len=512) :: listing, symbols, candidate, line, name
+        character(len=512) :: symbols, candidate, line, name
+        character(len=512), allocatable :: objects(:)
         character(len=1) :: kind
-        integer :: u, v, ios, stat, matches
+        integer :: v, k, n_objects, ios, stat, matches
         logical :: defines_symbol
 
         path = ''
         matches = 0
-        call make_tmp_path('fo_object_list', listing)
         call make_tmp_path('fo_object_symbols', symbols)
-        call execute_command_line('find "'//trim(dir)// &
-            '" -type f -name "*.o" > "'//trim(listing)//'"', exitstat=stat)
+        allocate (objects(4096))
+        call fs_collect_files(trim(dir), '', '.o', '', objects, n_objects, ierr=stat)
         if (stat == 0) then
-            open (newunit=u, file=trim(listing), status='old', iostat=ios)
-            if (ios == 0) then
+            do k = 1, n_objects
+                candidate = objects(k)
+                call run_backend_argv('nm', &
+                    [character(len=512) :: '-P', '-g', trim(candidate)], &
+                    symbols, stat)
+                if (stat /= 0) exit
+                defines_symbol = .false.
+                open (newunit=v, file=trim(symbols), status='old', iostat=ios)
+                if (ios /= 0) then
+                    stat = ios
+                    exit
+                end if
                 do
-                    read (u, '(a)', iostat=ios) candidate
+                    read (v, '(a)', iostat=ios) line
                     if (ios /= 0) exit
-                    call run_backend_argv('nm', &
-                        [character(len=512) :: '-P', '-g', trim(candidate)], &
-                        symbols, stat)
-                    if (stat /= 0) exit
-                    defines_symbol = .false.
-                    open (newunit=v, file=trim(symbols), status='old', iostat=ios)
-                    if (ios /= 0) then
-                        stat = ios
-                        exit
-                    end if
-                    do
-                        read (v, '(a)', iostat=ios) line
-                        if (ios /= 0) exit
-                        read (line, *, iostat=ios) name, kind
-                        if (ios /= 0) cycle
-                        if (kind /= 'T') cycle
-                        if (name == symbol .or. name == '_'//symbol) &
-                            defines_symbol = .true.
-                    end do
-                    close (v)
-                    if (defines_symbol) then
-                        matches = matches + 1
-                        path = candidate
-                    end if
+                    read (line, *, iostat=ios) name, kind
+                    if (ios /= 0) cycle
+                    if (kind /= 'T') cycle
+                    if (name == symbol .or. name == '_'//symbol) &
+                        defines_symbol = .true.
                 end do
-                close (u)
-            end if
+                close (v)
+                if (defines_symbol) then
+                    matches = matches + 1
+                    path = candidate
+                end if
+            end do
         end if
         call assert(matches == 1 .and. stat == 0, &
             'one compiled object defines '//symbol)
         if (matches /= 1 .or. stat /= 0) path = ''
-        call execute_command_line('rm -f "'//trim(listing)//'" "'// &
-            trim(symbols)//'"')
+        call fs_remove_file(trim(symbols))
     end subroutine object_defining_symbol
 
     integer(c_long_long) function file_mtime(path) result(t)
@@ -2297,7 +2275,7 @@
         call assert(exitcode == 0, 'native test handles project path with spaces')
 
         call remove_tree(project_dir)
-        call execute_command_line('rm -f '//trim(log_file))
+        call fs_remove_file(trim(log_file))
     end subroutine test_fpm_path_with_spaces
 
     subroutine test_gfortran_rejects_compile_errors()
@@ -2306,7 +2284,7 @@
 
         call make_tmp_path('fo_test_compile_error', project_dir)
         call make_tmp_path('fo_backend_compile_error', log_file)
-        call execute_command_line('mkdir -p '//trim(project_dir)//'/src')
+        call fs_make_dir(trim(project_dir)//'/src')
         open (newunit=u, file=trim(project_dir)//'/fpm.toml', status='replace')
         write (u, '(a)') 'name = "fo_compile_error"'
         close (u)
@@ -2323,16 +2301,16 @@
             'unparseable source reaches the compiler')
 
         call remove_tree(project_dir)
-        call execute_command_line('rm -f '//trim(log_file))
+        call fs_remove_file(trim(log_file))
     end subroutine test_gfortran_rejects_compile_errors
 
     subroutine make_slow_fpm_project(project_dir)
         character(len=*), intent(in) :: project_dir
         integer :: u
 
-        call execute_command_line('rm -rf '//trim(project_dir))
-        call execute_command_line('mkdir -p '//trim(project_dir)//'/src')
-        call execute_command_line('mkdir -p '//trim(project_dir)//'/test')
+        call fs_remove_tree(trim(project_dir))
+        call fs_make_dir(trim(project_dir)//'/src')
+        call fs_make_dir(trim(project_dir)//'/test')
 
         open (newunit=u, file=trim(project_dir)//'/fpm.toml', status='replace')
         write (u, '(a)') 'name = "fo_test_slow_fpm"'
@@ -2527,7 +2505,6 @@
         character(len=512) :: tmpdir, base_tmpdir, old_tmpdir, executable
         character(len=512) :: path, other_path, fallback_path
         character(len=512) :: first_file, second_file, first_path, second_path
-        character(len=1024) :: command
         integer :: exitcode, status, ios
         logical :: exists
 
@@ -2562,13 +2539,8 @@
         call get_command_argument(0, executable)
         first_file = trim(tmpdir)//'/first-path'
         second_file = trim(tmpdir)//'/second-path'
-        command = '"'//trim(executable)//'" tmpdir-child > "'// &
-            trim(first_file)//'" & first_pid=$!; "'//trim(executable)// &
-            '" tmpdir-child > "'//trim(second_file)// &
-            '" & second_pid=$!; child_status=0; '// &
-            'wait "$first_pid" || child_status=1; '// &
-            'wait "$second_pid" || child_status=1; exit "$child_status"'
-        call execute_command_line(trim(command), exitstat=exitcode)
+        call run_parallel_tmpdir_children(trim(executable), trim(tmpdir), &
+            trim(first_file), trim(second_file), exitcode)
         call assert(exitcode == 0, 'parallel backend fixture processes complete')
         call read_first_line(first_file, first_path, ios)
         call assert(ios == 0, 'first parallel process reports its scratch path')
@@ -2578,31 +2550,91 @@
             index(trim(second_path), trim(tmpdir)//'/') == 1 .and. &
             trim(first_path) /= trim(second_path), &
             'parallel backend processes get distinct paths under private TMPDIR')
-        command = 'test -z "$(find "'//trim(tmpdir)// &
-            '" -name "fo_backend_cache-*" -print -quit)"'
-        call execute_command_line(trim(command), exitstat=exitcode)
-        call assert(exitcode == 0, &
+        call assert(fs_dir_entry_count(trim(tmpdir)) == 2, &
             'parallel backend fixture processes leave no cache scratch')
         call set_env('TMPDIR', trim(old_tmpdir))
         call remove_tree(trim(tmpdir))
     end subroutine test_backend_tmpdir
 
     subroutine emit_backend_tmp_path()
-        character(len=512) :: path
+        character(len=512) :: path, target_file
+        integer :: u
 
         call make_tmp_path('fo_tmpdir_child', path)
-        write (output_unit, '(a)') trim(path)
+        call get_environment_variable('FO_BACKEND_CHILD_OUT', target_file)
+        open (newunit=u, file=trim(target_file), status='replace')
+        write (u, '(a)') trim(path)
+        close (u)
         call cleanup_backend_cache()
     end subroutine emit_backend_tmp_path
 
     subroutine make_dir(path)
         character(len=*), intent(in) :: path
 
-        call execute_command_line('mkdir -p "'//trim(path)//'"')
+        call fs_make_dir(trim(path))
     end subroutine make_dir
 
     subroutine remove_tree(path)
         character(len=*), intent(in) :: path
 
-        call execute_command_line('rm -rf "'//trim(path)//'"')
+        call fs_remove_tree(trim(path))
     end subroutine remove_tree
+
+    subroutine run_to_file(exe, out_file)
+        !! Run one program with no arguments, capturing its output in out_file.
+        character(len=*), intent(in) :: exe, out_file
+        character(len=1) :: no_arguments(0)
+        integer :: exitcode
+
+        call run_backend_argv(exe, no_arguments, out_file, exitcode)
+    end subroutine run_to_file
+
+    subroutine copy_file(source, target)
+        character(len=*), intent(in) :: source, target
+
+        call assert(fs_copy_exec(source, target) == 0, 'copy fixture file '// &
+            trim(source))
+    end subroutine copy_file
+
+    subroutine git_commit_fixture(dir)
+        !! Initialize dir as a git repository and commit fpm.toml and src.
+        character(len=*), intent(in) :: dir
+        integer :: exitcode
+
+        call run_git(dir, [character(len=16) :: 'init', '-q'], exitcode)
+        call assert(exitcode == 0, 'git init fixture repository')
+        call run_git(dir, [character(len=16) :: 'add', 'fpm.toml', 'src'], exitcode)
+        call assert(exitcode == 0, 'git add fixture files')
+        call run_git(dir, [character(len=16) :: 'commit', '-q', '-m', 'init'], exitcode)
+        call assert(exitcode == 0, 'git commit fixture repository')
+    end subroutine git_commit_fixture
+
+    subroutine run_parallel_tmpdir_children(executable, tmpdir, first_file, &
+            second_file, exitcode)
+        !! Start two tmpdir-child processes concurrently under TMPDIR=tmpdir.
+        character(len=*), intent(in) :: executable, tmpdir, first_file, second_file
+        integer, intent(out) :: exitcode
+        type(string_list_t) :: command, first_environment, second_environment
+        integer :: pids(2), codes(2), attempt
+        logical :: done(2)
+
+        call list_add(command, executable)
+        call list_add(command, 'tmpdir-child')
+        call list_add(first_environment, 'TMPDIR='//tmpdir)
+        call list_add(first_environment, 'FO_BACKEND_CHILD_OUT='//first_file)
+        call list_add(second_environment, 'TMPDIR='//tmpdir)
+        call list_add(second_environment, 'FO_BACKEND_CHILD_OUT='//second_file)
+        call spawn_process(command, '.', pids(1), first_environment)
+        call spawn_process(command, '.', pids(2), second_environment)
+        done = .false.
+        codes = 1
+        do attempt = 1, 3000
+            if (.not. done(1)) call poll_process(pids(1), codes(1))
+            if (.not. done(2)) call poll_process(pids(2), codes(2))
+            done = codes /= 999
+            if (all(done)) exit
+            call sleep_ms(20)
+        end do
+        exitcode = 0
+        if (.not. all(done) .or. any(codes /= 0)) exitcode = 1
+    end subroutine run_parallel_tmpdir_children

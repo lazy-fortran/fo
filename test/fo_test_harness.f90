@@ -2,9 +2,9 @@ module fo_test_harness
     use fo_test_os_link, only: test_os_initialize
     use fo_process, only: process_exit, process_getpid
     use fo_util, only: temporary_root
-    use fo_fs, only: fs_is_windows, fs_path_is_absolute, fs_realpath
+    use fo_fs, only: fs_is_windows, fs_path_is_absolute, fs_realpath, fs_stat
     use, intrinsic :: iso_c_binding, only: c_char, c_short, c_int, c_int64_t, c_size_t, &
-        c_ptr, c_loc, c_null_char, c_null_ptr
+        c_ptr, c_loc, c_null_char, c_null_ptr, c_long_long
     use, intrinsic :: iso_fortran_env, only: error_unit, input_unit, output_unit
     implicit none
     private
@@ -25,6 +25,7 @@ module fo_test_harness
     public :: exercise_failure_cleanup_probe, open_descriptor_count, harness_probe_entry
     public :: resolve_test_executable
     public :: sleep_ms, spawn_unowned_process
+    public :: run_git, argv, run_list, spawn_list, copy_mtime, set_mtime, add_words, set_mode
 
     type :: string_t
         character(:), allocatable :: value
@@ -95,6 +96,18 @@ module fo_test_harness
             integer(c_int), value :: capacity
             integer(c_int64_t), intent(out) :: bytes
         end function c_preserve_scratch
+
+        integer(c_int) function c_set_mtime(path, mtime_ns) bind(C, name='fo_test_set_mtime')
+            import :: c_char, c_int, c_long_long
+            character(kind=c_char), intent(in) :: path(*)
+            integer(c_long_long), value :: mtime_ns
+        end function c_set_mtime
+
+        integer(c_int) function c_chmod(path, mode) bind(C, name='chmod')
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: path(*)
+            integer(c_int), value :: mode
+        end function c_chmod
 
         integer(c_int) function c_unlink(path) bind(C, name='fo_test_unlink')
             import :: c_char, c_int
@@ -446,6 +459,152 @@ contains
         pointers(count + 1) = c_null_ptr
     end subroutine make_c_vector
 
+    subroutine isolate_git(arguments, environment)
+        !! Fixture repositories must not depend on the host git configuration:
+        !! when the program is git, add an isolated configuration, a fixed identity,
+        !! no commit signing and the branch name main.
+        type(string_list_t), intent(in) :: arguments
+        type(string_list_t), intent(inout) :: environment
+        integer :: slash
+
+        if (.not. allocated(arguments%items)) return
+        if (size(arguments%items) < 1) return
+        slash = index(arguments%items(1)%value, '/', back=.true.)
+        if (arguments%items(1)%value(slash + 1:) /= 'git') return
+        call list_add(environment, 'GIT_CONFIG_NOSYSTEM=1')
+        call list_add(environment, 'GIT_CONFIG_GLOBAL=/dev/null')
+        call list_add(environment, 'GIT_CONFIG_COUNT=2')
+        call list_add(environment, 'GIT_CONFIG_KEY_0=commit.gpgsign')
+        call list_add(environment, 'GIT_CONFIG_VALUE_0=false')
+        call list_add(environment, 'GIT_CONFIG_KEY_1=init.defaultBranch')
+        call list_add(environment, 'GIT_CONFIG_VALUE_1=main')
+        call list_add(environment, 'GIT_AUTHOR_NAME=fo')
+        call list_add(environment, 'GIT_AUTHOR_EMAIL=fo@example.invalid')
+        call list_add(environment, 'GIT_COMMITTER_NAME=fo')
+        call list_add(environment, 'GIT_COMMITTER_EMAIL=fo@example.invalid')
+    end subroutine isolate_git
+
+    subroutine run_git(directory, arguments, exit_code, output)
+        !! Run git in directory; run_process isolates its configuration.
+        character(len=*), intent(in) :: directory
+        character(len=*), intent(in) :: arguments(:)
+        integer, intent(out) :: exit_code
+        character(:), allocatable, optional, intent(out) :: output
+        type(string_list_t) :: command
+        integer :: i
+
+        command = argv('git', '-C', directory)
+        do i = 1, size(arguments)
+            call list_add(command, trim(arguments(i)))
+        end do
+        if (present(output)) then
+            call run_list(command, exit_code, output)
+        else
+            call run_list(command, exit_code)
+        end if
+    end subroutine run_git
+
+    subroutine spawn_list(command, process_id, cwd)
+        !! Start a program in the background in the caller's process group, like a
+        !! shell's trailing ampersand. The caller observes it through files.
+        type(string_list_t), intent(in) :: command
+        integer, optional, intent(out) :: process_id
+        character(len=*), optional, intent(in) :: cwd
+        integer :: pid
+
+        if (present(cwd)) then
+            call spawn_unowned_process(command, cwd, pid)
+        else
+            call spawn_unowned_process(command, '.', pid)
+        end if
+        if (present(process_id)) process_id = pid
+    end subroutine spawn_list
+
+    function argv(a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12) result(list)
+        !! Argument list from up to twelve words, trailing blanks removed. Prefer it
+        !! to an array constructor, whose element lengths are easy to get wrong.
+        character(len=*), intent(in) :: a1
+        character(len=*), optional, intent(in) :: a2, a3, a4, a5, a6, a7, a8, a9, a10
+        character(len=*), optional, intent(in) :: a11, a12
+        type(string_list_t) :: list
+
+        call list_add(list, trim(a1))
+        if (present(a2)) call list_add(list, trim(a2))
+        if (present(a3)) call list_add(list, trim(a3))
+        if (present(a4)) call list_add(list, trim(a4))
+        if (present(a5)) call list_add(list, trim(a5))
+        if (present(a6)) call list_add(list, trim(a6))
+        if (present(a7)) call list_add(list, trim(a7))
+        if (present(a8)) call list_add(list, trim(a8))
+        if (present(a9)) call list_add(list, trim(a9))
+        if (present(a10)) call list_add(list, trim(a10))
+        if (present(a11)) call list_add(list, trim(a11))
+        if (present(a12)) call list_add(list, trim(a12))
+    end function argv
+
+    subroutine add_words(list, text)
+        !! Append the blank-separated words of text to list.
+        type(string_list_t), intent(inout) :: list
+        character(len=*), intent(in) :: text
+        integer :: first, last
+
+        first = 1
+        do while (first <= len(text))
+            if (text(first:first) == ' ') then
+                first = first + 1
+                cycle
+            end if
+            last = index(text(first:), ' ')
+            if (last == 0) then
+                last = len(text)
+            else
+                last = first + last - 2
+            end if
+            call list_add(list, text(first:last))
+            first = last + 2
+        end do
+    end subroutine add_words
+
+    subroutine copy_text(source, target)
+        character(len=*), intent(in) :: source
+        character(:), allocatable, intent(out) :: target
+        integer :: i
+
+        allocate (character(len=len(source)) :: target)
+        do i = 1, len(source)
+            target(i:i) = source(i:i)
+        end do
+    end subroutine copy_text
+
+    subroutine run_list(command, exit_code, output, errors, cwd, environment, input, &
+            timeout_ms)
+        !! Run command (argv list, no shell). exit_code is the child status, or -1
+        !! when it did not run or was signalled or timed out. output receives
+        !! stdout, followed by stderr unless errors is present to take it apart.
+        type(string_list_t), intent(in) :: command
+        integer, intent(out) :: exit_code
+        character(:), allocatable, optional, intent(out) :: output, errors
+        character(len=*), optional, intent(in) :: cwd, input
+        type(string_list_t), optional, intent(in) :: environment
+        integer, optional, intent(in) :: timeout_ms
+        type(process_result_t) :: result
+        character(len=:), allocatable :: directory
+
+        directory = '.'
+        if (present(cwd)) directory = cwd
+        call run_process(command, directory, result, environment=environment, &
+            input=input, timeout_ms=timeout_ms)
+        exit_code = result%exit_code
+        if (result%runner_failed .or. result%timed_out .or. result%term_signal /= 0) &
+            exit_code = -1
+        if (present(errors)) then
+            if (present(output)) call copy_text(result%stdout, output)
+            call copy_text(result%stderr, errors)
+        else if (present(output)) then
+            call copy_text(result%stdout // result%stderr, output)
+        end if
+    end subroutine run_list
+
     subroutine run_process(arguments, cwd, result, environment, input, timeout_ms, &
             max_output_bytes, child_start_delay_ms)
         type(string_list_t), intent(in) :: arguments
@@ -501,11 +660,9 @@ contains
             call set_runner_error(result, 'process output limit exceeds addressable buffer')
             return
         end if
-        if (present(environment)) then
-            call make_c_vector(environment, env_pointers, env_storage)
-        else
-            call make_c_vector(empty_environment, env_pointers, env_storage)
-        end if
+        if (present(environment)) empty_environment = environment
+        call isolate_git(arguments, empty_environment)
+        call make_c_vector(empty_environment, env_pointers, env_storage)
         call make_c_vector(arguments, argument_pointers, argument_storage)
         if (size(argument_pointers) <= 1) then
             call set_runner_error(result, 'empty process argument vector')
@@ -1138,6 +1295,40 @@ contains
         rc = c_rename(source_bytes, target_bytes)
         call assert_equal_integer(int(rc), 0, 'rename path: ' // source)
     end subroutine move_path
+
+    subroutine set_mode(path, mode)
+        !! Set the permission bits of path (chmod), for example int(o'755').
+        character(len=*), intent(in) :: path
+        integer, intent(in) :: mode
+        character(kind=c_char), allocatable, target :: bytes(:)
+
+        call encode_c_string(path, bytes)
+        call assert_equal_integer(int(c_chmod(bytes, int(mode, c_int))), 0, &
+            'chmod: ' // path)
+    end subroutine set_mode
+
+    subroutine set_mtime(path, mtime_ns)
+        !! Set the modification time of path to mtime_ns nanoseconds after the epoch.
+        character(len=*), intent(in) :: path
+        integer(c_long_long), intent(in) :: mtime_ns
+        character(kind=c_char), allocatable, target :: bytes(:)
+
+        call encode_c_string(path, bytes)
+        call assert_equal_integer(int(c_set_mtime(bytes, mtime_ns)), 0, &
+            'set mtime: ' // path)
+    end subroutine set_mtime
+
+    subroutine copy_mtime(source, target)
+        !! Give target the exact modification time of source (touch -r).
+        character(len=*), intent(in) :: source, target
+        integer(c_long_long) :: mtime_ns, size_bytes
+        logical :: ok
+
+        call fs_stat(source, mtime_ns, size_bytes, ok)
+        call assert_true(ok, 'stat for copied mtime: ' // source)
+        if (.not. ok) return
+        call set_mtime(target, mtime_ns)
+    end subroutine copy_mtime
 
     subroutine remove_path(path)
         character(len=*), intent(in) :: path

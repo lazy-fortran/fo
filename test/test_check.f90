@@ -13,6 +13,8 @@ program test_check
     use fo_fmt, only: fmt_sources, FMT_SELECT_ALL, FMT_SELECT_FILES, &
         FMT_SELECT_CHANGED
     use fo_cache, only: cache_store_root
+    use fo_fs, only: fs_make_dir, fs_remove_tree, fs_remove_file, fs_collect_files
+    use fo_test_harness, only: run_git
     use fo_util, only: make_tmpfile
     use fo_test_results, only: test_result_entry_t, parse_test_results, &
         format_test_results_text, MAX_TEST_RESULTS_ENTRIES
@@ -114,7 +116,7 @@ contains
         call assert(trim(warnings(2)%file) == '/work/c.F90' &
             .and. warnings(2)%line == 31 .and. warnings(2)%column == 7, &
             'array-temporary parser preserves later source location')
-        call execute_command_line('rm -f '//trim(log_path))
+        call fs_remove_file(trim(log_path))
     end subroutine test_array_temporary_warning_log
 
     subroutine assert(cond, msg)
@@ -152,7 +154,7 @@ contains
         call assert(index(res%diag_file, 'src/broken.f90') > 0, &
             'build diagnostic includes source file')
 
-        call execute_command_line('rm -rf '//trim(project_dir))
+        call fs_remove_tree(trim(project_dir))
     end subroutine test_check_from_child_reports_backend_error
 
     subroutine test_check_reports_test_failure_advice()
@@ -171,7 +173,7 @@ contains
             index(res%error_msg, '*_slow') > 0, &
             'test error summary includes slow-test advice')
 
-        call execute_command_line('rm -rf '//trim(project_dir))
+        call fs_remove_tree(trim(project_dir))
     end subroutine test_check_reports_test_failure_advice
 
     subroutine test_check_keeps_child_crash_as_target_failure()
@@ -235,16 +237,16 @@ contains
         call assert(index(line, '"status":"fail"') > 0, &
             'json keeps the failing suite status')
 
-        call execute_command_line('rm -rf '//trim(project_dir))
+        call fs_remove_tree(trim(project_dir))
     end subroutine test_check_rejects_zero_exit_with_failing_summary
 
     subroutine make_lying_test_project(project_dir)
         character(len=*), intent(in) :: project_dir
         integer :: u
 
-        call execute_command_line('rm -rf '//trim(project_dir))
-        call execute_command_line('mkdir -p '//trim(project_dir)//'/src')
-        call execute_command_line('mkdir -p '//trim(project_dir)//'/test')
+        call fs_remove_tree(trim(project_dir))
+        call fs_make_dir(trim(project_dir)//'/src')
+        call fs_make_dir(trim(project_dir)//'/test')
 
         open (newunit=u, file=trim(project_dir)//'/fpm.toml', status='replace')
         write (u, '(a)') 'name = "fo_lying_test_project"'
@@ -292,7 +294,7 @@ contains
             'compact success includes stage')
         call assert(index(line, '"target"') > 6, &
             'compact success includes target')
-        call assert(index(line, '"summary":"build and tests passed"') > 0, &
+        call assert(index(line, '"summary":"build and tests passed"') > 5, &
             'compact success includes summary')
         call assert(index(line, '"hint"') > 1, &
             'compact success includes hint key')
@@ -398,7 +400,7 @@ contains
         call assert(trim(diag%rerun) == 'fo test test_timeout', &
             'timeout diagnostic includes target rerun')
 
-        call execute_command_line('rm -f '//trim(log_path))
+        call fs_remove_file(trim(log_path))
     end subroutine test_diagnostic_timeout_hint
 
     subroutine test_diagnostic_crash_hint()
@@ -425,7 +427,7 @@ contains
         call assert(trim(diag%rerun) == 'fo test test_seg', &
             'crash diagnostic includes target rerun')
 
-        call execute_command_line('rm -f '//trim(log_path))
+        call fs_remove_file(trim(log_path))
     end subroutine test_diagnostic_crash_hint
 
     subroutine test_diagnostic_unknown_line()
@@ -447,7 +449,7 @@ contains
         call assert(len_trim(diag%message) > 0, &
             'unknown diagnostic keeps fallback line')
 
-        call execute_command_line('rm -f '//trim(log_path))
+        call fs_remove_file(trim(log_path))
     end subroutine test_diagnostic_unknown_line
 
     subroutine test_run_queue_coalesces_requests()
@@ -644,7 +646,7 @@ contains
 
         call make_tmp_path('fo_fmt_cache_project', project_dir)
         src_dir = trim(project_dir)//'/src'
-        call execute_command_line('mkdir -p '//trim(src_dir), wait=.true.)
+        call fs_make_dir(trim(src_dir))
 
         open (newunit=u, file=trim(project_dir)//'/fpm.toml', status='replace')
         write (u, '(a)') 'name = "fmt_cache_project"'
@@ -673,7 +675,7 @@ contains
         call assert(after_second == after_first, &
             'format check reuses success marker')
 
-        call execute_command_line('rm -rf '//trim(project_dir), wait=.true.)
+        call fs_remove_tree(trim(project_dir))
     end subroutine test_fmt_check_caches_success
 
     subroutine test_fmt_check_skips_skbuild_tree()
@@ -682,7 +684,7 @@ contains
 
         call make_tmp_path('fo_fmt_skbuild_project', project_dir)
         generated_dir = trim(project_dir)//'/_skbuild/linux/src'
-        call execute_command_line('mkdir -p '//trim(generated_dir), wait=.true.)
+        call fs_make_dir(trim(generated_dir))
 
         open (newunit=u, file=trim(project_dir)//'/fpm.toml', status='replace')
         write (u, '(a)') 'name = "fmt_skbuild_project"'
@@ -702,7 +704,7 @@ contains
         call assert(len_trim(output) == 0, &
             'format check ignores unformatted _skbuild sources')
 
-        call execute_command_line('rm -rf '//trim(project_dir), wait=.true.)
+        call fs_remove_tree(trim(project_dir))
     end subroutine test_fmt_check_skips_skbuild_tree
 
     subroutine test_fmt_check_uses_fprettify_config()
@@ -711,7 +713,7 @@ contains
 
         call make_tmp_path('fo_fmt_config_project', project_dir)
         src_dir = trim(project_dir)//'/src'
-        call execute_command_line('mkdir -p '//trim(src_dir), wait=.true.)
+        call fs_make_dir(trim(src_dir))
 
         open (newunit=u, file=trim(project_dir)//'/fpm.toml', status='replace')
         write (u, '(a)') 'name = "fmt_config_project"'
@@ -741,7 +743,7 @@ contains
         call assert(len_trim(output) == 0, &
             'format check accepts compatible fprettify options')
 
-        call execute_command_line('rm -rf '//trim(project_dir), wait=.true.)
+        call fs_remove_tree(trim(project_dir))
     end subroutine test_fmt_check_uses_fprettify_config
 
     subroutine test_fmt_check_files_limits_scope()
@@ -751,7 +753,7 @@ contains
 
         call make_tmp_path('fo_fmt_files_project', project_dir)
         src_dir = trim(project_dir)//'/src'
-        call execute_command_line('mkdir -p '//trim(src_dir), wait=.true.)
+        call fs_make_dir(trim(src_dir))
 
         open (newunit=u, file=trim(project_dir)//'/fpm.toml', status='replace')
         write (u, '(a)') 'name = "fmt_files_project"'
@@ -798,7 +800,7 @@ contains
             index(output, '  +    implicit none') > 0, &
             'format check shows the line before and after formatting')
 
-        call execute_command_line('rm -rf '//trim(project_dir), wait=.true.)
+        call fs_remove_tree(trim(project_dir))
     end subroutine test_fmt_check_files_limits_scope
 
     subroutine test_fmt_files_limits_scope()
@@ -808,7 +810,7 @@ contains
 
         call make_tmp_path('fo_fmt_selected_project', project_dir)
         src_dir = trim(project_dir)//'/src'
-        call execute_command_line('mkdir -p '//trim(src_dir), wait=.true.)
+        call fs_make_dir(trim(src_dir))
 
         open (newunit=u, file=trim(project_dir)//'/fpm.toml', status='replace')
         write (u, '(a)') 'name = "fmt_selected_project"'
@@ -849,7 +851,7 @@ contains
         call assert(index(output, 'unlisted.f90') > 0, &
             'full format check reports unlisted unformatted file')
 
-        call execute_command_line('rm -rf '//trim(project_dir), wait=.true.)
+        call fs_remove_tree(trim(project_dir))
     end subroutine test_fmt_files_limits_scope
 
     subroutine test_fmt_check_changed_uses_git_dirty_files()
@@ -859,7 +861,7 @@ contains
 
         call make_tmp_path('fo_fmt_git_project', project_dir)
         src_dir = trim(project_dir)//'/src'
-        call execute_command_line('mkdir -p '//trim(src_dir), wait=.true.)
+        call fs_make_dir(trim(src_dir))
 
         open (newunit=u, file=trim(project_dir)//'/fpm.toml', status='replace')
         write (u, '(a)') 'name = "fmt_git_project"'
@@ -883,16 +885,13 @@ contains
         write (u, '(a)') 'end module bad'
         close (u)
 
-        call execute_command_line('git -C '//trim(project_dir)// &
-            ' init >/dev/null', wait=.true.)
-        call execute_command_line('git -C '//trim(project_dir)// &
-            ' config user.email fo@example.invalid', wait=.true.)
-        call execute_command_line('git -C '//trim(project_dir)// &
-            ' config user.name fo-test', wait=.true.)
-        call execute_command_line('git -C '//trim(project_dir)// &
-            ' add fpm.toml src/good.f90 src/bad.f90', wait=.true.)
-        call execute_command_line('git -C '//trim(project_dir)// &
-            ' -c commit.gpgsign=false commit -m init >/dev/null', wait=.true.)
+        call git_in(project_dir, [character(len=64) :: 'init', '-q'])
+        call git_in(project_dir, [character(len=64) :: 'config', 'user.email', &
+            'fo@example.invalid'])
+        call git_in(project_dir, [character(len=64) :: 'config', 'user.name', 'fo-test'])
+        call git_in(project_dir, [character(len=64) :: 'add', 'fpm.toml', &
+            'src/good.f90', 'src/bad.f90'])
+        call git_in(project_dir, [character(len=64) :: 'commit', '-q', '-m', 'init'])
 
         open (newunit=u, file=trim(src_dir)//'/good.f90', status='replace')
         write (u, '(a)') 'module good'
@@ -916,7 +915,7 @@ contains
             output, exitcode)
         call assert(exitcode /= 0, 'full format check still sees baseline file')
 
-        call execute_command_line('rm -rf '//trim(project_dir), wait=.true.)
+        call fs_remove_tree(trim(project_dir))
     end subroutine test_fmt_check_changed_uses_git_dirty_files
 
     subroutine test_full_json_includes_capabilities()
@@ -959,8 +958,8 @@ contains
         character(len=*), intent(in) :: project_dir
         integer :: u
 
-        call execute_command_line('rm -rf '//trim(project_dir))
-        call execute_command_line('mkdir -p '//trim(project_dir)//'/src/nested')
+        call fs_remove_tree(trim(project_dir))
+        call fs_make_dir(trim(project_dir)//'/src/nested')
 
         open (newunit=u, file=trim(project_dir)//'/fpm.toml', status='replace')
         write (u, '(a)') 'name = "fo_bad_project"'
@@ -981,9 +980,9 @@ contains
         character(len=*), intent(in) :: project_dir
         integer :: u
 
-        call execute_command_line('rm -rf '//trim(project_dir))
-        call execute_command_line('mkdir -p '//trim(project_dir)//'/src')
-        call execute_command_line('mkdir -p '//trim(project_dir)//'/test')
+        call fs_remove_tree(trim(project_dir))
+        call fs_make_dir(trim(project_dir)//'/src')
+        call fs_make_dir(trim(project_dir)//'/test')
 
         open (newunit=u, file=trim(project_dir)//'/fpm.toml', status='replace')
         write (u, '(a)') 'name = "fo_failing_test_project"'
@@ -1013,8 +1012,8 @@ contains
         character(len=*), intent(in) :: project_dir
         integer :: u
 
-        call execute_command_line('rm -rf '//trim(project_dir))
-        call execute_command_line('mkdir -p '//trim(project_dir)//'/test')
+        call fs_remove_tree(trim(project_dir))
+        call fs_make_dir(trim(project_dir)//'/test')
 
         open (newunit=u, file=trim(project_dir)//'/fpm.toml', status='replace')
         write (u, '(a)') 'name = "fo_child_crash_test_project"'
@@ -1035,16 +1034,25 @@ contains
         call make_tmpfile(prefix, path)
     end subroutine make_tmp_path
 
+    subroutine git_in(dir, arguments)
+        character(len=*), intent(in) :: dir
+        character(len=*), intent(in) :: arguments(:)
+        integer :: status
+
+        call run_git(dir, arguments, status)
+        call assert(status == 0, 'git '//trim(arguments(1))//' in fixture')
+    end subroutine git_in
+
     subroutine make_dir(path)
         character(len=*), intent(in) :: path
 
-        call execute_command_line('mkdir -p '//trim(path))
+        call fs_make_dir(trim(path))
     end subroutine make_dir
 
     subroutine remove_dir(path)
         character(len=*), intent(in) :: path
 
-        call execute_command_line('rm -rf '//trim(path))
+        call fs_remove_tree(trim(path))
     end subroutine remove_dir
 
     subroutine test_compact_json_includes_test_results()
@@ -1100,7 +1108,7 @@ contains
 
         call make_tmp_path('fo_test_results_project', project_dir)
         src_dir = trim(project_dir)//'/src'
-        call execute_command_line('mkdir -p '//trim(src_dir), wait=.true.)
+        call fs_make_dir(trim(src_dir))
 
         toml = trim(project_dir)//'/fpm.toml'
         open (newunit=u, file=toml, status='replace')
@@ -1119,7 +1127,7 @@ contains
 
         call fo_check_run(trim(project_dir), res)
         call assert(res%build_ok, 'parse test project builds')
-        call execute_command_line('rm -rf '//trim(project_dir), wait=.true.)
+        call fs_remove_tree(trim(project_dir))
     end subroutine test_test_results_parse
 
     subroutine test_padded_ctest_results_parse()
@@ -1147,7 +1155,7 @@ contains
             .and. trim(entries(3)%status) == 'PASS' &
             .and. trim(entries(4)%status) == 'FAIL', &
             'CTest parser preserves statuses across id widths')
-        call execute_command_line('rm -f '//trim(log_file), wait=.true.)
+        call fs_remove_file(trim(log_file))
     end subroutine test_padded_ctest_results_parse
 
     subroutine test_results_beyond_initial_capacity()
@@ -1179,7 +1187,7 @@ contains
         call assert(n_fail == 1, 'a failure past the initial capacity survives')
         call assert(trim(entries(n)%name) == 'test_late_boom', &
             'the late failing test keeps its name')
-        call execute_command_line('rm -f '//trim(log_file), wait=.true.)
+        call fs_remove_file(trim(log_file))
     end subroutine test_results_beyond_initial_capacity
 
     subroutine test_failed_names_beyond_initial_capacity()
@@ -1235,29 +1243,16 @@ contains
             'native stdout preserves initial blank line and trailing spaces')
         call assert(index(output, 'test_ok') == 0, &
             'summary mode hides passing tests')
-        call execute_command_line('rm -f '//trim(log_file), wait=.true.)
+        call fs_remove_file(trim(log_file))
     end subroutine test_failure_stdout_shown
 
     integer function count_fmt_markers() result(n)
-        character(len=512) :: root, tmpfile, line
-        integer :: u, ios
+        character(len=512) :: root
+        character(len=512), allocatable :: markers(:)
 
-        n = 0
+        allocate (markers(4096))
         call cache_store_root(root)
-        call make_tmp_path('fo_fmt_marker_count', tmpfile)
-        call execute_command_line('find '//trim(root)// &
-            ' -name "*-fmt" -type f 2>/dev/null > '// &
-            trim(tmpfile), wait=.true.)
-        open (newunit=u, file=trim(tmpfile), status='old', iostat=ios)
-        if (ios == 0) then
-            do
-                read (u, '(a)', iostat=ios) line
-                if (ios /= 0) exit
-                if (len_trim(line) > 0) n = n + 1
-            end do
-            close (u)
-        end if
-        call execute_command_line('rm -f '//trim(tmpfile), wait=.true.)
+        call fs_collect_files(trim(root), '', '-fmt', '', markers, n)
     end function count_fmt_markers
 
 end program test_check

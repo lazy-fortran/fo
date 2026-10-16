@@ -10,6 +10,9 @@ program test_gremlin_state
     use fo_process, only: process_getpid, process_set_async_scope, argv_push, &
         process_start_argv_logged, process_poll_pid
     use fo_fs, only: fs_sleep_ms, fs_remove_tree, fs_make_dir, fs_write_text
+    use fo_fake_tool, only: fake_tool_dispatch, install_fake_tool
+    use fo_test_harness, only: run_list, argv, spawn_list, argv, set_mode
+    use fo_fs, only: fs_collect_files
     implicit none
 
     interface
@@ -70,6 +73,7 @@ program test_gremlin_state
     integer :: cmdstat
     character(len=1024) :: root
 
+    call fake_tool_dispatch()
     call get_command_argument(1, arg)
     select case (trim(arg))
     case ('--admission-child')
@@ -139,7 +143,7 @@ program test_gremlin_state
     call test_generation_pins(trim(executable))
     call test_bounded_generation_prune()
     call test_root(root)
-    call execute_command_line('rm -rf '//trim(root))
+    call fs_remove_tree(trim(root))
 
     write (output_unit, '(a,i0,a,i0,a)') 'gremlin state: ', n_pass, ' pass, ', &
         n_fail, ' fail'
@@ -206,9 +210,8 @@ contains
         write (u, '(a)') '-1'
         write (u, '(a)') 'stale-start'
         close (u)
-        command = '"'//trim(exe)//'" --acquire-once '//trim(lane_id)//' '// &
-            trim(root)//'/stale-live.result'
-        call execute_command_line(trim(command), exitstat=cmd_status)
+        call run_list(argv(trim(exe), '--acquire-once', trim(lane_id), &
+            trim(root)//'/stale-live.result'), cmd_status)
         call assert(cmd_status == 0, 'stale-record contender exits')
         call read_acquire_result(trim(root)//'/stale-live.result', contender_error, &
             contender_owner)
@@ -256,10 +259,9 @@ contains
 
         call test_root(root)
         lane_id = 'stale-'//trim(root(18:))
-        cmd = '"'//trim(exe)//'" --crash-session '//trim(lane_id)//' '// &
-            trim(root)//'/stale.result'
-        call execute_command_line(trim(cmd), exitstat=ierr, cmdstat=u)
-        call assert(u == 0 .and. ierr == 0, 'crashed-owner fixture exits cleanly')
+        call run_list(argv(trim(exe), '--crash-session', trim(lane_id), &
+            trim(root)//'/stale.result'), ierr)
+        call assert(ierr == 0, 'crashed-owner fixture exits cleanly')
         call read_single_line(trim(root)//'/stale.result', stale_id)
         call gremlin_session_state_dir('.', trim(lane_id), state_dir, ierr, message)
         call assert(ierr == 0, 'stale lane state is addressable')
@@ -305,12 +307,9 @@ contains
         resource = 'capacity-'//trim(root(18:))
         do i = 1, 4
             write (ready_path, '(a,a,i0)') trim(root), '/lease-', i
-            cmd = '"'//trim(exe)//'" --lease-child '//trim(resource)//' '// &
-                trim(ready_path)//'.ready '//trim(root)//'/lease.go '// &
-                trim(ready_path)//'.result '//trim(root)//'/lease.done '// &
-                '>/dev/null 2>&1 &'
-            call execute_command_line(trim(cmd), cmdstat=cmdstat)
-            call assert(cmdstat == 0, 'capacity worker starts')
+            call spawn_list(argv(trim(exe), '--lease-child', &
+                trim(resource), trim(ready_path)//'.ready', trim(root)//'/lease.go', &
+                trim(ready_path)//'.result', trim(root)//'/lease.done'))
         end do
         do i = 1, 4
             write (ready_path, '(a,a,i0)') trim(root), '/lease-', i
@@ -355,13 +354,9 @@ contains
         do i = 1, 3
             write (base, '(a,"/host-lease-",i0)') trim(root), i
             write (number, '(i0)') i
-            command = '"'//trim(exe)//'" --host-lease-child '// &
-                trim(resource)//' 1 '//trim(base)//'.ready '// &
-                trim(base)//'.result '//trim(root)//'/state-'//trim(number)//' '// &
-                trim(root)//'/xdg-'//trim(number)// &
-                ' >/dev/null 2>&1 &'
-            call execute_command_line(trim(command), cmdstat=cmd_status)
-            call assert(cmd_status == 0, 'host weighted contender starts')
+            call spawn_list(argv(trim(exe), '--host-lease-child', &
+                trim(resource), '1', trim(base)//'.ready', trim(base)//'.result', &
+                trim(root)//'/state-'//trim(number), trim(root)//'/xdg-'//trim(number)))
         end do
         successes = 0
         busy_count = 0
@@ -391,10 +386,9 @@ contains
 
         ! Weight two must be acquired atomically and exclude a weight-one owner.
         base = trim(root)//'/host-heavy'
-        command = '"'//trim(exe)//'" --host-lease-child '//trim(resource)// &
-            ' 2 '//trim(base)//'.ready '//trim(base)//'.result '// &
-            trim(root)//'/heavy-state '//trim(root)//'/heavy-xdg >/dev/null 2>&1 &'
-        call execute_command_line(trim(command), cmdstat=cmd_status)
+        call spawn_list(argv(trim(exe), '--host-lease-child', &
+            trim(resource), '2', trim(base)//'.ready', trim(base)//'.result', &
+            trim(root)//'/heavy-state', trim(root)//'/heavy-xdg'))
         call wait_file(trim(base)//'.ready', 500)
         call wait_file(trim(base)//'.result', 500)
         open (newunit=cmd_status, file=trim(base)//'.result', status='old')
@@ -403,10 +397,9 @@ contains
         call assert(ierr == 0 .and. count == 2 .and. busy == 0 .and. &
             slot1 /= slot2, 'weight-two admission atomically owns both slots')
         base = trim(root)//'/host-light'
-        command = '"'//trim(exe)//'" --host-lease-child '//trim(resource)// &
-            ' 1 '//trim(base)//'.ready '//trim(base)//'.result '// &
-            trim(root)//'/light-state '//trim(root)//'/light-xdg >/dev/null 2>&1 &'
-        call execute_command_line(trim(command), cmdstat=cmd_status)
+        call spawn_list(argv(trim(exe), '--host-lease-child', &
+            trim(resource), '1', trim(base)//'.ready', trim(base)//'.result', &
+            trim(root)//'/light-state', trim(root)//'/light-xdg'))
         call wait_file(trim(base)//'.ready', 500)
         call wait_file(trim(base)//'.result', 500)
         open (newunit=cmd_status, file=trim(base)//'.result', status='old')
@@ -415,8 +408,7 @@ contains
         call assert(ierr /= 0 .and. busy == 1, &
             'weight-two host lease excludes another contender without partial admission')
         call wait_file(trim(root)//'/host-heavy.result.released', 1500)
-        call execute_command_line('rm -rf '//trim(root)//'/host-lease-* '// &
-            trim(root)//'/host-heavy* '//trim(root)//'/host-light*')
+        call remove_host_fixture_files(trim(root))
 
         call get_environment_variable('FO_GREMLIN_STATE_DIR', previous_state, &
             status=env_status)
@@ -658,7 +650,7 @@ contains
         project = trim(root)//'/project'
         cache = trim(root)//'/cache'
         source = trim(project)//'/src/main.f90'
-        call execute_command_line('mkdir -p '//trim(project)//'/src')
+        call fs_make_dir(trim(project)//'/src')
         open (newunit=u, file=trim(source), status='replace')
         write (u, '(a)') 'program immutable_generation_fixture'
         write (u, '(a)') 'end program immutable_generation_fixture'
@@ -734,7 +726,7 @@ contains
         call gremlin_generation_lease_acquire_at(trim(generation%root), &
             lease, ierr, message)
         call assert(ierr /= 0, 'pruned generation no longer resolves from sidecar')
-        call execute_command_line('rm -rf '//trim(root))
+        call fs_remove_tree(trim(root))
     end subroutine test_generation_pins
 
     subroutine test_bounded_generation_prune()
@@ -747,12 +739,12 @@ contains
 
         call test_root(root)
         base = trim(root)//'/bounded-generations'
-        call execute_command_line('mkdir -p '//trim(base)//'/.locks')
+        call fs_make_dir(trim(base)//'/.locks')
         do i = 1, 9
             write (number, '(i0)') i
             snapshot = trim(base)//'/snapshot-'//trim(number)
-            call execute_command_line('mkdir -p '//trim(snapshot))
-            call execute_command_line('chmod 555 '//trim(snapshot))
+            call fs_make_dir(trim(snapshot))
+            call set_mode(trim(snapshot), int(o'555'))
             call gremlin_generation_register_lease_at(trim(snapshot), lease, &
                 ierr, message)
             call assert(ierr == 0, 'bounded fixture registers frozen generation')
@@ -812,12 +804,8 @@ contains
         character(len=2048) :: command
         integer :: cmd_status
 
-        command = '"'//trim(exe)//'" --generation-lease-child "'// &
-            trim(snapshot_root)//'" "'//trim(ready_file)//'" "'// &
-            trim(gate_file)//'" "'//trim(result_file)// &
-            '" >/dev/null 2>&1 &'
-        call execute_command_line(trim(command), cmdstat=cmd_status)
-        call assert(cmd_status == 0, 'generation lease worker starts')
+        call spawn_list(argv(trim(exe), '--generation-lease-child', &
+            trim(snapshot_root), trim(ready_file), trim(gate_file), trim(result_file)))
     end subroutine start_generation_lease_child
 
     logical function manifests_equal(first, second)
@@ -872,7 +860,7 @@ contains
         do i = 1, 1000
             call gremlin_session_stop_requested(session, requested, ierr, message)
             if (ierr == 0 .and. requested) exit
-            call execute_command_line('sleep 0.01')
+            call fs_sleep_ms(10)
         end do
         if (requested) call touch(seen_file)
         call gremlin_session_release(session, ierr, message)
@@ -976,7 +964,7 @@ contains
         close (unit)
         call touch(ready_file)
         if (ierr == 0) then
-            call execute_command_line('sleep 8')
+            call fs_sleep_ms(8000)
             call gremlin_host_lease_release(group, ierr, message)
         end if
         call touch(trim(result_file)//'.released')
@@ -1073,11 +1061,10 @@ contains
             if (mode == 'payload') then
                 packed = ''
                 n_args = 0
-                command = 'trap "" TERM; echo $$ > "'//trim(base)// &
-                    '.payload.pid"; while :; do sleep 0.1; done'
-                call argv_push(packed, n_args, '/bin/sh')
-                call argv_push(packed, n_args, '-c')
-                call argv_push(packed, n_args, trim(command))
+                call install_fake_tool(trim(base)//'.payload.tool', 'ignore-term'// &
+                    new_line('a')//'write '//trim(base)//'.payload.pid "$PID\n"'// &
+                    new_line('a')//'forever')
+                call argv_push(packed, n_args, trim(base)//'.payload.tool')
                 call process_start_argv_logged('.', packed, n_args, &
                     trim(base)//'.payload.log', child, ierr)
                 if (ierr /= 0) stop 1
@@ -1109,11 +1096,9 @@ contains
         character(len=2048) :: command
         integer :: cmd_status
 
-        command = '"'//trim(exe)//'" --session-child '//trim(lane_id)//' '// &
-            trim(ready_file)//' '//trim(gate_file)//' '//trim(result_file)//' '// &
-            trim(done_file)//' '//trim(seen_file)//' >/dev/null 2>&1 &'
-        call execute_command_line(trim(command), cmdstat=cmd_status)
-        call assert(cmd_status == 0, 'session worker starts')
+        call spawn_list(argv(trim(exe), '--session-child', trim(lane_id), &
+            trim(ready_file), trim(gate_file), trim(result_file), trim(done_file), &
+            trim(seen_file)))
     end subroutine start_session_child
 
     subroutine read_session_result(file, sid, owned, pid)
@@ -1201,7 +1186,7 @@ contains
         else
             root = temporary_root()//'/fo_gremlin_state_test_'//trim(suffix)
         end if
-        call execute_command_line('mkdir -p '//trim(root))
+        call fs_make_dir(trim(root))
     end subroutine test_root
 
 
@@ -1214,6 +1199,21 @@ contains
         close (u)
     end subroutine touch
 
+    subroutine remove_host_fixture_files(root)
+        character(len=*), intent(in) :: root
+        character(len=1024) :: items(64)
+        character(len=16), parameter :: prefixes(3) = &
+            [character(len=16) :: 'host-lease-', 'host-heavy', 'host-light']
+        integer :: n, i, k
+
+        do k = 1, size(prefixes)
+            call fs_collect_files(root, trim(prefixes(k)), '', '', items, n)
+            do i = 1, n
+                call fs_remove_tree(trim(items(i)))
+            end do
+        end do
+    end subroutine remove_host_fixture_files
+
     subroutine wait_file(file, attempts)
         character(len=*), intent(in) :: file
         integer, intent(in) :: attempts
@@ -1223,7 +1223,7 @@ contains
         do i = 1, attempts
             inquire (file=file, exist=exists)
             if (exists) return
-            call execute_command_line('sleep 0.01')
+            call fs_sleep_ms(10)
         end do
         inquire (file=file, exist=exists)
         call assert(exists, 'waited for file '//trim(file))

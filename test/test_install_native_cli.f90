@@ -6,7 +6,7 @@ program test_install_native_cli
     use fo_test_harness, only: assert_equal_integer, assert_equal_string
     use fo_test_harness, only: finish_assertions, assert_contains
     use fo_test_cli, only: resolve_driver, run_fo, run_external
-    use fo_fs, only: fs_realpath
+    use fo_fs, only: fs_realpath, fs_find_executable
     implicit none
 
     character(:), allocatable :: driver, scratch, project, cache, prefix
@@ -15,8 +15,6 @@ program test_install_native_cli
     type(string_list_t) :: args, environment, run_args
     type(process_result_t) :: result
     character(len=1), parameter :: nl = new_line('a')
-    type(string_list_t) :: probe_args
-    type(process_result_t) :: probe
     character(len=4096) :: physical_scratch
     logical :: scratch_resolved
 
@@ -146,17 +144,14 @@ contains
 
     function compiler_directory() result(directory)
         character(:), allocatable :: directory, path
+        character(len=4096) :: found_path
         integer :: slash
+        logical :: located
 
         directory = '/usr/bin'
-        call list_add(probe_args, '-c')
-        call list_add(probe_args, 'command -v gfortran')
-        call run_external('/bin/sh', probe_args, scratch, probe)
-        if (probe%exit_code /= 0) return
-        path = trim(probe%stdout)
-        if (len(path) > 0) then
-            if (path(len(path):) == new_line('a')) path = path(:len(path) - 1)
-        end if
+        call fs_find_executable('gfortran', found_path, located)
+        if (.not. located) return
+        path = trim(found_path)
         slash = index(path, '/', back=.true.)
         if (slash > 1) directory = path(:slash - 1)
     end function compiler_directory

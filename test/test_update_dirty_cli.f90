@@ -3,9 +3,11 @@ program test_update_dirty_cli
     use fo_util, only: temporary_root
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
     use fo_process, only: process_getpid, process_getcwd
+    use fo_fs, only: fs_make_dir, fs_remove_tree
+    use fo_test_harness, only: run_list, argv, run_git
     implicit none
 
-    character(len=1024) :: root, fo_bin, cwd, output, command
+    character(len=1024) :: root, fo_bin, cwd, output
     integer :: status, n_pass, n_fail
     logical :: exists_binary
 
@@ -24,7 +26,7 @@ program test_update_dirty_cli
     end if
 
     write (root, '(a,i0)') temporary_root()//'/fo_update_dirty_cli-', process_getpid()
-    call execute_command_line('rm -rf "'//trim(root)//'"', exitstat=status)
+    call fs_remove_tree(trim(root))
     call write_file(trim(root)//'/fpm.toml', &
         'name = "update_fixture"'//new_line('a')// &
         '[dependencies]'//new_line('a')// &
@@ -44,9 +46,8 @@ program test_update_dirty_cli
     call assert(file_has(trim(root)//'/build/dependencies/up/source.txt', 'edited'), &
         'tracked edit survives')
 
-    command = 'git -C "'//trim(root)// &
-        '/build/dependencies/up" restore source.txt'
-    call execute_command_line(trim(command), exitstat=status)
+    call run_git(trim(root)//'/build/dependencies/up', &
+        [character(len=16) :: 'restore', 'source.txt'], status)
     call assert(status == 0, 'restore tracked fixture edit')
     call write_file(trim(root)//'/build/dependencies/up/new.txt', 'untracked')
     call run_update(status, output)
@@ -60,14 +61,11 @@ program test_update_dirty_cli
     call assert(file_has(trim(root)//'/build/gfortran_AB12CD34EF56/up.mod', &
         'module'), 'compiled object survives refusal')
 
-    command = 'git -C "'//trim(root)// &
-        '/build/dependencies/up" add new.txt'
-    call execute_command_line(trim(command), exitstat=status)
+    call run_git(trim(root)//'/build/dependencies/up', &
+        [character(len=16) :: 'add', 'new.txt'], status)
     call assert(status == 0, 'stage fixture edits')
-    command = 'git -C "'//trim(root)// &
-        '/build/dependencies/up" -c user.name=Fixture '// &
-        '-c user.email=fixture@example.invalid commit -qm clean'
-    call execute_command_line(trim(command), exitstat=status)
+    call run_git(trim(root)//'/build/dependencies/up', &
+        [character(len=16) :: 'commit', '-qm', 'clean'], status)
     call assert(status == 0, 'commit fixture edits')
 
     call run_update(status, output)
@@ -84,7 +82,7 @@ program test_update_dirty_cli
         '/build/gfortran_AB12CD34EF56/up.mod'), &
         'compiled dependency profile invalidated')
 
-    call execute_command_line('rm -rf "'//trim(root)//'"', exitstat=status)
+    call fs_remove_tree(trim(root))
     write (output_unit, '(a,i0,a,i0,a)') 'update_dirty_cli: ', n_pass, &
         ' pass, ', n_fail, ' fail'
     if (n_fail > 0) stop 1
@@ -126,8 +124,7 @@ contains
         integer :: slash, file_unit, exitcode
 
         slash = index(trim(path), '/', back=.true.)
-        call execute_command_line('mkdir -p "'//path(:slash - 1)//'"', &
-            exitstat=exitcode)
+        call fs_make_dir(path(:slash - 1), exitcode)
         if (exitcode /= 0) stop 1
         open (newunit=file_unit, file=trim(path), status='replace')
         write (file_unit, '(a)') trim(content)
@@ -136,38 +133,31 @@ contains
 
     subroutine init_checkout(name)
         character(len=*), intent(in) :: name
-        character(len=1024) :: checkout, cmd
+        character(len=1024) :: checkout
         integer :: exitcode
 
         checkout = trim(root)//'/build/dependencies/'//trim(name)
         call write_file(trim(checkout)//'/source.txt', 'baseline')
-        cmd = 'git -C "'//trim(checkout)//'" init -q'
-        call execute_command_line(trim(cmd), exitstat=exitcode)
+        call run_git(trim(checkout), [character(len=16) :: 'init', '-q'], exitcode)
         if (exitcode /= 0) stop 1
-        cmd = 'git -C "'//trim(checkout)//'" add source.txt'
-        call execute_command_line(trim(cmd), exitstat=exitcode)
+        call run_git(trim(checkout), [character(len=16) :: 'add', 'source.txt'], exitcode)
         if (exitcode /= 0) stop 1
-        cmd = 'git -C "'//trim(checkout)//'" -c user.name=Fixture '// &
-            '-c user.email=fixture@example.invalid commit -qm baseline'
-        call execute_command_line(trim(cmd), exitstat=exitcode)
+        call run_git(trim(checkout), [character(len=16) :: 'commit', '-qm', 'baseline'], &
+            exitcode)
         if (exitcode /= 0) stop 1
     end subroutine init_checkout
 
     subroutine run_update(exitcode, result)
         integer, intent(out) :: exitcode
         character(len=*), intent(out) :: result
-        character(len=2048) :: cmd, log_path
-        integer :: log_unit, log_ios
+        character(:), allocatable :: log_text
+        integer :: first_line_end
 
-        log_path = trim(root)//'/update-output.txt'
-        cmd = 'cd "'//trim(root)//'" && "'//trim(fo_bin)// &
-            '" update >"'//trim(log_path)//'" 2>&1'
-        call execute_command_line(trim(cmd), exitstat=exitcode)
-        result = ''
-        open (newunit=log_unit, file=trim(log_path), status='old', iostat=log_ios)
-        if (log_ios /= 0) return
-        read (log_unit, '(a)', iostat=log_ios) result
-        close (log_unit)
+        call run_list(argv(trim(fo_bin), 'update'), exitcode, &
+            log_text, cwd=trim(root))
+        first_line_end = index(log_text, new_line('a'))
+        if (first_line_end == 0) first_line_end = len(log_text) + 1
+        result = log_text(:first_line_end - 1)
     end subroutine run_update
 
 end program test_update_dirty_cli

@@ -296,14 +296,41 @@ program test_gremlin_execution_view
     call fs_make_dir(trim(root)//'/bundle/project/test')
     call fs_write_text(trim(root)//'/bundle/project/test/test_app_execution_view.f90', &
         'program test_app_execution_view'//new_line('a')// &
-        '    integer :: command_status, exit_status, io_status, unit, value'//new_line('a')// &
-        '    logical :: exists'//new_line('a')// &
-        '    inquire(file="build/fo/app/candidate_build_probe", exist=exists)'// &
+        '    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_loc, c_null_char, '// &
+        'c_null_ptr, c_ptr'//new_line('a')// &
+        '    interface'//new_line('a')// &
+        '        function c_fork() bind(C, name="fork") result(pid)'//new_line('a')// &
+        '            import :: c_int'//new_line('a')//'            integer(c_int) :: pid'// &
+        new_line('a')//'        end function c_fork'//new_line('a')// &
+        '        function c_execv(path, argv) bind(C, name="execv") result(rc)'// &
+        new_line('a')//'            import :: c_char, c_int, c_ptr'//new_line('a')// &
+        '            character(kind=c_char), intent(in) :: path(*)'//new_line('a')// &
+        '            type(c_ptr), intent(in) :: argv(*)'//new_line('a')// &
+        '            integer(c_int) :: rc'//new_line('a')//'        end function c_execv'// &
+        new_line('a')//'        function c_waitpid(pid, status, options) bind(C, name="waitpid") '// &
+        'result(rc)'//new_line('a')//'            import :: c_int'//new_line('a')// &
+        '            integer(c_int), value :: pid, options'//new_line('a')// &
+        '            integer(c_int), intent(out) :: status'//new_line('a')// &
+        '            integer(c_int) :: rc'//new_line('a')//'        end function c_waitpid'// &
+        new_line('a')//'        subroutine c_exit(code) bind(C, name="_exit")'//new_line('a')// &
+        '            import :: c_int'//new_line('a')//'            integer(c_int), value :: code'// &
+        new_line('a')//'        end subroutine c_exit'//new_line('a')//'    end interface'// &
+        new_line('a')//'    character(kind=c_char, len=*), parameter :: app = '// &
+        '"build/fo/app/candidate_build_probe"//c_null_char'//new_line('a')// &
+        '    character(kind=c_char), target :: path(len(app))'//new_line('a')// &
+        '    type(c_ptr) :: argv(2)'//new_line('a')// &
+        '    integer(c_int) :: child, wait_status, rc'//new_line('a')// &
+        '    integer :: io_status, unit, value, i'//new_line('a')//'    logical :: exists'// &
+        new_line('a')//'    inquire(file="build/fo/app/candidate_build_probe", exist=exists)'// &
         new_line('a')//'    if (.not. exists) error stop 11'//new_line('a')// &
-        '    call execute_command_line("build/fo/app/candidate_build_probe", &'// &
-        new_line('a')//'        cmdstat=command_status, exitstat=exit_status)'// &
-        new_line('a')//'    if (command_status /= 0) error stop 12'//new_line('a')// &
-        '    if (exit_status /= 0) error stop 13'//new_line('a')// &
+        '    path = [(app(i:i), i = 1, len(app))]'//new_line('a')// &
+        '    argv(1) = c_loc(path)'//new_line('a')//'    argv(2) = c_null_ptr'//new_line('a')// &
+        '    child = c_fork()'//new_line('a')//'    if (child < 0) error stop 12'//new_line('a')// &
+        '    if (child == 0) then'//new_line('a')//'        rc = c_execv(path, argv)'// &
+        new_line('a')//'        call c_exit(127_c_int)'//new_line('a')//'    end if'//new_line('a')// &
+        '    rc = c_waitpid(child, wait_status, 0_c_int)'//new_line('a')// &
+        '    if (rc /= child) error stop 12'//new_line('a')// &
+        '    if (wait_status /= 0) error stop 13'//new_line('a')// &
         '    open(newunit=unit,file="app-output.txt",status="old",iostat=io_status)'// &
         new_line('a')//'    if (io_status /= 0) error stop 14'//new_line('a')// &
         '    read(unit,*,iostat=io_status) value'//new_line('a')// &

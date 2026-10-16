@@ -5,6 +5,7 @@ program test_compdb
         json_parse, json_member, json_element, json_size, json_string_value
     use fo_gfortran_build, only: gfortran_build
     use fo_process, only: process_getpid
+    use fo_fs, only: fs_make_dir, fs_remove_file, fs_remove_tree
     implicit none
 
     interface
@@ -53,7 +54,7 @@ contains
         call make_tmp_path('fo_compdb_project', project_dir)
         call make_tmp_path('fo_compdb_log', log_file)
         call make_tmp_path('fo_compdb_cache', cache_dir)
-        call execute_command_line('mkdir -p '//trim(cache_dir))
+        call fs_make_dir(trim(cache_dir))
         ierr = setenv('FO_CACHE_DIR'//c_null_char, trim(cache_dir)//c_null_char, 1_c_int)
         call make_compdb_project(project_dir)
         compdb = trim(project_dir)//'/build/compile_commands.json'
@@ -78,7 +79,7 @@ contains
         call assert(.not. valid_compdb(project_dir, suffix_mutant_compdb), &
             'compdb oracle rejects a source path with an extra suffix')
 
-        call execute_command_line('rm -f '//trim(compdb))
+        call fs_remove_file(trim(compdb))
         call gfortran_build(project_dir, log_file, exitcode, n_compiled=n_second)
         call assert(exitcode == 0, 'warm build succeeds')
         call assert(n_second == 0, 'warm build restores sources from cache')
@@ -86,10 +87,10 @@ contains
         call assert(exists, 'warm build rewrites compile_commands.json')
         call assert(valid_compdb(project_dir, compdb), 'warm compdb is complete')
 
-        call execute_command_line('rm -rf '//trim(project_dir))
-        call execute_command_line('rm -f '//trim(log_file))
+        call fs_remove_tree(trim(project_dir))
+        call fs_remove_file(trim(log_file))
         ierr = unsetenv('FO_CACHE_DIR'//c_null_char)
-        call execute_command_line('rm -rf '//trim(cache_dir))
+        call fs_remove_tree(trim(cache_dir))
     end subroutine test_gfortran_build_writes_compile_commands
 
     logical function valid_compdb(project_dir, compdb)
@@ -190,8 +191,8 @@ contains
         character(len=*), intent(in) :: project_dir
         integer :: u
 
-        call execute_command_line('mkdir -p '//trim(project_dir)//'/src '// &
-            trim(project_dir)//'/app')
+        call fs_make_dir(trim(project_dir)//'/src')
+        call fs_make_dir(trim(project_dir)//'/app')
         open (newunit=u, file=trim(project_dir)//'/fpm.toml', status='replace')
         write (u, '(a)') 'name = "compdb_project"'
         close (u)
@@ -222,7 +223,7 @@ contains
 
         pid = process_getpid()
         write (path, '("/tmp/",a,"_",i0)') trim(prefix), pid
-        call execute_command_line('rm -rf '//trim(path))
+        call fs_remove_tree(trim(path))
     end subroutine make_tmp_path
 
     subroutine report()

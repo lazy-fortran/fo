@@ -45,6 +45,7 @@ program test_stat_memo
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_long_long, c_null_char
     use fo_stat_memo, only: memo_hash_file, memo_save, memo_reset, &
         memo_hash_file_for_test
+    use fo_test_harness, only: copy_mtime
     use fx_hash, only: sha256_file
     use fo_process, only: process_getpid, process_getcwd, process_start_argv_logged, &
         process_poll_pid, process_cancel_pid, process_exit, argv_push
@@ -224,9 +225,9 @@ contains
     end subroutine test_recomputes_on_change
 
     subroutine test_recomputes_after_same_size_restored_mtime()
-        character(len=512) :: f, reference, command
+        character(len=512) :: f, reference
         character(len=64) :: h1, h2, direct
-        integer :: ierr, direct_ierr, status
+        integer :: ierr, direct_ierr
         integer(c_long_long) :: before_mtime, before_size, after_mtime, after_size
         logical :: stat_ok
 
@@ -236,13 +237,10 @@ contains
         call memo_hash_file(trim(f), h1, ierr)
         call assert(ierr == 0, 'hash before same-size restored-mtime edit')
 
-        command = 'touch -r '//trim(f)//' '//trim(reference)
-        call execute_command_line(trim(command), exitstat=status)
-        call assert(status == 0, 'capture original file mtime')
+        call write_text(trim(reference), 'reference')
+        call copy_mtime(trim(f), trim(reference))
         call write_text(trim(f), 'same length B')
-        command = 'touch -r '//trim(reference)//' '//trim(f)
-        call execute_command_line(trim(command), exitstat=status)
-        call assert(status == 0, 'restore original file mtime')
+        call copy_mtime(trim(reference), trim(f))
 
         call fs_stat(trim(f), before_mtime, before_size, stat_ok)
         call assert(stat_ok, 'stat restored-mtime file')

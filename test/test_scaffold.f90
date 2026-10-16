@@ -2,6 +2,9 @@ program test_scaffold
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
     use fo_scaffold, only: scaffold_project
     use fo_fs, only: fs_remove_tree
+    use fo_test_cli, only: resolve_driver
+    use fo_test_harness, only: run_list, argv
+    use fo_fs, only: fs_make_dir
     implicit none
     integer :: n_pass, n_fail
 
@@ -60,7 +63,7 @@ contains
         inquire (file=trim(tmpdir)//'/README.md', exist=exists)
         call assert(exists, 'README.md exists')
 
-        call execute_command_line('rm -rf '//trim(tmpdir), wait=.true.)
+        call fs_remove_tree(trim(tmpdir))
     end subroutine test_new_exe_project
 
     subroutine test_new_lib_project()
@@ -86,7 +89,7 @@ contains
         inquire (file=trim(tmpdir)//'/test/test_demo_lib.f90', exist=exists)
         call assert(exists, 'test file exists for lib')
 
-        call execute_command_line('rm -rf '//trim(tmpdir), wait=.true.)
+        call fs_remove_tree(trim(tmpdir))
     end subroutine test_new_lib_project
 
     subroutine test_new_path_with_shell_metacharacters()
@@ -111,6 +114,7 @@ contains
 
     subroutine test_scaffold_builds()
         character(len=512) :: tmpdir, name
+        character(:), allocatable :: driver
         integer :: ierr, exitcode
 
         call make_tmp_path('fo_scaffold_build', tmpdir)
@@ -120,11 +124,11 @@ contains
         call assert(ierr == 0, 'scaffold succeeds for build test')
 
         ! Test that the scaffolded project can build with fo check
-        call execute_command_line('cd '//trim(tmpdir)//' && fo check', &
-            wait=.true., exitstat=exitcode)
+        call resolve_driver(driver)
+        call run_list(argv(driver, 'check'), exitcode, cwd=trim(tmpdir))
         call assert(exitcode == 0, 'scaffolded project builds with fo check')
 
-        call execute_command_line('rm -rf '//trim(tmpdir), wait=.true.)
+        call fs_remove_tree(trim(tmpdir))
     end subroutine test_scaffold_builds
 
     subroutine make_tmp_path(prefix, path)
@@ -135,10 +139,9 @@ contains
         character(len=32) :: pid_str
 
         call system_clock(count)
-        call execute_command_line('echo $$', wait=.true.)
         write (pid_str, '(i0)') count
         write (path, '(a,a,a,a)') '/tmp/', trim(prefix), '-', trim(pid_str)
-        call execute_command_line('mkdir -p '//trim(path), wait=.true.)
+        call fs_make_dir(trim(path))
     end subroutine make_tmp_path
 
 end program test_scaffold

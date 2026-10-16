@@ -259,7 +259,17 @@ contains
         character(:), allocatable :: text
 
         text = 'program probe' // nl // &
+            '    use, intrinsic :: iso_c_binding, only: c_int' // nl // &
             '    implicit none' // nl // &
+            '    interface' // nl // &
+            '        function usleep(microseconds) bind(C, name="usleep") ' // &
+            'result(rc)' // nl // &
+            '            import :: c_int' // nl // &
+            '            integer(c_int), value :: microseconds' // nl // &
+            '            integer(c_int) :: rc' // nl // &
+            '        end function usleep' // nl // &
+            '    end interface' // nl // &
+            '    integer(c_int) :: ignored' // nl // &
             '    character(len=*), parameter :: version = "' // version // &
             '"' // nl // &
             '    integer :: attempt, unit_id' // nl // &
@@ -271,7 +281,7 @@ contains
             '    do attempt = 1, 1200' // nl // &
             '        inquire (file="release.marker", exist=released)' // nl // &
             '        if (released) exit' // nl // &
-            '        call execute_command_line("/bin/sleep 0.05")' // nl // &
+            '        ignored = usleep(50000_c_int)' // nl // &
             '    end do' // nl // &
             '    inquire (file="release.marker", exist=released)' // nl // &
             '    if (.not. released) error stop 3' // nl // &

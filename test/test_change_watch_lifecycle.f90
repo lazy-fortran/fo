@@ -4,17 +4,19 @@ program test_change_watch_lifecycle
     use fo_fs, only: fs_make_dir, fs_remove_tree, fs_write_text, fs_sleep_ms
     use fo_util, only: make_tmpfile
     use fo_test_json, only: json_value_t, json_parse, json_member, json_string_value
+    use fo_test_harness, only: string_list_t, list_add, add_words, run_list
     implicit none
 
     type(change_watch_t) :: watch
-    character(len=4096) :: scratch, fixture, executable, message, log_file
+    character(len=4096) :: scratch, fixture, executable, message
     character(len=65536) :: output
     character(len=32) :: platform
     character(len=128) :: session_id
-    character(len=:), allocatable :: prefix
+    character(len=:), allocatable :: uname_text
+    type(string_list_t) :: lifecycle_environment
     character(len=:), allocatable :: parse_message
     type(json_value_t) :: response_document
-    integer :: status, unit, ios, attempt
+    integer :: status, ios, attempt
     logical :: valid_json
 
     call get_environment_variable('FO', executable, status=ios)
@@ -22,17 +24,14 @@ program test_change_watch_lifecycle
         error stop 'FO must identify the exact worktree CLI under test'
     call make_tmpfile('fo-change-lifecycle', scratch)
     fixture = trim(scratch)//'/project'
-    log_file = trim(scratch)//'/public.log'
     call fs_make_dir(trim(fixture)//'/test')
     call fs_write_text(trim(fixture)//'/fpm.toml', 'name = "watch_lifecycle"')
     call fs_write_text(trim(fixture)//'/test/test_smoke.f90', &
         'program smoke'//new_line('a')//'implicit none'//new_line('a')// &
         'if (2 + 2 /= 4) error stop 1'//new_line('a')//'end program smoke')
-    call execute_command_line('uname -s > '//quote(trim(log_file)), exitstat=status)
+    call run_uname(uname_text, status)
     call require(status == 0, 'cannot identify lifecycle platform')
-    open (newunit=unit, file=trim(log_file), status='old')
-    read (unit, '(a)') platform
-    close (unit)
+    platform = uname_text(:max(0, index(uname_text, new_line('a')) - 1))
 
     call change_watch_init(watch, trim(fixture), status, message)
     call require(status == 0, 'lifecycle provider setup: '//trim(message))
@@ -40,9 +39,10 @@ program test_change_watch_lifecycle
     print '(a)', trim(platform)//' lifecycle: shared watcher initialization passed'
     ! One job keeps the fixture lane at host admission weight 1, like the other
     ! Gremlin fixtures, so it does not need every host work slot.
-    prefix = 'FO_JOBS=1 FO_DISABLE_SELF_REFRESH=1 FO_SELF_REFRESH=0 '// &
-        'FO_GREMLIN_STATE_DIR='// &
-        quote(trim(scratch)//'/state')//' '//quote(trim(executable))//' gremlin '
+    call list_add(lifecycle_environment, 'FO_JOBS=1')
+    call list_add(lifecycle_environment, 'FO_DISABLE_SELF_REFRESH=1')
+    call list_add(lifecycle_environment, 'FO_SELF_REFRESH=0')
+    call list_add(lifecycle_environment, 'FO_GREMLIN_STATE_DIR='//trim(scratch)//'/state')
     call cli('start --random 1 --campaign-seconds 2', status, output)
     print '(a,i0,2a)', 'public start exit=', status, ' ', trim(output)
     call require(status == 0, 'public start failed')
@@ -97,43 +97,34 @@ contains
         integer, intent(out) :: exitcode
         character(len=*), intent(out) :: text
         character(len=*), intent(in), optional :: lane
-        integer :: file_unit, read_status, launch_error, used
-        character(len=65536) :: line
+        type(string_list_t) :: command
+        character(len=:), allocatable :: out, err
         character(len=32) :: selected_lane
 
         selected_lane = 'watcher-174'
         if (present(lane)) selected_lane = lane
-        call execute_command_line(prefix//arguments//' --dir '//quote(trim(fixture))// &
-            ' --lane '//trim(selected_lane)//' > '//quote(trim(log_file))//' 2>&1', &
-            exitstat=exitcode, cmdstat=launch_error)
-        call require(launch_error == 0, 'cannot execute the worktree CLI')
-        text = ''
-        used = 0
-        open (newunit=file_unit, file=trim(log_file), status='old')
-        do
-            read (file_unit, '(a)', iostat=read_status) line
-            if (read_status /= 0) exit
-            if (used + len_trim(line) + 1 > len(text)) &
-                error stop 'lifecycle CLI output exceeded oracle capacity'
-            text(used + 1:used + len_trim(line)) = trim(line)
-            used = used + len_trim(line) + 1
-            text(used:used) = new_line('a')
-        end do
-        close (file_unit)
+        call list_add(command, trim(executable))
+        call list_add(command, 'gremlin')
+        call add_words(command, arguments)
+        call list_add(command, '--dir')
+        call list_add(command, trim(fixture))
+        call list_add(command, '--lane')
+        call list_add(command, trim(selected_lane))
+        call run_list(command, exitcode, out, err, environment=lifecycle_environment, &
+            timeout_ms=-1)
+        call require(exitcode >= 0, 'cannot execute the worktree CLI')
+        if (len(out) + len(err) > len(text)) &
+            error stop 'lifecycle CLI output exceeded oracle capacity'
+        text = out // err
     end subroutine cli
 
-    function quote(text) result(quoted)
-        character(len=*), intent(in) :: text
-        character(len=:), allocatable :: quoted
-        integer :: i
-        quoted = "'"
-        do i = 1, len_trim(text)
-            if (text(i:i) == "'") then
-                quoted = quoted//"'"//'"'//"'"//'"'//"'"
-            else
-                quoted = quoted//text(i:i)
-            end if
-        end do
-        quoted = quoted//"'"
-    end function quote
+    subroutine run_uname(text, status)
+        character(len=:), allocatable, intent(out) :: text
+        integer, intent(out) :: status
+        type(string_list_t) :: command
+
+        call list_add(command, 'uname')
+        call list_add(command, '-s')
+        call run_list(command, status, text)
+    end subroutine run_uname
 end program test_change_watch_lifecycle

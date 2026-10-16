@@ -7,6 +7,7 @@ program test_external_modules
     !! actually being installed, so the result is the same on any machine.
     use, intrinsic :: iso_fortran_env, only: output_unit
     use fo_external_modules, only: collect_external_module_dirs
+    use fo_fs, only: fs_make_dir, fs_remove_tree
     implicit none
 
     integer :: n_pass, n_fail
@@ -41,7 +42,7 @@ contains
         character(len=*), intent(in) :: dir, name
         integer :: u
 
-        call execute_command_line('mkdir -p '//dir, wait=.true.)
+        call fs_make_dir(dir)
         open (newunit=u, file=dir//'/'//name//'.mod', status='replace')
         write (u, '(a)') 'GFORTRAN module placeholder'
         close (u)
@@ -54,7 +55,6 @@ contains
         integer :: n_dirs
 
         call plant_module(dir, 'pretend_hdf5')
-        call execute_command_line('true', wait=.true.)
         call set_module_path(dir)
         names(1) = 'pretend_hdf5'
         n_dirs = 0
@@ -64,7 +64,7 @@ contains
             call assert(trim(dirs(1)) == dir, &
                 'declared module yields the planting directory')
         end if
-        call execute_command_line('rm -rf '//dir, wait=.true.)
+        call fs_remove_tree(dir)
     end subroutine test_declared_module_is_located
 
     subroutine test_undeclared_module_is_not_located()
@@ -73,13 +73,13 @@ contains
         character(len=512) :: dirs(4)
         integer :: n_dirs
 
-        call execute_command_line('mkdir -p '//dir, wait=.true.)
+        call fs_make_dir(dir)
         call set_module_path(dir)
         names(1) = 'module_that_is_not_installed'
         n_dirs = 0
         call collect_external_module_dirs(names, 1, dirs, n_dirs, 4)
         call assert(n_dirs == 0, 'module with no .mod anywhere yields nothing')
-        call execute_command_line('rm -rf '//dir, wait=.true.)
+        call fs_remove_tree(dir)
     end subroutine test_undeclared_module_is_not_located
 
     subroutine test_case_insensitive_module_name()
@@ -96,7 +96,7 @@ contains
         n_dirs = 0
         call collect_external_module_dirs(names, 1, dirs, n_dirs, 4)
         call assert(n_dirs == 1, 'mixed-case manifest name resolves')
-        call execute_command_line('rm -rf '//dir, wait=.true.)
+        call fs_remove_tree(dir)
     end subroutine test_case_insensitive_module_name
 
     subroutine test_duplicate_directories_collapse()
@@ -115,14 +115,12 @@ contains
         n_dirs = 0
         call collect_external_module_dirs(names, 2, dirs, n_dirs, 4)
         call assert(n_dirs == 1, 'two modules in one directory yield one -I')
-        call execute_command_line('rm -rf '//dir, wait=.true.)
+        call fs_remove_tree(dir)
     end subroutine test_duplicate_directories_collapse
 
     subroutine set_module_path(dir)
         character(len=*), intent(in) :: dir
-        integer :: status
 
-        call execute_command_line('true', wait=.true., exitstat=status)
         call putenv_module_path(dir)
     end subroutine set_module_path
 

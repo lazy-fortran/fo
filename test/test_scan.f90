@@ -8,6 +8,7 @@ program test_scan
     use fo_test_harness, only: write_text, remove_path, current_directory
     use fo_test_harness, only: finish_assertions
     use fo_test_cli, only: resolve_driver, run_fo
+    use fo_fs, only: fs_make_dir, fs_remove_file, fs_remove_tree
     implicit none
 
     interface
@@ -108,7 +109,7 @@ contains
         call assert(ierr == 0, 'scan_module_only: no error')
         call assert(.not. info%has_other_units, &
             'scan_module_only: contained procedures are not other units')
-        call execute_command_line('rm -f '//trim(path))
+        call fs_remove_file(trim(path))
     end subroutine test_scan_mixed_units
 
     subroutine test_scan_use_statements()
@@ -131,7 +132,7 @@ contains
         call assert(info%n_deps == 2, 'scan_use: 2 deps')
         call assert(trim(info%deps(1)) == 'bar', 'scan_use: dep 1 is bar')
         call assert(trim(info%deps(2)) == 'baz', 'scan_use: dep 2 is baz')
-        call execute_command_line('rm -f '//trim(path))
+        call fs_remove_file(trim(path))
     end subroutine test_scan_use_statements
 
     subroutine test_scan_ast_and_regex_dag()
@@ -172,7 +173,7 @@ contains
         call assert(all(regex_info%deps(1:ast_info%n_deps) == &
             ast_info%deps(1:ast_info%n_deps)), &
             'scan_compare: dependency DAG agrees')
-        call execute_command_line('rm -f '//trim(path))
+        call fs_remove_file(trim(path))
     end subroutine test_scan_ast_and_regex_dag
 
     subroutine test_scan_ast_submodule_spans()
@@ -211,7 +212,7 @@ contains
         call assert(regex_info%n_deps == ast_info%n_deps .and. &
             all(regex_info%deps(1:3) == ast_info%deps(1:3)), &
             'scan_submodule_compare: dependency DAG agrees')
-        call execute_command_line('rm -f '//trim(path))
+        call fs_remove_file(trim(path))
     end subroutine test_scan_ast_submodule_spans
 
     subroutine test_scan_parse_diagnostic_and_fallback()
@@ -238,7 +239,7 @@ contains
         call assert(trim(info%module_name) == 'broken_scan' .and. &
             trim(info%deps(1)) == 'broken_dep', &
             'scan_failure: fallback preserves bootstrap DAG')
-        call execute_command_line('rm -f '//trim(path))
+        call fs_remove_file(trim(path))
     end subroutine test_scan_parse_diagnostic_and_fallback
 
     subroutine test_scan_module_def()
@@ -258,7 +259,7 @@ contains
         call assert(trim(info%module_name) == 'my_module', 'scan_mod: name')
         call assert(info%n_deps == 0, 'scan_mod: no deps')
         call assert(.not. info%is_program, 'scan_mod: not a program')
-        call execute_command_line('rm -f '//trim(path))
+        call fs_remove_file(trim(path))
     end subroutine test_scan_module_def
 
     subroutine test_scan_module_name_containing_procedure()
@@ -277,7 +278,7 @@ contains
         call assert(ierr == 0, 'scan_proc_name: no error')
         call assert(trim(info%module_name) == 'ast_nodes_procedure', &
             'scan_proc_name: module name')
-        call execute_command_line('rm -f '//trim(path))
+        call fs_remove_file(trim(path))
 
         lines(1) = 'module procedure_classification'
         lines(2) = '    implicit none'
@@ -289,7 +290,7 @@ contains
         call assert(ierr == 0, 'scan_proc_prefix: no error')
         call assert(trim(info%module_name) == 'procedure_classification', &
             'scan_proc_prefix: module name')
-        call execute_command_line('rm -f '//trim(path))
+        call fs_remove_file(trim(path))
     end subroutine test_scan_module_name_containing_procedure
 
     subroutine test_scan_submodule_def()
@@ -311,7 +312,7 @@ contains
         call assert(info%n_deps == 1, 'scan_submodule: one parent dependency')
         call assert(trim(info%deps(1)) == 'semantic_analyzer', &
             'scan_submodule: parent dependency')
-        call execute_command_line('rm -f '//trim(path))
+        call fs_remove_file(trim(path))
     end subroutine test_scan_submodule_def
 
     subroutine test_scan_external_subroutine_def()
@@ -330,7 +331,7 @@ contains
         call assert(ierr == 0, 'scan_external_subroutine: no error')
         call assert(trim(info%module_name) == 'ensure_if_do_registration_bridge', &
             'scan_external_subroutine: procedure name')
-        call execute_command_line('rm -f '//trim(path))
+        call fs_remove_file(trim(path))
     end subroutine test_scan_external_subroutine_def
 
     subroutine test_scan_external_after_internal_with_unit_expression()
@@ -360,7 +361,7 @@ contains
             'scan_potato_style: AST scanner accepts valid source')
         call assert(trim(info%module_name) == 'potato_style', &
             'scan_potato_style: host remains the primary external unit')
-        call execute_command_line('rm -f '//trim(path))
+        call fs_remove_file(trim(path))
     end subroutine test_scan_external_after_internal_with_unit_expression
 
     subroutine test_scan_contained_subroutine_keeps_program()
@@ -384,7 +385,7 @@ contains
             'scan_contained_subroutine: program name')
         call assert(len_trim(info%module_name) == 0, &
             'scan_contained_subroutine: no external unit')
-        call execute_command_line('rm -f '//trim(path))
+        call fs_remove_file(trim(path))
     end subroutine test_scan_contained_subroutine_keeps_program
 
     subroutine test_scan_program_def()
@@ -406,7 +407,7 @@ contains
         call assert(info%is_program, 'scan_prog: is program')
         call assert(info%n_deps == 1, 'scan_prog: 1 dep')
         call assert(trim(info%deps(1)) == 'utils', 'scan_prog: dep is utils')
-        call execute_command_line('rm -f '//trim(path))
+        call fs_remove_file(trim(path))
     end subroutine test_scan_program_def
 
     subroutine test_scan_intrinsic_skip()
@@ -427,7 +428,7 @@ contains
         call assert(ierr == 0, 'scan_intrinsic: no error')
         call assert(info%n_deps == 1, 'scan_intrinsic: 1 dep (intrinsic skipped)')
         call assert(trim(info%deps(1)) == 'my_lib', 'scan_intrinsic: dep is my_lib')
-        call execute_command_line('rm -f '//trim(path))
+        call fs_remove_file(trim(path))
     end subroutine test_scan_intrinsic_skip
 
     subroutine test_slow_test_detection()
@@ -460,14 +461,14 @@ contains
         character(len=512) :: dir
 
         call make_tmp_path('fo_test_empty_dir', dir, '')
-        call execute_command_line('rm -rf '//trim(dir))
-        call execute_command_line('mkdir -p '//trim(dir))
+        call fs_remove_tree(trim(dir))
+        call fs_make_dir(trim(dir))
 
         call scan_dir(dir, units, n_units, ierr)
         call assert(ierr == 0, 'empty_dir: no error')
         call assert(n_units == 0, 'empty_dir: 0 files')
 
-        call execute_command_line('rm -rf '//trim(dir))
+        call fs_remove_tree(trim(dir))
     end subroutine test_scan_dir_empty
 
     subroutine test_source_discovery_directory_cycle()
@@ -958,13 +959,13 @@ contains
     subroutine make_dir(path)
         character(len=*), intent(in) :: path
 
-        call execute_command_line('mkdir -p "'//trim(path)//'"')
+        call fs_make_dir(trim(path))
     end subroutine make_dir
 
     subroutine remove_tree(path)
         character(len=*), intent(in) :: path
 
-        call execute_command_line('rm -rf "'//trim(path)//'"')
+        call fs_remove_tree(trim(path))
     end subroutine remove_tree
 
 end program test_scan

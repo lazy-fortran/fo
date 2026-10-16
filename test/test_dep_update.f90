@@ -10,6 +10,7 @@ program test_dep_update
     use fo_dep_update, only: dep_update_run, dep_update_missing_sources, &
         MAX_UPDATE_NAMES
     use fo_process, only: process_getpid
+    use fo_fs, only: fs_make_dir, fs_remove_tree
     implicit none
     integer :: n_pass, n_fail
 
@@ -122,7 +123,7 @@ contains
         character(len=*), intent(in) :: dir, deps_block
         integer :: u
 
-        call execute_command_line('mkdir -p '//trim(dir))
+        call fs_make_dir(trim(dir))
         open (newunit=u, file=trim(dir)//'/fpm.toml', status='replace')
         write (u, '(a)') 'name = "p"'
         if (len_trim(deps_block) > 0) write (u, '(a)') trim(deps_block)
@@ -134,7 +135,7 @@ contains
         integer :: u, cut
 
         cut = index(trim(path), '/', back=.true.)
-        call execute_command_line('mkdir -p '//trim(path(:cut - 1)))
+        call fs_make_dir(trim(path(:cut - 1)))
         open (newunit=u, file=trim(path), status='replace')
         write (u, '(a)') 'x'
         close (u)
@@ -149,7 +150,7 @@ contains
     subroutine remove_tree(path)
         character(len=*), intent(in) :: path
 
-        call execute_command_line('rm -rf '//trim(path))
+        call fs_remove_tree(trim(path))
     end subroutine remove_tree
 
     subroutine make_tmp(prefix, path)

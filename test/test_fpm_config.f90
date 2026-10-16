@@ -4,7 +4,8 @@ program test_fpm_config
         fpm_config_allocate, &
         manifest_test_args, manifest_test_name
     use fo_util, only: make_tmpfile, temporary_root
-    use fo_test_harness, only: make_scratch, write_text, remove_tree
+    use fo_test_harness, only: make_scratch, write_text, remove_tree, run_list, argv
+    use fo_fs, only: fs_make_dir, fs_remove_tree
     implicit none
 
     integer :: n_pass, n_fail
@@ -117,8 +118,7 @@ contains
         integer :: ierr, u, ios, status
 
         call make_tmpfile('fo-fpm-config-reparse', dir)
-        call execute_command_line('mkdir "'//trim(dir)//'"', &
-            exitstat=status)
+        call fs_make_dir(trim(dir), status)
         if (status /= 0) then
             call assert(.false., 'reparse: fixture directory created')
             return
@@ -127,7 +127,7 @@ contains
             iostat=ios)
         if (ios /= 0) then
             call assert(.false., 'reparse: nondefault manifest created')
-            call execute_command_line('rmdir "'//trim(dir)//'"')
+            call fs_remove_tree(trim(dir), status)
             return
         end if
         write (u, '(a)') 'name = "reused-config"'
@@ -169,7 +169,7 @@ contains
             iostat=ios)
         if (ios /= 0) then
             call assert(.false., 'reparse: minimal manifest opened')
-            call execute_command_line('rm -rf "'//trim(dir)//'"')
+            call fs_remove_tree(trim(dir))
             return
         end if
         write (u, '(a)') 'name = "fresh-config"'
@@ -190,7 +190,7 @@ contains
             'reparse: dependency revision deallocated')
         call assert(.not. allocated(c%test_arg_sets(1)%args), &
             'reparse: test args deallocated')
-        call execute_command_line('rm -rf "'//trim(dir)//'"')
+        call fs_remove_tree(trim(dir))
     end subroutine test_reparse_resets_defaults
 
     subroutine test_parse_missing_file()
@@ -247,8 +247,7 @@ contains
             call system_clock(clock_count)
             write (suffix, '(i0,a,i0)') clock_count, '_', attempt
             dir = temporary_root()//'/fo_test_many_inputs_'//trim(suffix)
-            call execute_command_line('mkdir '//dir//' 2>/dev/null', &
-                wait=.true., exitstat=exitstat)
+            call fs_make_dir(trim(dir), exitstat)
             if (exitstat == 0) then
                 created = .true.
                 exit
@@ -261,7 +260,7 @@ contains
         open (newunit=u, file=dir//'/fpm.toml', status='replace', iostat=ios)
         if (ios /= 0) then
             call assert(.false., 'many_fo_inputs: cannot write fpm.toml')
-            call execute_command_line('rm -rf '//dir, wait=.true.)
+            call fs_remove_tree(dir)
             return
         end if
         write (u, '(a)') 'name = "many-fo-inputs"'
@@ -280,7 +279,7 @@ contains
             call assert(trim(c%fo_inputs(input_count)%path) == &
                 'input-152.dat', 'many_fo_inputs: last declaration retained')
         end if
-        call execute_command_line('rm -rf '//dir, wait=.true.)
+        call fs_remove_tree(dir)
     end subroutine test_many_fo_inputs
 
     subroutine test_dotted_dependency_keys()
@@ -288,7 +287,7 @@ contains
         integer :: ierr, u, ios
         character(len=*), parameter :: dir = '/tmp/fo_test_dotted_deps'
 
-        call execute_command_line('mkdir -p '//dir, wait=.true.)
+        call fs_make_dir(dir)
         open (newunit=u, file=dir//'/fpm.toml', status='replace', iostat=ios)
         if (ios /= 0) then
             call assert(.false., 'dotted_dependency_keys: cannot write fpm.toml')
@@ -325,7 +324,7 @@ contains
             call assert(trim(c%deps(3)%rev) == 'fedcba9876543210', &
                 'dotted_dependency_keys: inline revision')
         end if
-        call execute_command_line('rm -rf '//dir, wait=.true.)
+        call fs_remove_tree(dir)
     end subroutine test_dotted_dependency_keys
 
     subroutine test_manifest_capacity_errors()
@@ -338,7 +337,7 @@ contains
 
         call fpm_config_allocate(config)
         call make_tmpfile('fo-manifest-capacity', dir)
-        call execute_command_line('mkdir "'//trim(dir)//'"', exitstat=status)
+        call fs_make_dir(trim(dir), status)
         call assert(status == 0, 'manifest capacity fixture created')
         if (status /= 0) return
         do kind = 1, 3
@@ -432,7 +431,7 @@ contains
                     'fixture input error identifies the unsupported declaration')
             end if
         end do
-        call execute_command_line('rm -rf "'//trim(dir)//'"', exitstat=status)
+        call fs_remove_tree(trim(dir), status)
         call assert(status == 0, 'manifest capacity fixture removed')
     end subroutine test_manifest_capacity_errors
 
@@ -442,7 +441,7 @@ contains
         integer :: ierr, u, ios, status
 
         call make_tmpfile('fo-registry-fields', dir)
-        call execute_command_line('mkdir '//trim(dir), exitstat=status)
+        call fs_make_dir(trim(dir), status)
         call assert(status == 0, 'registry_fields: fixture directory created')
         if (status /= 0) return
 
@@ -521,7 +520,7 @@ contains
 
         open (newunit=u, file=trim(dir)//'/fpm.toml', status='old', iostat=ios)
         if (ios == 0) close (u, status='delete')
-        call execute_command_line('rmdir '//trim(dir), exitstat=status)
+        call fs_remove_tree(trim(dir), status)
         call assert(status == 0, 'registry_fields: fixture cleaned')
     end subroutine test_registry_dependency_fields
 
@@ -545,7 +544,7 @@ contains
         integer :: i, u, ios, status
 
         call make_tmpfile('fo-dep-source-conflicts', dir)
-        call execute_command_line('mkdir '//trim(dir), exitstat=status)
+        call fs_make_dir(trim(dir), status)
         if (status /= 0) then
             call assert(.false., 'dependency conflict fixture directory created')
             return
@@ -574,7 +573,7 @@ contains
         end do
         open (newunit=u, file=trim(dir)//'/fpm.toml', status='old', iostat=ios)
         if (ios == 0) close (u, status='delete')
-        call execute_command_line('rmdir '//trim(dir), exitstat=status)
+        call fs_remove_tree(trim(dir), status)
         call assert(status == 0, 'dependency conflict fixture cleaned')
     end subroutine test_dependency_source_conflicts
 
@@ -589,7 +588,7 @@ contains
             'mkl-dynamic-lp64-tbb', 'openblas', 'blas', 'flexiblas' ]
         character(len=*), parameter :: dir = '/tmp/fo_test_blas_meta'
 
-        call execute_command_line('mkdir -p '//dir, wait=.true.)
+        call fs_make_dir(dir)
         open (newunit=u, file=dir//'/fpm.toml', status='replace', iostat=ios)
         if (ios /= 0) then
             call assert(.false., 'blas_metapackage: cannot write fpm.toml')
@@ -601,8 +600,8 @@ contains
 
         provider_available = .false.
         do i = 1, size(candidates)
-            call execute_command_line('pkg-config --exists '//trim(candidates(i))// &
-                ' >/dev/null 2>&1', wait=.true., exitstat=exitstat)
+            call run_list(argv('pkg-config', '--exists', &
+                trim(candidates(i))), exitstat)
             if (exitstat == 0) provider_available = .true.
         end do
 
@@ -614,7 +613,7 @@ contains
             call assert(c%n_link_libs > 0 .or. c%n_flags > 0, &
                 'blas_metapackage: provider flags are imported')
         end if
-        call execute_command_line('rm -rf '//dir, wait=.true.)
+        call fs_remove_tree(dir)
     end subroutine test_blas_metapackage
 
     subroutine test_source_metapackages()
@@ -626,7 +625,7 @@ contains
         integer :: ierr, u, ios
         character(len=*), parameter :: dir = '/tmp/fo_test_source_meta'
 
-        call execute_command_line('mkdir -p '//dir, wait=.true.)
+        call fs_make_dir(dir)
         open (newunit=u, file=dir//'/fpm.toml', status='replace', iostat=ios)
         if (ios /= 0) then
             call assert(.false., 'source_metapackages: cannot write fpm.toml')
@@ -648,7 +647,7 @@ contains
             'source_metapackages: minpack source dependency is added')
         call assert(has_dev_dependency(c, 'test-drive'), &
             'source_metapackages: test-drive dev dependency is added')
-        call execute_command_line('rm -rf '//dir, wait=.true.)
+        call fs_remove_tree(dir)
     end subroutine test_source_metapackages
 
     subroutine test_system_metapackages()
@@ -656,11 +655,11 @@ contains
         !! independent oracle asks the provider tools whether each package is
         !! available, then checks that fo agrees and imports usable metadata.
         type(fpm_config_t) :: c
-        integer :: ierr, u, ios, exitstat, cmdstat
+        integer :: ierr, u, ios, exitstat
         logical :: available
         character(len=*), parameter :: dir = '/tmp/fo_test_system_meta'
 
-        call execute_command_line('mkdir -p '//dir, wait=.true.)
+        call fs_make_dir(dir)
         open (newunit=u, file=dir//'/fpm.toml', status='replace', iostat=ios)
         if (ios /= 0) then
             call assert(.false., 'system_metapackages: cannot write fpm.toml')
@@ -674,18 +673,14 @@ contains
         close (u)
 
         available = .true.
-        call execute_command_line('pkg-config --exists hdf5 >/dev/null 2>&1', &
-            wait=.true., exitstat=exitstat)
+        call run_list(argv('pkg-config', '--exists', 'hdf5'), exitstat)
         available = available .and. exitstat == 0
-        call execute_command_line('pkg-config --exists netcdf >/dev/null 2>&1', &
-            wait=.true., exitstat=exitstat)
+        call run_list(argv('pkg-config', '--exists', 'netcdf'), exitstat)
         available = available .and. exitstat == 0
-        call execute_command_line('pkg-config --exists netcdf-fortran >/dev/null 2>&1', &
-            wait=.true., exitstat=exitstat)
+        call run_list(argv('pkg-config', '--exists', 'netcdf-fortran'), exitstat)
         available = available .and. exitstat == 0
-        call execute_command_line('mpifort --version >/dev/null 2>&1', &
-            wait=.true., exitstat=exitstat, cmdstat=cmdstat)
-        available = available .and. cmdstat == 0 .and. exitstat == 0
+        call run_list(argv('mpifort', '--version'), exitstat)
+        available = available .and. exitstat == 0
 
         call fpm_config_parse(dir, c, ierr)
         call assert((ierr == 0) .eqv. available, &
@@ -698,7 +693,7 @@ contains
             call assert(c%n_external_modules > 0, &
                 'system_metapackages: external modules are recorded')
         end if
-        call execute_command_line('rm -rf '//dir, wait=.true.)
+        call fs_remove_tree(dir)
     end subroutine test_system_metapackages
 
     logical function has_dependency(c, name)
@@ -738,7 +733,7 @@ contains
         character(len=512) :: toml_path
 
         dir = '/tmp/fo_test_flags_eq'
-        call execute_command_line('mkdir -p '//trim(dir), wait=.true.)
+        call fs_make_dir(trim(dir))
         toml_path = trim(dir)//'/fpm.toml'
         open (newunit=u, file=trim(toml_path), status='replace', iostat=ios)
         if (ios /= 0) then
@@ -760,7 +755,7 @@ contains
         if (c%n_flags >= 2) &
             call assert(trim(c%flags(2)) == '-fsanitize=address', &
             'flags_with_equals_inline: second flag = -fsanitize=address')
-        call execute_command_line('rm -rf '//trim(dir), wait=.true.)
+        call fs_remove_tree(trim(dir))
     end subroutine test_flags_with_equals_inline
 
     subroutine test_flags_multiline_array()
@@ -772,7 +767,7 @@ contains
         character(len=512) :: toml_path
 
         dir = '/tmp/fo_test_flags_ml'
-        call execute_command_line('mkdir -p '//trim(dir), wait=.true.)
+        call fs_make_dir(trim(dir))
         toml_path = trim(dir)//'/fpm.toml'
         open (newunit=u, file=trim(toml_path), status='replace', iostat=ios)
         if (ios /= 0) then
@@ -800,7 +795,7 @@ contains
         if (c%n_flags >= 3) &
             call assert(trim(c%flags(3)) == '-fsanitize=address', &
             'flags_multiline_array: third flag = -fsanitize=address')
-        call execute_command_line('rm -rf '//trim(dir), wait=.true.)
+        call fs_remove_tree(trim(dir))
     end subroutine test_flags_multiline_array
 
     subroutine test_preprocess_macros()
@@ -808,7 +803,7 @@ contains
         integer :: ierr, u
         character(len=*), parameter :: dir = '/tmp/fo_test_preprocess_macros'
 
-        call execute_command_line('mkdir -p '//dir, wait=.true.)
+        call fs_make_dir(dir)
         open (newunit=u, file=dir//'/fpm.toml', status='replace')
         write (u, '(a)') 'name = "preprocess-macros"'
         write (u, '(a)') '[preprocess]'
@@ -826,7 +821,7 @@ contains
             call assert(trim(c%flags(3)) == '-DWITH_FEATURE', &
                 'preprocess_macros: flag definition preserved')
         end if
-        call execute_command_line('rm -rf '//dir, wait=.true.)
+        call fs_remove_tree(dir)
     end subroutine test_preprocess_macros
 
     subroutine test_per_test_arguments()
@@ -835,7 +830,7 @@ contains
         character(len=4096) :: args
         character(len=*), parameter :: dir = '/tmp/fo_test_per_test_arguments'
 
-        call execute_command_line('mkdir -p '//dir, wait=.true.)
+        call fs_make_dir(dir)
         open (newunit=u, file=dir//'/fpm.toml', status='replace')
         write (u, '(a)') 'name = "per-test-arguments"'
         write (u, '(a)') '[extra.fo.test-args]'
@@ -848,7 +843,7 @@ contains
         call assert(c%n_test_arg_sets == 1, 'per_test_arguments: one test mapping')
         call assert(trim(args) == 'data/reference.csv'//new_line('a')//'two words', &
             'per_test_arguments: argument boundaries are retained')
-        call execute_command_line('rm -rf '//dir, wait=.true.)
+        call fs_remove_tree(dir)
     end subroutine test_per_test_arguments
 
     subroutine test_long_test_name_and_overlong_line()
@@ -858,7 +853,7 @@ contains
         integer :: ierr, unit, status
 
         call make_tmpfile('fo-fpm-long-test-name', dir)
-        call execute_command_line('mkdir '//trim(dir), exitstat=status)
+        call fs_make_dir(trim(dir), status)
         call assert(status == 0, 'long test name: fixture directory created')
         long_name = 'check_'//repeat('n', 700)
         open (newunit=unit, file=trim(dir)//'/fpm.toml', status='replace')
@@ -877,7 +872,7 @@ contains
         close (unit)
         call fpm_config_parse(dir, config, ierr)
         call assert(ierr /= 0, 'long test name: rejects a line beyond parser bound')
-        call execute_command_line('rm -rf '//trim(dir), wait=.true.)
+        call fs_remove_tree(trim(dir))
     end subroutine test_long_test_name_and_overlong_line
 
     subroutine test_external_modules_array()
@@ -887,7 +882,7 @@ contains
         integer :: ierr, u
         character(len=*), parameter :: dir = '/tmp/fo_test_external_modules'
 
-        call execute_command_line('mkdir -p '//dir, wait=.true.)
+        call fs_make_dir(dir)
         open (newunit=u, file=dir//'/fpm.toml', status='replace')
         write (u, '(a)') 'name = "external-modules"'
         write (u, '(a)') '[build]'
@@ -907,7 +902,7 @@ contains
             call assert(trim(c%external_modules(3)) == 'omp_lib', &
                 'external_modules: last entry')
         end if
-        call execute_command_line('rm -rf '//dir, wait=.true.)
+        call fs_remove_tree(dir)
     end subroutine test_external_modules_array
 
     subroutine test_implicit_typing_allowed()
@@ -919,7 +914,7 @@ contains
         integer :: ierr, u
         character(len=*), parameter :: dir = '/tmp/fo_test_implicit_typing'
 
-        call execute_command_line('mkdir -p '//dir, wait=.true.)
+        call fs_make_dir(dir)
         open (newunit=u, file=dir//'/fpm.toml', status='replace')
         write (u, '(a)') 'name = "implicit-typing"'
         write (u, '(a)') '[fortran]'
@@ -939,7 +934,7 @@ contains
         call fpm_config_parse(dir, c, ierr)
         call assert(.not. c%implicit_typing, &
             'implicit_typing: false leaves the strict default in place')
-        call execute_command_line('rm -rf '//dir, wait=.true.)
+        call fs_remove_tree(dir)
     end subroutine test_implicit_typing_allowed
 
 end program test_fpm_config

@@ -1,12 +1,14 @@
 program test_gremlin_state_portability
     use, intrinsic :: iso_fortran_env, only: output_unit
     use fo_process, only: process_getpid
+    use fo_fs, only: fs_make_dir, fs_remove_tree
+    use fo_test_harness, only: run_list, argv, write_text, string_list_t, list_add, add_words
     implicit none
 
     integer :: checks, failures, command_status, exit_status, io_status, unit
     character(len=2048) :: work_dir, os_file, actual_log, old_log, fixed_log, tmp_root
     character(len=32) :: platform
-    character(len=4096) :: command, message
+    character(:), allocatable :: uname_text
     logical :: is_darwin
 
     checks = 0
@@ -20,28 +22,17 @@ program test_gremlin_state_portability
     old_log = trim(work_dir)//'/old-macros.log'
     fixed_log = trim(work_dir)//'/fixed-macros.log'
 
-    command = '/bin/mkdir -p "'//trim(work_dir)//'"'
-    call execute_command_line(trim(command), exitstat=exit_status, &
-        cmdstat=command_status, cmdmsg=message)
+    call fs_make_dir(trim(work_dir), exit_status)
+    command_status = 0
     call assert(command_status == 0 .and. exit_status == 0, &
         'temporary oracle directory is created')
     if (command_status /= 0 .or. exit_status /= 0) stop 1
 
-    command = 'uname -s > "'//trim(os_file)//'"'
-    call execute_command_line(trim(command), exitstat=exit_status, &
-        cmdstat=command_status, cmdmsg=message)
-    call assert(command_status == 0 .and. exit_status == 0, &
-        'operating system is identified')
+    call run_list(argv('uname', '-s'), exit_status, uname_text)
+    command_status = 0
+    call assert(exit_status == 0, 'operating system is identified')
     platform = ''
-    if (command_status == 0 .and. exit_status == 0) then
-        open (newunit=unit, file=trim(os_file), status='old', iostat=io_status)
-        call assert(io_status == 0, 'operating system result is readable')
-        if (io_status == 0) then
-            read (unit, '(a)', iostat=io_status) platform
-            close (unit)
-            call assert(io_status == 0, 'operating system result has a line')
-        end if
-    end if
+    if (exit_status == 0) platform = uname_text(:max(0, index(uname_text, new_line('a')) - 1))
     is_darwin = trim(platform) == 'Darwin'
 
     call compile_c(' -Wall -Wextra -fsyntax-only', &
@@ -88,8 +79,7 @@ program test_gremlin_state_portability
         'gremlin state portability (', trim(platform), '): ', &
         checks - failures, ' checks, ', failures, ' failed'
     if (failures == 0) then
-        command = '/bin/rm -rf "'//trim(work_dir)//'"'
-        call execute_command_line(trim(command), wait=.true.)
+        call fs_remove_tree(trim(work_dir))
     end if
     if (failures > 0) stop 1
 
@@ -110,14 +100,15 @@ contains
         character(len=*), intent(in) :: flags, source, log_file
         integer, intent(out) :: command_result, exit_result
 
-        character(len=4096) :: compile_command, command_message
+        type(string_list_t) :: compile_command
+        character(:), allocatable :: compiler_output
 
-        compile_command = 'gcc'//trim(flags)//' '//trim(source)// &
-            ' > "'//trim(log_file)//'" 2>&1'
-        command_result = -1
-        exit_result = -1
-        call execute_command_line(trim(compile_command), wait=.true., &
-            exitstat=exit_result, cmdstat=command_result, cmdmsg=command_message)
+        call list_add(compile_command, 'gcc')
+        call add_words(compile_command, flags)
+        call list_add(compile_command, trim(source))
+        command_result = 0
+        call run_list(compile_command, exit_result, compiler_output)
+        call write_text(trim(log_file), compiler_output)
     end subroutine compile_c
 
     logical function contains_darwin_declaration_error(log_file)

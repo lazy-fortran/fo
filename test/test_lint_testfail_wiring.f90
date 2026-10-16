@@ -5,6 +5,8 @@ program test_lint_testfail_wiring
     !! still print "Lint: OK". These tests cover the entry point the pipeline
     !! uses, on a real project layout.
     use fo_lint, only: lint_warning_t, lint_testfail_files, MAX_WARNINGS
+    use fo_fs, only: fs_remove_tree
+    use fo_fs, only: fs_make_dir
     implicit none
 
     integer :: n_pass, n_fail
@@ -39,9 +41,9 @@ contains
         character(len=*), intent(in) :: root
         integer :: u
 
-        call execute_command_line('rm -rf "'//trim(root)//'"', wait=.true.)
-        call execute_command_line('mkdir -p "'//trim(root)//'/test"', wait=.true.)
-        call execute_command_line('mkdir -p "'//trim(root)//'/src"', wait=.true.)
+        call fs_remove_tree(trim(root))
+        call fs_make_dir(trim(root)//'/test')
+        call fs_make_dir(trim(root)//'/src')
         open (newunit=u, file=trim(root)//'/fpm.toml', status='replace')
         write (u, '(a)') 'name = "wiring_fixture"'
         close (u)
@@ -87,7 +89,7 @@ contains
         call assert(n == 1, &
             'a test that only prints its failures is reported through the '// &
             'pipeline entry point')
-        call execute_command_line('rm -rf "'//trim(root)//'"', wait=.true.)
+        call fs_remove_tree(trim(root))
     end subroutine require_vacuous_test_is_reported
 
     subroutine require_honest_test_is_not_reported()
@@ -107,7 +109,7 @@ contains
 
         call scan(root, path, n)
         call assert(n == 0, 'a test with a nonzero stop is not reported')
-        call execute_command_line('rm -rf "'//trim(root)//'"', wait=.true.)
+        call fs_remove_tree(trim(root))
     end subroutine require_honest_test_is_not_reported
 
     subroutine require_source_program_is_ignored()
@@ -126,7 +128,7 @@ contains
 
         call scan(root, path, n)
         call assert(n == 0, 'a program outside the test directory is ignored')
-        call execute_command_line('rm -rf "'//trim(root)//'"', wait=.true.)
+        call fs_remove_tree(trim(root))
     end subroutine require_source_program_is_ignored
 
 end program test_lint_testfail_wiring

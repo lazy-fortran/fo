@@ -2,6 +2,7 @@ program test_gremlin_context_provenance
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char, c_null_ptr
     use fo_test_harness, only: string_list_t, process_result_t, list_add, list_with_first
     use fo_test_harness, only: run_process
+    use fo_fs, only: fs_realpath
     use fo_test_harness, only: make_directory, write_text, read_text
     use fo_test_harness, only: assert_true, assert_equal_string, finish_assertions
     use fo_test_gremlin_oracle, only: gremlin_setup, gremlin_run, gremlin_json
@@ -209,19 +210,12 @@ contains
         !! The directory with symlinks resolved, as getcwd reports it.
         character(len=*), intent(in) :: directory
         character(:), allocatable :: path
-        type(string_list_t) :: command
-        type(process_result_t) :: result
+        character(len=4096) :: resolved
+        logical :: ok
 
         path = directory
-        call list_add(command, '/bin/sh')
-        call list_add(command, '-c')
-        call list_add(command, 'cd "$1" && pwd -P')
-        call list_add(command, 'physical_path')
-        call list_add(command, directory)
-        call run_process(command, directory, result)
-        if (result%exit_code /= 0 .or. .not. allocated(result%stdout)) return
-        if (len(result%stdout) < 2) return
-        path = result%stdout(:len(result%stdout) - 1)
+        call fs_realpath(directory, resolved, ok)
+        if (ok) path = trim(resolved)
     end function physical_path
 
     subroutine write_compiler_wrapper(real_compiler, directory, calls_path)

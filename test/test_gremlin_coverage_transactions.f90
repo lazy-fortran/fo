@@ -2,6 +2,7 @@ program test_gremlin_coverage_transactions
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
     use fo_gremlin_coverage, only: coverage_epoch_t, coverage_open, &
         coverage_record_path, COVERAGE_OK
+    use fo_fs, only: fs_remove_file
     implicit none
 
     interface
@@ -50,7 +51,7 @@ program test_gremlin_coverage_transactions
         stop
     end if
     state_path = 'gremlin-coverage-concurrent.state'
-    call execute_command_line('rm -f '//trim(state_path))
+    call fs_remove_file(trim(state_path))
     names = [character(len=16) :: 'concurrent_1', 'concurrent_2', 'concurrent_3']
     outcomes = [character(len=16) :: 'PASS', 'FAIL', 'TIMEOUT']
     call coverage_open(trim(state_path), repeat('e', 64), names, 3, 123, &
@@ -96,7 +97,8 @@ program test_gremlin_coverage_transactions
     call check(status == COVERAGE_OK, 'read final transaction state')
     call check(all(state%outcome == outcomes), &
         'concurrent different-case outcomes all survive without lost updates')
-    call execute_command_line('rm -f '//trim(state_path)//' '//trim(state_path)//'.lock')
+    call fs_remove_file(trim(state_path))
+    call fs_remove_file(trim(state_path)//'.lock')
     print '(a)', 'Coverage transaction behavioral oracle: PASS'
 
 contains

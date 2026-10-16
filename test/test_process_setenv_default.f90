@@ -4,9 +4,9 @@ program test_process_setenv_default
     !! silently changes the run the user asked for. The child-side walker reads
     !! the same variable, so the test observes the value through a real child
     !! process rather than through the driver's own memory.
-    use fo_util, only: temporary_root
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
     use fo_process, only: process_setenv_default
+    use fo_test_harness, only: run_list, argv
     implicit none
 
     integer :: n_pass, n_fail
@@ -35,50 +35,18 @@ contains
         character(len=:), allocatable :: out
         integer, intent(out) :: rc
 
-        character(len=512) :: line
-        character(len=64) :: tmp
-        integer :: unit, ios
+        character(:), allocatable :: text
+        integer :: newline
 
-        call temp_name('fo_setenv_probe', tmp)
-        call execute_command_line('printf %s "$'//trim(name)//'" > '//trim(tmp)// &
-            ' 2>/dev/null', exitstat=rc)
+        call run_list(argv('printenv', trim(name)), rc, text)
         if (rc /= 0) then
             out = ''
             return
         end if
-        open (newunit=unit, file=trim(tmp), status='old', action='read', iostat=ios)
-        if (ios /= 0) then
-            out = ''
-            return
-        end if
-        read (unit, '(A)', iostat=ios) line
-        close (unit)
-        if (ios /= 0) line = ''
-        out = trim(line)
-        call execute_command_line('rm -f '//trim(tmp))
+        newline = index(text, new_line('a'))
+        if (newline == 0) newline = len(text) + 1
+        out = text(:newline - 1)
     end subroutine child_reads
-
-    subroutine temp_name(prefix, out)
-        character(len=*), intent(in) :: prefix
-        character(len=*), intent(out) :: out
-
-        character(len=64) :: pid
-        integer :: status, unit
-
-        ! The harness exports no PID, so ask a child for one: the probe file
-        ! must not collide with another concurrent run's probe file.
-        call execute_command_line('echo $$ > '//temporary_root()//'/'// &
-            trim(prefix)//'.pid 2>/dev/null')
-        open (newunit=unit, file=temporary_root()//'/'//trim(prefix)//'.pid', &
-            status='old', &
-            action='read', iostat=status)
-        if (status == 0) then
-            read (unit, '(A)', iostat=status) pid
-            close (unit)
-        end if
-        if (status /= 0) pid = '0'
-        out = temporary_root()//'/'//trim(prefix)//'_'//trim(adjustl(pid))//'.txt'
-    end subroutine temp_name
 
     subroutine check_unset_gets_default(pass, fail)
         integer, intent(inout) :: pass, fail
@@ -86,7 +54,6 @@ contains
         character(len=:), allocatable :: seen
         integer :: rc
 
-        call execute_command_line('unset FOCJ_DEFAULT_PROBE 2>/dev/null; true')
         call process_setenv_default('FOCJ_DEFAULT_PROBE', '1')
         call child_reads('FOCJ_DEFAULT_PROBE', seen, rc)
         ! `unset` in a child cannot change this process's environment, so clear

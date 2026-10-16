@@ -5,6 +5,7 @@ program test_gremlin_coverage
         COVERAGE_OK, COVERAGE_INVALID
     use fo_gremlin_coverage_view, only: gremlin_coverage_view_t
     use fo_gremlin_policy, only: shuffle_gremlin_tests, GREMLIN_POLICY_OK
+    use fo_fs, only: fs_remove_file
     implicit none
 
     integer, parameter :: n_cases = 40, chunk = 4
@@ -18,9 +19,11 @@ program test_gremlin_coverage
     integer :: i, n_selected, status, runs
 
     path = 'gremlin-coverage-test.state'
-    call execute_command_line('rm -f '//trim(path)//' '//trim(path)//'.tmp '// &
-        trim(path)//'.lock gremlin-coverage-replay.state '// &
-        'gremlin-coverage-replay.state.lock')
+    call fs_remove_file(trim(path))
+    call fs_remove_file(trim(path)//'.tmp')
+    call fs_remove_file(trim(path)//'.lock')
+    call fs_remove_file('gremlin-coverage-replay.state')
+    call fs_remove_file('gremlin-coverage-replay.state.lock')
     do i = 1, n_cases
         write(names(i), '(a,i2.2)') 'case_', i
         reversed(i) = names(n_cases - i + 1)
@@ -98,9 +101,11 @@ program test_gremlin_coverage
     call check_stale_writers()
     call check_cursor_rewinds_39_of_40()
 
-    call execute_command_line('rm -f '//trim(path)//' '//trim(path)//'.tmp '// &
-        trim(path)//'.lock gremlin-coverage-replay.state '// &
-        'gremlin-coverage-replay.state.lock')
+    call fs_remove_file(trim(path))
+    call fs_remove_file(trim(path)//'.tmp')
+    call fs_remove_file(trim(path)//'.lock')
+    call fs_remove_file('gremlin-coverage-replay.state')
+    call fs_remove_file('gremlin-coverage-replay.state.lock')
     write(*, '(a)') 'Gremlin coverage behavioral oracle: PASS'
 
 contains
@@ -113,7 +118,7 @@ contains
         transaction_names = [character(len=16) :: 'transaction_1', &
             'transaction_2', 'transaction_3']
         transaction_path = 'gremlin-coverage-transaction.state'
-        call execute_command_line('rm -f '//trim(transaction_path))
+        call fs_remove_file(trim(transaction_path))
         call coverage_open(trim(transaction_path), repeat('d', 64), transaction_names, &
             3, 91, first, status, message)
         call check(status == COVERAGE_OK, 'creates transaction fixture')
@@ -135,8 +140,8 @@ contains
         call check(status == COVERAGE_OK, 'explicit epoch uses latest completed state')
         call coverage_record(second, transaction_names(2), 'PASS', status, message)
         call check(status == COVERAGE_INVALID, 'stale epoch cannot overwrite new epoch')
-        call execute_command_line('rm -f '//trim(transaction_path)//' '// &
-            trim(transaction_path)//'.lock')
+        call fs_remove_file(trim(transaction_path))
+        call fs_remove_file(trim(transaction_path)//'.lock')
     end subroutine check_stale_writers
 
     subroutine check_cursor_rewinds_39_of_40()
@@ -230,7 +235,7 @@ contains
         integer :: j, selected_count, priority_count, shuffle_status
 
         mixed_path = 'gremlin-coverage-outcomes.state'
-        call execute_command_line('rm -f '//trim(mixed_path))
+        call fs_remove_file(trim(mixed_path))
         do j = 1, size(mixed_names)
             write(mixed_names(j), '(a,i1)') 'mixed_', j
         end do
@@ -304,7 +309,8 @@ contains
         call coverage_open(trim(mixed_path), repeat('b', 64), mixed_names, &
             size(mixed_names), 91, mixed_recovered, status, message)
         call check(status == COVERAGE_INVALID, 'rejects invalid persisted outcome label')
-        call execute_command_line('rm -f '//trim(mixed_path)//' '//trim(mixed_path)//'.lock')
+        call fs_remove_file(trim(mixed_path))
+        call fs_remove_file(trim(mixed_path)//'.lock')
     end subroutine check_mixed_outcomes
 
     subroutine corrupt_outcome_file(filename)

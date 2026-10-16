@@ -7,6 +7,7 @@ program test_dep_resolve
         normalize_path, join_path, merge_dep_link_libs
     use fo_fpm_config, only: fpm_config_t, fpm_config_parse
     use fo_process, only: process_getpid
+    use fo_fs, only: fs_make_dir
     implicit none
     integer :: n_pass, n_fail
 
@@ -101,7 +102,8 @@ contains
         call mkproj(da, '[dependencies]'//new_line('a')//'b = { path = "../b" }')
         call mkproj(db, '')
         ! give each a src dir so record_dep_src resolves a real source-dir
-        call execute_command_line('mkdir -p '//trim(da)//'/src '//trim(db)//'/src')
+        call fs_make_dir(trim(da)//'/src')
+        call fs_make_dir(trim(db)//'/src')
 
         call resolve_dep_srcs(trim(root), out, n_out, n_unres, ierr)
         call assert(ierr == 0, 'resolve succeeds')
@@ -254,7 +256,7 @@ contains
         expected = trim(base)//'/worktrees/lib'
         call mkproj(worktree, '[dependencies]'//new_line('a')// &
             'lib = { path = "../lib" }')
-        call execute_command_line('mkdir -p '//trim(worktree)//'/.git')
+        call fs_make_dir(trim(worktree)//'/.git')
 
         call resolve_with_diagnostic(worktree, out, n_out, n_unres, ierr, &
             diagnostic)
@@ -269,8 +271,7 @@ contains
 
         slash = index(trim(worktree), '/', back=.true.)
         worktree_name = worktree(slash + 1:)
-        call execute_command_line('mkdir -p '//trim(primary)// &
-            '/.git/worktrees/'//trim(worktree_name))
+        call fs_make_dir(trim(primary)//'/.git/worktrees/'//trim(worktree_name))
         open (newunit=unit, file=trim(worktree)//'/.git', status='replace')
         write (unit, '(a)') 'gitdir: '//trim(primary)//'/.'// &
             'git/worktrees/'//trim(worktree_name)
@@ -308,8 +309,9 @@ contains
             'b = { path = "../b" }')
         call mkproj(db, '[build]'//new_line('a')//'link = ["gmp", "stdc++"]')
         call mkproj(dv, '[build]'//new_line('a')//'link = ["dl"]')
-        call execute_command_line('mkdir -p '//trim(da)//'/src '// &
-            trim(db)//'/src '//trim(dv)//'/src')
+        call fs_make_dir(trim(da)//'/src')
+        call fs_make_dir(trim(db)//'/src')
+        call fs_make_dir(trim(dv)//'/src')
 
         allocate (cfg)
         call fpm_config_parse(trim(root), cfg, ierr)
@@ -387,7 +389,7 @@ contains
         character(len=*), intent(in) :: dir, deps_block
         integer :: u
 
-        call execute_command_line('mkdir -p '//trim(dir))
+        call fs_make_dir(trim(dir))
         open (newunit=u, file=trim(dir)//'/fpm.toml', status='replace')
         write (u, '(a)') 'name = "p"'
         if (len_trim(deps_block) > 0) write (u, '(a)') trim(deps_block)

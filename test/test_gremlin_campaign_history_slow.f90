@@ -2,6 +2,8 @@ program test_gremlin_campaign_history_slow
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
     use, intrinsic :: iso_fortran_env, only: error_unit, int64, output_unit
     use fo_util, only: make_tmpfile, temporary_root
+    use fo_fs, only: fs_make_dir, fs_remove_tree
+    use fo_test_harness, only: string_list_t, list_add, add_words, run_list
     implicit none
 
     integer, parameter :: NAME_LEN = 128, MAX_EVENTS = 128, N_CASES = 40
@@ -342,11 +344,10 @@ contains
 
     subroutine make_directory(path)
         character(len=*), intent(in) :: path
-        integer :: command_status, exit_status
+        integer :: exit_status
 
-        call execute_command_line('mkdir -p '//shell_quote(path), &
-            cmdstat=command_status, exitstat=exit_status)
-        call require(command_status == 0 .and. exit_status == 0, &
+        call fs_make_dir(path, exit_status)
+        call require(exit_status == 0, &
             'creates fixture directory '//trim(path))
     end subroutine make_directory
 
@@ -418,13 +419,13 @@ contains
         integer :: exit_status, i
         logical :: found
 
-        args = 'gremlin start --dir '//shell_quote(project_path)// &
-            ' --lane '//shell_quote(lane)//' --random '//int_text(random_count)// &
+        args = 'gremlin start --dir '//trim(project_path)// &
+            ' --lane '//trim(lane)//' --random '//int_text(random_count)// &
             ' --seed '//int_text(seed)//' --campaign-seconds 60'// &
             ' --timeout-seconds 5'
         if (shuffle) args = args//' --shuffle'
         do i = 1, n_requested
-            args = args//' --target '//shell_quote(trim(requested(i)))
+            args = args//' --target '//trim(requested(i))
         end do
         call run_cli(project_path, args, output, errors, exit_status)
         call require(exit_status == 0, 'starts Gremlin session: '//trim(errors)// &
@@ -442,14 +443,14 @@ contains
         integer :: command_status, attempt
         logical :: found, owner_exited
 
-        args = 'gremlin stop --dir '//shell_quote(project_path)// &
-            ' --lane '//shell_quote(lane)//' --session '//shell_quote(session_id)
+        args = 'gremlin stop --dir '//trim(project_path)// &
+            ' --lane '//trim(lane)//' --session '//trim(session_id)
         call run_cli(project_path, args, output, errors, command_status)
         exit_status = 1
         if (command_status /= 0) return
         do attempt = 1, 200
-            args = 'gremlin status --dir '//shell_quote(project_path)// &
-                ' --lane '//shell_quote(lane)//' --session '//shell_quote(session_id)
+            args = 'gremlin status --dir '//trim(project_path)// &
+                ' --lane '//trim(lane)//' --session '//trim(session_id)
             call run_cli(project_path, args, output, errors, command_status)
             if (command_status == 0) then
                 call json_extract_string(output, 'state', state, found)
@@ -513,8 +514,8 @@ contains
         integer :: exit_status
         logical :: parsed
 
-        args = 'gremlin events --dir '//shell_quote(project_path)// &
-            ' --lane '//shell_quote(lane)//' --session '//shell_quote(session_id)// &
+        args = 'gremlin events --dir '//trim(project_path)// &
+            ' --lane '//trim(lane)//' --session '//trim(session_id)// &
             ' --cursor 0 --max-records 128 --max-bytes 262144'
         call run_cli(project_path, args, output, errors, exit_status)
         if (exit_status /= 0) then
@@ -530,31 +531,21 @@ contains
         character(len=*), intent(in) :: project_path, args
         character(len=:), allocatable, intent(out) :: output, errors
         integer, intent(out) :: exit_status
-        character(len=512) :: out_path, err_path
-        character(len=8192) :: command
-        integer :: command_status
-        logical :: read_ok
+        type(string_list_t) :: command, environment
 
-        out_path = trim(scratch)//'/cli-stdout'
-        err_path = trim(scratch)//'/cli-stderr'
-        write(command, '(a)') 'cd '//shell_quote(project_path)//' && '// &
-            'FO_DISABLE_SELF_REFRESH=1 FO_SELF_REFRESH=0 FO_JOBS=1 '// &
-            'FO_CACHE_DIR='//shell_quote(trim(cache_root))//' '// &
-            'FO_GREMLIN_STATE_DIR='//shell_quote(trim(state_root))//' '// &
-            'HOME='//shell_quote(trim(home_root))//' '// &
-            'XDG_CACHE_HOME='//shell_quote(trim(xdg_root))//' '// &
-            'TMPDIR='//shell_quote(temporary_root())//' '// &
-            shell_quote(trim(driver))//' '//trim(args)//' > '// &
-            shell_quote(trim(out_path))//' 2> '//shell_quote(trim(err_path))
-        call execute_command_line(trim(command), wait=.true., &
-            cmdstat=command_status, exitstat=exit_status)
-        if (command_status /= 0) exit_status = 127
-        call read_text(trim(out_path), output, read_ok)
-        if (.not. read_ok) output = ''
-        call read_text(trim(err_path), errors, read_ok)
-        if (.not. read_ok) errors = ''
-        call remove_file(trim(out_path))
-        call remove_file(trim(err_path))
+        call list_add(environment, 'FO_DISABLE_SELF_REFRESH=1')
+        call list_add(environment, 'FO_SELF_REFRESH=0')
+        call list_add(environment, 'FO_JOBS=1')
+        call list_add(environment, 'FO_CACHE_DIR='//trim(cache_root))
+        call list_add(environment, 'FO_GREMLIN_STATE_DIR='//trim(state_root))
+        call list_add(environment, 'HOME='//trim(home_root))
+        call list_add(environment, 'XDG_CACHE_HOME='//trim(xdg_root))
+        call list_add(environment, 'TMPDIR='//temporary_root())
+        call list_add(command, trim(driver))
+        call add_words(command, trim(args))
+        call run_list(command, exit_status, output, errors, cwd=trim(project_path), &
+            environment=environment, timeout_ms=-1)
+        if (exit_status < 0) exit_status = 127
     end subroutine run_cli
 
     subroutine parse_events(json, events, n_events, success)
@@ -1069,30 +1060,12 @@ contains
 
     subroutine clean_scratch(path)
         character(len=*), intent(in) :: path
-        integer :: command_status, exit_status
+        integer :: exit_status
 
-        call execute_command_line('chmod -R u+w '//shell_quote(path)// &
-            ' && rm -rf '//shell_quote(path), cmdstat=command_status, &
-            exitstat=exit_status)
-        call require(command_status == 0 .and. exit_status == 0, &
+        call fs_remove_tree(path, exit_status)
+        call require(exit_status == 0, &
             'cleans the isolated fixture scratch tree')
     end subroutine clean_scratch
-
-    function shell_quote(value) result(quoted)
-        character(len=*), intent(in) :: value
-        character(len=:), allocatable :: quoted
-        integer :: i
-
-        quoted = achar(39)
-        do i = 1, len_trim(value)
-            if (value(i:i) == achar(39)) then
-                quoted = quoted//achar(39)//achar(92)//achar(39)//achar(39)
-            else
-                quoted = quoted//value(i:i)
-            end if
-        end do
-        quoted = quoted//achar(39)
-    end function shell_quote
 
     function fortran_quote(value) result(quoted)
         character(len=*), intent(in) :: value

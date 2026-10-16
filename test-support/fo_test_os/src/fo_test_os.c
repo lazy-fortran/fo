@@ -326,6 +326,13 @@ int fo_test_getcwd(char *buffer, size_t size) { return getcwd(buffer, size) == N
 int fo_test_touch_directory(const char *path) {
     return utimensat(AT_FDCWD, path, NULL, 0);
 }
+int fo_test_set_mtime(const char *path, long long mtime_ns) {
+    struct timespec times[2];
+    times[0].tv_sec = (time_t)(mtime_ns / 1000000000LL);
+    times[0].tv_nsec = (long)(mtime_ns % 1000000000LL);
+    times[1] = times[0];
+    return utimensat(AT_FDCWD, path, times, 0);
+}
 static int mode_bits(const char *path) {
     struct stat info;
     return stat(path, &info) == 0 ? (int)(info.st_mode & 07777) : -1;
