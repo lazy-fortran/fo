@@ -5,7 +5,7 @@ program test_test_team_openmp_cli
     !! of the cores; a single test and any value the user
     !! exported are left alone.
     use fo_test_harness, only: process_result_t, string_list_t, list_add, &
-        make_scratch, write_text, run_process, assert_true, finish_assertions
+        make_scratch, write_text, run_process, assert_process_ok, finish_assertions
     use fo_test_cli, only: resolve_driver
     implicit none
     character(len=*), parameter :: nl = new_line('a')
@@ -19,12 +19,12 @@ program test_test_team_openmp_cli
 
     ! FO_JOBS=8 -> a team of 2 tests, 8/2 = 4 threads each.
     call run_case('team default', [character(len=12) :: 'test_probe_a', 'test_probe_b'], &
-        [character(len=20) :: 'OMP_EXPECT=4'], .true.)
+        [character(len=20) :: 'OMP_EXPECT=4'])
     call run_case('user value wins', [character(len=12) :: 'test_probe_a', 'test_probe_b'], &
-        [character(len=20) :: 'OMP_NUM_THREADS=3', 'OMP_EXPECT=3'], .true.)
+        [character(len=20) :: 'OMP_NUM_THREADS=3', 'OMP_EXPECT=3'])
     ! One test is not a team: nothing is imposed.
     call run_case('single test untouched', [character(len=12) :: 'test_probe_a'], &
-        [character(len=20) :: 'OMP_EXPECT=none'], .true.)
+        [character(len=20) :: 'OMP_EXPECT=none'])
     call finish_assertions()
 contains
     subroutine write_probe(name)
@@ -46,9 +46,8 @@ contains
             'end program '//name//nl)
     end subroutine write_probe
 
-    subroutine run_case(label, targets, extra, expect_pass)
+    subroutine run_case(label, targets, extra)
         character(len=*), intent(in) :: label, targets(:), extra(:)
-        logical, intent(in) :: expect_pass
         type(string_list_t) :: command, env
         type(process_result_t) :: observed
         integer :: i
@@ -77,7 +76,6 @@ contains
             call list_add(command, trim(targets(i)))
         end do
         call run_process(command, scratch, observed, env)
-        call assert_true((observed%exit_code == 0) .eqv. expect_pass, &
-            label//': probes see the expected OpenMP environment')
+        call assert_process_ok(observed, label//': probes see the expected OpenMP environment')
     end subroutine run_case
 end program test_test_team_openmp_cli
