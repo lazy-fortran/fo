@@ -1347,7 +1347,7 @@ contains
         end if
         if (status == 0) call compute_readiness(read_session, status_text, &
             coverage_view, have_coverage, readiness, status, event_message)
-        if (status == 0) call publish_lifecycle_transition(read_session, o%request, &
+        if (status == 0) call publish_lifecycle_transition(read_session, &
             trim(lifecycle_path), state, o%active, candidate, case_name, last_outcome, &
             readiness, coverage_view, have_coverage, trim(diagnostic_text), status, &
             event_message)
@@ -1382,11 +1382,12 @@ contains
             ierr = compact_status
     end subroutine maintain_fo_cache
 
-    subroutine publish_lifecycle_transition(session, request, path, state, active, &
-            candidate, current_case, last_outcome, readiness, coverage, have_coverage, &
-            diagnostic, ierr, message)
+    subroutine publish_lifecycle_transition(session, path, state, active, candidate, &
+            current_case, last_outcome, readiness, coverage, have_coverage, diagnostic, &
+            ierr, message)
+        !! Append the lifecycle events that the newly published state implies
+        !! against the last recorded event, in their fixed order.
         type(gremlin_session_t), intent(in) :: session
-        type(gremlin_request_t), intent(in) :: request
         character(len=*), intent(in) :: path, state, current_case, last_outcome
         type(generation_t), intent(in) :: active, candidate
         type(gremlin_readiness_t), intent(in) :: readiness
@@ -1396,9 +1397,8 @@ contains
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
         type(gremlin_lifecycle_event_t) :: previous
-        logical :: found, changed_generation, coverage_changed, previous_pass
+        logical :: found, coverage_changed, previous_pass
         character(len=32) :: failure_event
-        integer :: status
         character(len=HASH_LEN) :: previous_generation
 
         ierr = 0
@@ -1407,82 +1407,45 @@ contains
         if (ierr /= 0) return
         previous_generation = ''
         if (found) previous_generation = previous%active_generation
-        changed_generation = len_trim(active%identity) == HASH_LEN .and. &
-            trim(active%identity) /= trim(previous_generation)
         if (trim(state) == 'starting') then
-            call append_lifecycle_event(session, request, path, 'session_started', &
-                active, candidate, active%identity, previous_generation, readiness, &
-                coverage, have_coverage, ierr, message)
+            call emit('session_started', active%identity)
         else if (trim(state) == 'building') then
-            call append_lifecycle_event(session, request, path, &
-                'generation_started', active, candidate, candidate%identity, &
-                previous_generation, readiness, coverage, have_coverage, ierr, message)
+            call emit('generation_started', candidate%identity)
         else if (trim(state) == 'build_failed' .or. trim(last_outcome) == 'BUILD_FAIL') then
-            call append_lifecycle_event(session, request, path, &
-                'build_failed', active, candidate, candidate%identity, &
-                previous_generation, readiness, coverage, have_coverage, ierr, message)
+            call emit('build_failed', candidate%identity)
         else if (trim(state) == 'capture_failed') then
-            call append_lifecycle_event(session, request, path, 'capture_failed', &
-                active, candidate, candidate%identity, previous_generation, readiness, &
-                coverage, have_coverage, ierr, message, diagnostic)
+            call emit('capture_failed', candidate%identity, diagnostic)
         else if (trim(state) == 'error') then
-            call append_lifecycle_event(session, request, path, 'session_failed', &
-                active, candidate, active%identity, previous_generation, readiness, &
-                coverage, have_coverage, ierr, message)
+            call emit('session_failed', active%identity)
         else if (trim(state) == 'stopped') then
-            call append_lifecycle_event(session, request, path, 'session_stopped', &
-                active, candidate, active%identity, previous_generation, readiness, &
-                coverage, have_coverage, ierr, message)
+            call emit('session_stopped', active%identity)
         end if
-        if (ierr /= 0) return
-
-        if (changed_generation) then
-            call append_lifecycle_event(session, request, path, &
-                'build_passed', active, candidate, candidate%identity, &
-                previous_generation, readiness, coverage, have_coverage, ierr, message)
-            if (ierr /= 0) return
+        if (len_trim(active%identity) == HASH_LEN .and. &
+            trim(active%identity) /= trim(previous_generation)) then
+            call emit('build_passed', candidate%identity)
             if (len_trim(previous_generation) > 0) then
-                call append_lifecycle_event(session, request, path, &
-                    'generation_superseded', active, candidate, candidate%identity, &
-                    previous_generation, readiness, coverage, have_coverage, ierr, message)
+                call emit('generation_superseded', candidate%identity)
             else
-                call append_lifecycle_event(session, request, path, 'generation_activated', &
-                    active, candidate, active%identity, previous_generation, readiness, &
-                    coverage, have_coverage, ierr, message)
+                call emit('generation_activated', active%identity)
             end if
-            if (ierr /= 0) return
         end if
-
-        if (found .and. (readiness%local_gate_green .neqv. &
-            previous%local_gate_green)) then
-            if (readiness%local_gate_green) then
-                call append_lifecycle_event(session, request, path, 'local_gate_green', &
-                    active, candidate, active%identity, previous_generation, readiness, &
-                    coverage, have_coverage, ierr, message)
-            else
-                call append_lifecycle_event(session, request, path, 'local_gate_changed', &
-                    active, candidate, active%identity, previous_generation, readiness, &
-                    coverage, have_coverage, ierr, message)
-            end if
-            if (ierr /= 0) return
-        else if (.not. found .and. readiness%local_gate_green) then
-            call append_lifecycle_event(session, request, path, 'local_gate_green', &
-                active, candidate, active%identity, previous_generation, readiness, &
-                coverage, have_coverage, ierr, message)
-            if (ierr /= 0) return
+        if (readiness%local_gate_green .and. (.not. found .or. &
+            .not. previous%local_gate_green)) then
+            call emit('local_gate_green', active%identity)
+        else if (found .and. previous%local_gate_green .and. &
+                .not. readiness%local_gate_green) then
+            call emit('local_gate_changed', active%identity)
         end if
-
         ! Normal FAIL is retained only after the normal runner's repeat attempt.
         ! A previous-generation PASS distinguishes a confirmed regression from
         ! a newly observed failure. Flaky, timeout and infra are factual outcomes.
         failure_event = ''
         select case (trim(last_outcome))
         case ('FAIL')
-            call prior_generation_case_passed(session, active%identity, current_case, &
-                previous_pass, ierr, message)
-            if (ierr /= 0) return
+            if (ierr == 0) call prior_generation_case_passed(session, active%identity, &
+                current_case, previous_pass, ierr, message)
             failure_event = 'test_failed'
-            if (previous_pass) failure_event = 'regression_confirmed'
+            if (ierr == 0 .and. previous_pass) failure_event = 'regression_confirmed'
         case ('FLAKY')
             failure_event = 'test_flaky'
         case ('TIMEOUT')
@@ -1491,56 +1454,73 @@ contains
             if (len_trim(current_case) > 0 .and. trim(current_case) /= '<build>') &
                 failure_event = 'test_infra_error'
         end select
-        if (len_trim(failure_event) > 0 .and. len_trim(active%identity) == HASH_LEN) then
-            call append_lifecycle_event(session, request, path, failure_event, &
-                active, candidate, active%identity, previous_generation, readiness, &
-                coverage, have_coverage, ierr, message)
-            if (ierr /= 0) return
-        end if
+        if (len_trim(failure_event) > 0 .and. len_trim(active%identity) == HASH_LEN) &
+            call emit(failure_event, active%identity)
         if (readiness%verification_level >= GREMLIN_VERIFY_ORDINARY .and. &
             (.not. found .or. (previous%verification_level /= 'ordinary' .and. &
-            previous%verification_level /= 'full'))) then
-            call append_lifecycle_event(session, request, path, 'ordinary_coverage_complete', &
-                active, candidate, active%identity, previous_generation, readiness, &
-                coverage, have_coverage, ierr, message)
-            if (ierr /= 0) return
-        end if
+            previous%verification_level /= 'full'))) &
+            call emit('ordinary_coverage_complete', active%identity)
         if (readiness%fully_verified .and. &
-            (.not. found .or. previous%verification_level /= 'full')) then
-            call append_lifecycle_event(session, request, path, 'full_verification_complete', &
-                active, candidate, active%identity, previous_generation, readiness, &
-                coverage, have_coverage, ierr, message)
-            if (ierr /= 0) return
-        end if
+            (.not. found .or. previous%verification_level /= 'full')) &
+            call emit('full_verification_complete', active%identity)
         if (readiness%phase == GREMLIN_PHASE_QUIESCENT .and. &
             (.not. found .or. previous%phase /= 'quiescent')) then
-            call append_lifecycle_event(session, request, path, 'session_quiescent', &
-                active, candidate, active%identity, previous_generation, readiness, &
-                coverage, have_coverage, ierr, message)
-            if (ierr /= 0) return
+            call emit('session_quiescent', active%identity)
         else if (found .and. previous%phase == 'quiescent' .and. &
                 readiness%phase /= GREMLIN_PHASE_QUIESCENT) then
-            call append_lifecycle_event(session, request, path, 'session_wake', &
-                active, candidate, active%identity, previous_generation, readiness, &
-                coverage, have_coverage, ierr, message)
-            if (ierr /= 0) return
+            call emit('session_wake', active%identity)
         end if
-
         coverage_changed = have_coverage
-        if (found .and. have_coverage) then
-            coverage_changed = coverage_changed .and. &
-                (coverage%epoch /= previous%epoch .or. &
-                coverage%cursor /= previous%epoch_cursor .or. &
-                readiness%ordinary_passed /= previous%ordinary_passed .or. &
-                readiness%ordinary_required /= previous%ordinary_required .or. &
-                readiness%ordinary_failures /= previous%ordinary_failures)
-        end if
-        if (coverage_changed) then
-            call append_lifecycle_event(session, request, path, 'coverage_updated', &
-                active, candidate, active%identity, previous_generation, readiness, &
-                coverage, have_coverage, ierr, message)
+        if (found .and. have_coverage) coverage_changed = &
+            coverage%epoch /= previous%epoch .or. &
+            coverage%cursor /= previous%epoch_cursor .or. &
+            readiness%ordinary_passed /= previous%ordinary_passed .or. &
+            readiness%ordinary_required /= previous%ordinary_required .or. &
+            readiness%ordinary_failures /= previous%ordinary_failures
+        if (coverage_changed) call emit('coverage_updated', active%identity)
+
+    contains
+
+        subroutine emit(event_type, subject_generation, event_diagnostic)
+            !! Append one event; after a failure no further event is written.
+            character(len=*), intent(in) :: event_type, subject_generation
+            character(len=*), intent(in), optional :: event_diagnostic
+            type(gremlin_lifecycle_event_t) :: event
+
             if (ierr /= 0) return
-        end if
+            event%event_type = trim(event_type)
+            event%diagnostic = ''
+            if (present(event_diagnostic)) event%diagnostic = event_diagnostic
+            event%generation = trim(subject_generation)
+            event%active_generation = trim(active%identity)
+            event%candidate_generation = trim(candidate%identity)
+            event%previous_generation = trim(previous_generation)
+            event%phase = gremlin_phase_name(readiness%phase)
+            event%health = gremlin_health_name(readiness%health)
+            event%event_epoch = readiness%event_epoch
+            event%requirement_digest = readiness%requirement_digest
+            event%gate_token = readiness%gate_token
+            event%dirty = readiness%dirty
+            event%local_gate_green = readiness%local_gate_green
+            event%verification_level = &
+                gremlin_verification_name(readiness%verification_level)
+            event%fully_verified = readiness%fully_verified
+            event%gate_required = readiness%gate_required
+            event%gate_passed = readiness%gate_passed
+            event%ordinary_required = readiness%ordinary_required
+            event%ordinary_passed = readiness%ordinary_passed
+            event%ordinary_failures = readiness%ordinary_failures
+            event%full_required = readiness%full_required
+            event%full_passed = readiness%full_passed
+            event%full_failures = readiness%full_failures
+            if (have_coverage) then
+                event%epoch = coverage%epoch
+                event%epoch_cursor = coverage%cursor
+            end if
+            event%event_id = gremlin_lifecycle_make_id(session%session_id, event)
+            call gremlin_lifecycle_append(path, event, ierr, message)
+        end subroutine emit
+
     end subroutine publish_lifecycle_transition
 
     subroutine read_last_lifecycle_event(path, event, found, ierr, message)
@@ -1578,52 +1558,5 @@ contains
         end do
     end subroutine read_last_lifecycle_event
 
-    subroutine append_lifecycle_event(session, request, path, event_type, active, &
-            candidate, subject_generation, previous_generation, readiness, coverage, &
-            have_coverage, ierr, message, diagnostic)
-        type(gremlin_session_t), intent(in) :: session
-        type(gremlin_request_t), intent(in) :: request
-        character(len=*), intent(in) :: path, event_type, subject_generation
-        character(len=*), intent(in) :: previous_generation
-        type(generation_t), intent(in) :: active, candidate
-        type(gremlin_readiness_t), intent(in) :: readiness
-        type(gremlin_coverage_view_t), intent(in) :: coverage
-        logical, intent(in) :: have_coverage
-        integer, intent(out) :: ierr
-        character(len=*), intent(out) :: message
-        character(len=*), intent(in), optional :: diagnostic
-        type(gremlin_lifecycle_event_t) :: event
-
-        event%event_type = trim(event_type)
-        event%diagnostic = ''
-        if (present(diagnostic)) event%diagnostic = diagnostic
-        event%generation = trim(subject_generation)
-        event%active_generation = trim(active%identity)
-        event%candidate_generation = trim(candidate%identity)
-        event%previous_generation = trim(previous_generation)
-        event%phase = gremlin_phase_name(readiness%phase)
-        event%health = gremlin_health_name(readiness%health)
-        event%event_epoch = readiness%event_epoch
-        event%requirement_digest = readiness%requirement_digest
-        event%gate_token = readiness%gate_token
-        event%dirty = readiness%dirty
-        event%local_gate_green = readiness%local_gate_green
-        event%verification_level = gremlin_verification_name(readiness%verification_level)
-        event%fully_verified = readiness%fully_verified
-        event%gate_required = readiness%gate_required
-        event%gate_passed = readiness%gate_passed
-        event%ordinary_required = readiness%ordinary_required
-        event%ordinary_passed = readiness%ordinary_passed
-        event%ordinary_failures = readiness%ordinary_failures
-        event%full_required = readiness%full_required
-        event%full_passed = readiness%full_passed
-        event%full_failures = readiness%full_failures
-        if (have_coverage) then
-            event%epoch = coverage%epoch
-            event%epoch_cursor = coverage%cursor
-        end if
-        event%event_id = gremlin_lifecycle_make_id(session%session_id, event)
-        call gremlin_lifecycle_append(path, event, ierr, message)
-    end subroutine append_lifecycle_event
 
 end module fo_gremlin_owner
