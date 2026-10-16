@@ -27,6 +27,7 @@ module fo_gremlin_supervisor
         gremlin_lifecycle_read_page, LIFECYCLE_OK
     use fo_gremlin_log_text, only: gremlin_retain_build_log, gremlin_log_tail
     use fo_gremlin_owner, only: run_owner
+    use fo_gremlin_report, only: gremlin_report_json
     use fo_gremlin_readiness, only: gremlin_readiness_t, gremlin_wait_satisfied, &
         gremlin_wait_code, GREMLIN_PHASE_QUIESCENT, GREMLIN_HEALTH_FAILURE
     use fo_gremlin_receipts, only: NAME_LEN, PATH_LEN, record_receipt, &
@@ -45,7 +46,7 @@ module fo_gremlin_supervisor
         GREMLIN_STATE_TEXT_MAX
     use fo_gremlin_status_json, only: gremlin_status_enrich, gremlin_wait_decorate, &
         gremlin_summary_json, gremlin_events_json, gremlin_failure_json, &
-        simple_response => gremlin_simple_response, &
+        json_merge, simple_response => gremlin_simple_response, &
         error_response => gremlin_error_response
     use fo_json_object, only: json_value_raw
     use fo_process, only: argv_push, process_poll_pid, process_scope_t, &
@@ -328,10 +329,13 @@ contains
             message)
         if (ierr == 0) then
             if (trim(request%detail) == 'summary') then
-                call compact_summary(enriched, session, action, response, ierr, message)
+                call compact_summary(enriched, session, request, action, response, &
+                    ierr, message)
             else
                 call response_with_events(action, enriched, session, request, .false., &
                     response, ierr, message)
+                if (ierr == 0) call with_report(enriched, session, request, response, &
+                    ierr, message)
             end if
         end if
         if (ierr /= 0) then
@@ -414,12 +418,56 @@ contains
     end subroutine status_snapshot
 
 
-    subroutine compact_summary(status_text, session, action, response, &
+    subroutine lane_report(status_text, session, request, report, ierr, message)
+        !! The verdict, counts, failing cases and (for `since`) delta of the
+        !! lane, from this session's receipts.
+        character(len=*), intent(in) :: status_text
+        type(gremlin_session_t), intent(in) :: session
+        type(gremlin_request_t), intent(in) :: request
+        character(len=:), allocatable, intent(out) :: report
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+        type(journal_record_t), allocatable :: records(:)
+        character(len=HASH_LEN) :: generation
+        character(len=32) :: state_name, health
+        character(len=8) :: green
+
+        call journal_read_all(session%state_dir//'/journal.jsonl', records, ierr, &
+            message)
+        if (ierr /= JOURNAL_OK) return
+        ierr = 0
+        call gremlin_json_field(status_text, 'active_generation', generation, .true.)
+        if (len_trim(generation) == 0) &
+            call gremlin_json_field(status_text, 'candidate_generation', generation, &
+                .true.)
+        call gremlin_json_field(status_text, 'state', state_name, .true.)
+        call gremlin_json_field(status_text, 'health', health, .true.)
+        call gremlin_json_field(status_text, 'local_gate_green', green, .true.)
+        report = gremlin_report_json(records, trim(generation), trim(request%since), &
+            trim(state_name), trim(health), trim(green) == 'true')
+    end subroutine lane_report
+
+    subroutine with_report(status_text, session, request, response, ierr, message)
+        !! A full document with the report members in front, existing keys kept.
+        character(len=*), intent(in) :: status_text
+        type(gremlin_session_t), intent(in) :: session
+        type(gremlin_request_t), intent(in) :: request
+        character(len=:), allocatable, intent(inout) :: response
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+        character(len=:), allocatable :: report
+
+        call lane_report(status_text, session, request, report, ierr, message)
+        if (ierr == 0) response = json_merge(report, response)
+    end subroutine with_report
+
+    subroutine compact_summary(status_text, session, request, action, response, &
             ierr, message)
         !! The summary document; with failure evidence it names this session's
         !! newest failure receipt of the reported generation.
         character(len=*), intent(in) :: status_text, action
         type(gremlin_session_t), intent(in) :: session
+        type(gremlin_request_t), intent(in) :: request
         character(len=:), allocatable, intent(out) :: response
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
@@ -432,10 +480,12 @@ contains
         character(len=32) :: health, last_outcome
         integer :: failure_count, ios, i
         logical :: failure_evidence
-        character(len=:), allocatable :: latest
+        character(len=:), allocatable :: latest, report
 
         ierr = 0
         message = ''
+        call lane_report(status_text, session, request, report, ierr, message)
+        if (ierr /= 0) return
         generation = ''
         health = ''
         last_outcome = ''
@@ -475,7 +525,7 @@ contains
                 end do
             end if
         end if
-        response = gremlin_summary_json(status_text, action, latest)
+        response = gremlin_summary_json(status_text, action, latest, report)
     end subroutine compact_summary
 
 
@@ -548,9 +598,14 @@ contains
         exitcode = 0
         if (trim(request%detail) /= 'summary') then
             response = decorated
+            call with_report(enriched, session, request, response, ierr, message)
+            if (ierr /= 0) then
+                call error_response('wait', trim(message), response)
+                exitcode = 2
+            end if
             return
         end if
-        call compact_summary(decorated, session, 'wait', response, ierr, message)
+        call compact_summary(decorated, session, request, 'wait', response, ierr, message)
         if (ierr /= 0) then
             call error_response('wait', trim(message), response)
             exitcode = 2

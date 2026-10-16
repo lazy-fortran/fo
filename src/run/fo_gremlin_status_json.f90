@@ -216,10 +216,12 @@ contains
         decorated = json_merge(status_json, json_to_string(jb))
     end function gremlin_wait_decorate
 
-    function gremlin_summary_json(status_text, action, latest_failure) result(text)
+    function gremlin_summary_json(status_text, action, latest_failure, report) &
+            result(text)
         !! The compact summary of a status or wait document; latest_failure is
         !! the newest failure receipt object or empty.
         character(len=*), intent(in) :: status_text, action, latest_failure
+        character(len=*), intent(in), optional :: report
         character(len=:), allocatable :: text
         character(len=32), parameter :: strings(*) = [character(len=32) :: &
             'session_id', 'lane_id', 'lifetime', 'state', 'phase', 'health', &
@@ -260,9 +262,11 @@ contains
             call json_value_raw(jb, latest_failure)
         end if
         call json_key_string(jb, 'retrieval_hint', 'Use detail=full for complete '// &
-            'status or action=events/failures with cursors for event pages.')
+            'status, since=<generation|cursor> for changes only, or '// &
+            'action=events/failures with cursors for event pages.')
         call json_object_end(jb)
         text = json_to_string(jb)
+        if (present(report)) text = json_merge(report, text)
     end function gremlin_summary_json
 
     function gremlin_failure_json(generation, case_id, status, log_path) result(text)

@@ -39,6 +39,8 @@ module fo_gremlin_request
         character(len=8) :: detail = 'full'
         !! 'persistent' lanes outlive their client; 'task' lanes stop with it.
         character(len=10) :: lifetime = 'persistent'
+        !! status/wait: report only what changed since a generation or journal cursor.
+        character(len=HASH_LEN) :: since = ''
         logical :: input_changed = .false.
         logical :: has_previous_generation = .false.
         character(len=NAME_LEN), allocatable :: impact_cases(:)
@@ -79,7 +81,7 @@ module fo_gremlin_request
         character(len=72) :: note = ''
     end type gremlin_option_t
 
-    integer, parameter, public :: N_GREMLIN_OPTIONS = 24
+    integer, parameter, public :: N_GREMLIN_OPTIONS = 25
     type(gremlin_option_t), parameter, public :: GREMLIN_OPTIONS(N_GREMLIN_OPTIONS) = [ &
         gremlin_option_t('lane_id', '--lane', '', 'string', GA_ANY), &
         gremlin_option_t('session_id', '--session', '', 'string', GA_ANY - GA_START), &
@@ -116,6 +118,8 @@ module fo_gremlin_request
         gremlin_option_t('wait_ms', '--wait-ms', '', 'int', GA_WAIT, 0, 30000), &
         gremlin_option_t('wait_until', '--until', '', 'string', GA_WAIT, &
             choices='local-gate-green,ordinary-verified,fully-verified,quiescent,failure'), &
+        gremlin_option_t('since', '--since', '', 'string', GA_STATUS + GA_WAIT, &
+            note='report only the change since this generation ID or event cursor'), &
         gremlin_option_t('detail', '--detail', '', 'string', GA_STATUS + GA_WAIT, &
             choices='summary,full', &
             note='gremlin_status/gremlin_wait response detail')]
@@ -565,6 +569,12 @@ contains
                 request%filter = value
             case ('wait_until')
                 request%wait_until = value
+            case ('since')
+                if (.not. is_hex_digest(value) .and. .not. is_cursor(value)) then
+                    message = 'since must be a generation ID or an event cursor'
+                    return
+                end if
+                request%since = value
             case ('lifetime')
                 request%lifetime = value
             case ('detail')
@@ -639,6 +649,14 @@ contains
         write (buffer, '(i0)') value
         text = trim(buffer)
     end function int_text
+
+    logical function is_cursor(value)
+        !! A decimal journal byte cursor.
+        character(len=*), intent(in) :: value
+
+        is_cursor = len_trim(value) > 0 .and. len_trim(value) <= 18
+        if (is_cursor) is_cursor = verify(trim(value), '0123456789') == 0
+    end function is_cursor
 
     logical function in_choices(value, choices)
         character(len=*), intent(in) :: value, choices
