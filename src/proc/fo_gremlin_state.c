@@ -514,6 +514,10 @@ int fo_gremlin_process_matches(int pid, const char *start) {
     if (pid <= 0 || !start || !*start) return 0;
 #if !defined(_WIN32) || defined(__CYGWIN__)
     if (kill((pid_t)pid, 0) != 0 && errno != EPERM) return 0;
+    /* An exited process an unreaping subreaper still holds is not running. */
+    int alive = 1;
+    if (fo_sys_process_info((pid_t)pid, NULL, NULL, NULL, NULL, &alive) == 0 &&
+        !alive) return 0;
 #endif
     if (fo_sys_process_start_text((pid_t)pid, have, sizeof(have)) != 0) return 0;
     return strcmp(have, start) == 0;

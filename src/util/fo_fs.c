@@ -385,7 +385,13 @@ int fo_c_pid_alive(int pid) {
     CloseHandle(process);
     return status == WAIT_TIMEOUT;
 #else
-    if (kill((pid_t)pid, 0) == 0) return 1;
+    if (kill((pid_t)pid, 0) == 0) {
+        /* A zombie held by an unreaping parent has exited. */
+        int alive = 1;
+        if (fo_sys_process_info((pid_t)pid, NULL, NULL, NULL, NULL, &alive) == 0)
+            return alive;
+        return 1;
+    }
     return (errno == EPERM) ? 1 : 0;
 #endif
 }
