@@ -14,6 +14,7 @@ program test_lock
     call test_lock_write_stable()
     call test_lock_detects_git_drift()
     call test_lock_honors_explicit_rev()
+    call test_lock_peels_annotated_tag()
 
     write (output_unit, '(a,i0,a,i0,a)') 'lock: ', n_pass, ' pass, ', n_fail, &
         ' fail'
@@ -148,6 +149,30 @@ contains
         write (u, '(a,a,a)') 'deplib = { git = "file://', trim(libdir), '" }'
         close (u)
     end subroutine make_git_project
+
+    subroutine test_lock_peels_annotated_tag()
+        character(len=512) :: base, libdir, appdir
+        character(len=32768) :: text
+        character(:), allocatable :: head
+        integer :: ierr, u
+
+        call make_git_project(base, libdir, appdir)
+        call run_git(libdir, [character(len=8) :: 'tag', '-a', '-m', 'note', 'v1.0'], ierr)
+        call assert(ierr == 0, 'annotated tag is created')
+        call run_git(libdir, [character(len=16) :: 'rev-parse', 'HEAD'], ierr, head)
+        open (newunit=u, file=trim(appdir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "depapp"'
+        write (u, '(a)') '[dependencies]'
+        write (u, '(a,a,a)') 'deplib = { git = "file://', trim(libdir), &
+            '", tag = "v1.0" }'
+        close (u)
+        call lock_write(appdir, '', ierr)
+        call read_text_file(trim(appdir)//'/fo.lock', text)
+        call assert(ierr == 0, 'annotated tag lock write succeeds')
+        call assert(index(text, 'rev = "'//head(:40)//'"') > 0, &
+            'lock records the commit an annotated tag peels to')
+        call fs_remove_tree(trim(base))
+    end subroutine test_lock_peels_annotated_tag
 
     integer(8) function file_mtime(path) result(t)
         character(len=*), intent(in) :: path

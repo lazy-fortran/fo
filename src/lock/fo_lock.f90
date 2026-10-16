@@ -128,7 +128,7 @@ contains
         character(len=:), allocatable :: packed
         character(len=512) :: tmpfile, ref
         character(len=4096) :: out
-        integer :: n_args, exitcode, tab
+        integer :: n_args, exitcode, tab, last, line_start
 
         rev = ''
         ierr = 0
@@ -147,7 +147,13 @@ contains
         call argv_push(packed, n_args, 'git')
         call argv_push(packed, n_args, 'ls-remote')
         call argv_push(packed, n_args, trim(dep%git))
-        call argv_push(packed, n_args, trim(ref))
+        if (len_trim(dep%tag) > 0) then
+            ! Ask for the tag and its peeled commit: annotated tags list both.
+            call argv_push(packed, n_args, 'refs/tags/'//trim(dep%tag))
+            call argv_push(packed, n_args, 'refs/tags/'//trim(dep%tag)//'^{}')
+        else
+            call argv_push(packed, n_args, trim(ref))
+        end if
         call process_run_argv_logged('', packed, n_args, tmpfile, .false., 60, exitcode)
         if (exitcode /= 0) then
             ierr = exitcode
@@ -157,12 +163,20 @@ contains
 
         call read_text_file(tmpfile, out)
         call delete_tmpfile(tmpfile)
-        tab = index(out, char(9))
+        ! The peeled commit of an annotated tag is the last listed line.
+        last = len_trim(out)
+        if (last > 0) then
+            if (out(last:last) == new_line('a')) last = last - 1
+        end if
+        line_start = 1
+        if (len_trim(dep%tag) > 0) &
+            line_start = index(out(:last), new_line('a'), back=.true.) + 1
+        tab = index(out(line_start:last), char(9))
         if (tab <= 1) then
             ierr = 1
             return
         end if
-        rev = out(1:tab - 1)
+        rev = out(line_start:line_start + tab - 2)
     end subroutine resolve_git_ref
 
     subroutine compiler_identity(compiler)

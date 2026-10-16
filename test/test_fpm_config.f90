@@ -647,6 +647,8 @@ contains
             'source_metapackages: minpack source dependency is added')
         call assert(has_dev_dependency(c, 'test-drive'), &
             'source_metapackages: test-drive dev dependency is added')
+        call assert(dev_dependency_tag(c, 'test-drive') == 'v0.4.0', &
+            'source_metapackages: test-drive is pinned by tag, not by branch')
         call fs_remove_tree(dir)
     end subroutine test_source_metapackages
 
@@ -723,6 +725,24 @@ contains
             end if
         end do
     end function has_dev_dependency
+
+    function dev_dependency_tag(c, name) result(tag)
+        type(fpm_config_t), intent(in) :: c
+        character(len=*), intent(in) :: name
+        character(len=:), allocatable :: tag
+        integer :: i
+
+        tag = '<missing>'
+        do i = 1, c%n_dev_deps
+            if (trim(c%dev_deps(i)%name) == trim(name)) then
+                if (len_trim(c%dev_deps(i)%branch) > 0) then
+                    tag = '<branch>'
+                else
+                    tag = trim(c%dev_deps(i)%tag)
+                end if
+            end if
+        end do
+    end function dev_dependency_tag
 
     subroutine test_flags_with_equals_inline()
         !! Flags with '=' (e.g. -fsanitize=address) must be preserved verbatim
