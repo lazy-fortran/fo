@@ -25,7 +25,7 @@ program test_gremlin_status_json
     !! Previous emitter output for this state: the published state, the
     !! readiness tail, the coverage member and the wait decoration.
     character(len=*), parameter :: GOLDEN_1 = &
-        '{"protocol":1,"session_id":"owner-1","lane_id":"lane-a","policy_key":"99'// &
+        '{"protocol":1,"session_id":"owner-1","lane_id":"lane-a","lifetime":"persistent","policy_key":"99'// &
         '99999999999999999999999999999999999999999999999999999999999999","state":'// &
         '"testing","driver_path":"/opt/fo \"x\"\\bin/fo","driver_digest":"aaaaaaa'// &
         'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","driver_size"'// &

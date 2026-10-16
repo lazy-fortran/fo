@@ -168,9 +168,17 @@ static int stop_path(const char *dir, char *path, size_t cap) {
     return snprintf(path, cap, "%s/stop.request", dir) >= (int)cap ? ENAMETOOLONG : 0;
 }
 
+int fo_gremlin_process_matches(int pid, const char *start);
+
+static int task_path(const char *dir, char *path, size_t cap) {
+    return snprintf(path, cap, "%s/task.owner", dir) >= (int)cap ? ENAMETOOLONG : 0;
+}
+
+/* Drops the stop request and the task binding of the previous owner. */
 static void clear_stop(const char *dir) {
     char path[PATH_MAX];
     if (stop_path(dir, path, sizeof(path)) == 0) unlink(path);
+    if (task_path(dir, path, sizeof(path)) == 0) unlink(path);
 }
 
 static int verify_owner_fd(const char *dir, int fd) {
@@ -449,6 +457,26 @@ int fo_gremlin_session_request_stop(const char *project, const char *lane,
 
 int fo_gremlin_session_stop_requested(const char *dir, const char *session) {
     char path[PATH_MAX], value[128];
+    struct stat gone;
+    /* A lane whose state directory vanished has nothing left to own: its
+       owner is asked to stop exactly as if a stop request had been written. */
+    if (stat(dir, &gone) != 0 && errno == ENOENT) return 1;
+    /* A task-owned lane stops when the client that created it is gone. */
+    if (task_path(dir, path, sizeof(path)) == 0) {
+        int tfd = open(path, O_RDONLY | O_CLOEXEC);
+        if (tfd >= 0) {
+            char text[128];
+            ssize_t m = read(tfd, text, sizeof(text) - 1);
+            close(tfd);
+            int pid = 0;
+            char start[64];
+            if (m > 0) {
+                text[m] = 0;
+                if (sscanf(text, "%d %63s", &pid, start) == 2 && pid > 0 &&
+                    !fo_gremlin_process_matches(pid, start)) return 1;
+            }
+        }
+    }
     int e = stop_path(dir, path, sizeof(path));
     if (e) return -e;
     int fd = open(path, O_RDONLY | O_CLOEXEC);
@@ -458,6 +486,27 @@ int fo_gremlin_session_stop_requested(const char *dir, const char *session) {
     if (n < 0) return -errno;
     value[n] = 0;
     return strcmp(value, session) == 0 ? 1 : 0;
+}
+
+/* Bind the live owner's lane to the client process that created it; the
+   owner then stops once that process identity is gone. */
+int fo_gremlin_session_bind_task(const char *dir, int pid, const char *start) {
+    char text[128];
+    int n = snprintf(text, sizeof(text), "%d %s\n", pid, start);
+    if (pid <= 0 || n < 0 || n >= (int)sizeof(text)) return EINVAL;
+    return atomic_write_file(dir, "task.owner", text, (size_t)n);
+}
+
+/* Identity (pid and start stamp) of this process, or of its parent. */
+int fo_gremlin_client_identity(int parent, int *pid, char *start, int cap) {
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    if (parent) return ENOTSUP;
+    *pid = (int)GetCurrentProcessId();
+#else
+    *pid = parent ? (int)getppid() : (int)getpid();
+#endif
+    if (*pid <= 1) return ESRCH;
+    return fo_sys_process_start_text((pid_t)*pid, start, (size_t)cap);
 }
 
 int fo_gremlin_process_matches(int pid, const char *start) {
@@ -776,7 +825,11 @@ static int admission_guard_start(const char *scope, const int *fds, int weight,
                 continue;
             }
             int active = alive && observed == 0;
-            int payload_drained = alive || !*state ||
+            /* A deleted lane state directory holds no payload to drain. */
+            struct stat state_stat;
+            int state_gone = *state && lstat(state, &state_stat) != 0 &&
+                             errno == ENOENT;
+            int payload_drained = alive || !*state || state_gone ||
                 fo_c_recover_async_scope(state, (int)owner, owner_start) == 0;
             if (!active && payload_drained) {
                 int gate = -1;
@@ -962,6 +1015,63 @@ int fo_gremlin_host_scope_retire(int *authority, int *guardian, const char *scop
     return e;
 }
 
+#if !defined(_WIN32) || defined(__CYGWIN__)
+/* Remove admission entries whose owner is provably gone: a guardian marker
+   and a scope authority are held under flock while their owner lives, so an
+   entry is stale only when its recorded process identity no longer matches
+   and its lock can be taken (scopes also need drained children). Anything
+   unreadable, foreign or contended is left alone. */
+static void admission_collect_garbage(const char *base) {
+    char directory[PATH_MAX], path[PATH_MAX], name[PATH_MAX];
+    struct dirent *entry;
+    struct stat st;
+    DIR *dir;
+
+    if (snprintf(directory, sizeof(directory), "%s/guardians", base)
+        < (int)sizeof(directory) && (dir = opendir(directory)) != NULL) {
+        while ((entry = readdir(dir)) != NULL) {
+            int pid;
+            char start[64];
+            if (sscanf(entry->d_name, "%d-%63s", &pid, start) != 2 || pid <= 0)
+                continue;
+            if (snprintf(name, sizeof(name), "%d-%s", pid, start) >= (int)sizeof(name) ||
+                strcmp(name, entry->d_name) != 0 ||
+                fo_gremlin_process_matches(pid, start) ||
+                snprintf(path, sizeof(path), "%s/%s", directory, name) >= (int)sizeof(path))
+                continue;
+            int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+            if (fd < 0) continue;
+            if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_uid == geteuid() &&
+                flock(fd, LOCK_EX | LOCK_NB) == 0)
+                unlink(path);
+            close(fd);
+        }
+        closedir(dir);
+    }
+    if (snprintf(directory, sizeof(directory), "%s/scopes", base)
+        >= (int)sizeof(directory) || (dir = opendir(directory)) == NULL) return;
+    while ((entry = readdir(dir)) != NULL) {
+        struct admission_owner owner;
+        if (entry->d_name[0] == '.' ||
+            snprintf(path, sizeof(path), "%s/%s", directory, entry->d_name)
+                >= (int)sizeof(path) ||
+            lstat(path, &st) != 0 || !S_ISDIR(st.st_mode) || st.st_uid != geteuid())
+            continue;
+        if (snprintf(name, sizeof(name), "%s/authority", path) >= (int)sizeof(name))
+            continue;
+        int fd = open(name, O_RDWR | O_CLOEXEC | O_NOFOLLOW);
+        if (fd < 0) continue;
+        if (admission_read(fd, &owner) == 0 &&
+            !fo_gremlin_process_matches(owner.pid, owner.start) &&
+            flock(fd, LOCK_EX | LOCK_NB) == 0 &&
+            admission_children_busy(path, owner.weight) == 0)
+            (void)fo_c_rm_rf(path);
+        close(fd);
+    }
+    closedir(dir);
+}
+#endif
+
 int fo_gremlin_host_lease_acquire_weighted(const char *kind, int capacity,
                                            int weight, int *fds, int *slots,
                                            int *authority, int *guardian, char *scope,
@@ -975,6 +1085,9 @@ int fo_gremlin_host_lease_acquire_weighted(const char *kind, int capacity,
 #endif
     *authority = -1; *guardian = 0; scope[0] = '\0'; previous[0] = '\0';
     if (e) return e;
+#if !defined(_WIN32) || defined(__CYGWIN__)
+    admission_collect_garbage(base);
+#endif
 #if defined(_WIN32) && !defined(__CYGWIN__)
     machine_gate = admission_machine_gate();
     if (!machine_gate) return errno;

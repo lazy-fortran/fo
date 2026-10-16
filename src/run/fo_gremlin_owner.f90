@@ -46,6 +46,7 @@ module fo_gremlin_owner
     use fo_gremlin_state, only: gremlin_session_t, gremlin_lease_t, &
         gremlin_lease_group_t, gremlin_session_acquire, gremlin_session_publish, &
         gremlin_session_read, gremlin_session_release, gremlin_session_stop_requested, &
+        gremlin_session_bind_task, &
         gremlin_lease_release, gremlin_generation_lease_acquire_at, &
         gremlin_generation_pin_at, gremlin_generation_prune_inactive, &
         GREMLIN_STATE_TEXT_MAX
@@ -199,6 +200,15 @@ contains
                 'ownership setup failure: '//trim(detail))
             return
         end if
+        if (trim(request%lifetime) == 'task') then
+            call bind_task_client(o%session, ierr, o%message)
+            if (ierr /= 0) then
+                call release_if_owner(o%session)
+                call refuse('cannot bind the task-owned lane to its client: '// &
+                    trim(o%message))
+                return
+            end if
+        end if
         call maintain_fo_cache(o%cache_cursor, status)
         if (status /= 0) then
             write (error_unit, '(a,i0)') 'Gremlin cache maintenance: ', status
@@ -246,6 +256,28 @@ contains
         end subroutine refuse
 
     end subroutine owner_open
+
+    subroutine bind_task_client(session, ierr, message)
+        !! The launcher names the creating client in the environment; the lane
+        !! stops (see gremlin_session_stop_requested) once that process is gone.
+        type(gremlin_session_t), intent(in) :: session
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+        character(len=64) :: pid_text, start
+        integer :: pid, ios
+
+        pid_text = ''
+        start = ''
+        call get_environment_variable('FO_GREMLIN_TASK_PID', pid_text)
+        call get_environment_variable('FO_GREMLIN_TASK_START', start)
+        read (pid_text, *, iostat=ios) pid
+        if (ios /= 0 .or. len_trim(start) == 0) then
+            ierr = 1
+            message = 'the launcher did not identify the client process'
+            return
+        end if
+        call gremlin_session_bind_task(session, pid, trim(start), ierr, message)
+    end subroutine bind_task_client
 
     subroutine release_if_owner(session)
         type(gremlin_session_t), intent(inout) :: session

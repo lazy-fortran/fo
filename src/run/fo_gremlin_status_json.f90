@@ -47,6 +47,7 @@ contains
         call json_key_int(jb, 'protocol', 1)
         call json_key_string(jb, 'session_id', trim(session%session_id))
         call json_key_string(jb, 'lane_id', trim(request%lane_id))
+        call json_key_string(jb, 'lifetime', trim(request%lifetime))
         call json_key_string(jb, 'policy_key', policy_key)
         call json_key_string(jb, 'state', trim(state))
         call json_key_string(jb, 'driver_path', trim(session%driver_path))
@@ -221,7 +222,8 @@ contains
         character(len=*), intent(in) :: status_text, action, latest_failure
         character(len=:), allocatable :: text
         character(len=32), parameter :: strings(*) = [character(len=32) :: &
-            'session_id', 'lane_id', 'state', 'phase', 'health', 'current_test', &
+            'session_id', 'lane_id', 'lifetime', 'state', 'phase', 'health', &
+            'current_test', &
             'active_generation', 'candidate_generation', 'last_outcome', &
             'diagnostic', 'verification_level', 'requirement_digest', 'wait_until']
         character(len=32), parameter :: scalars(*) = [character(len=32) :: &

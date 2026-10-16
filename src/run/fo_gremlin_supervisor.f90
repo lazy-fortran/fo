@@ -40,6 +40,7 @@ module fo_gremlin_supervisor
         gremlin_lease_group_t, gremlin_session_acquire, gremlin_session_read, &
         gremlin_session_release, gremlin_session_state_dir, &
         gremlin_session_request_stop, gremlin_session_stop_requested, &
+        gremlin_client_identity, &
         gremlin_generation_lease_acquire_at, gremlin_generation_pin_at, &
         GREMLIN_STATE_TEXT_MAX
     use fo_gremlin_status_json, only: gremlin_status_enrich, gremlin_wait_decorate, &
@@ -60,13 +61,18 @@ module fo_gremlin_supervisor
 
 contains
 
-    subroutine gremlin_handle(action, project_dir, request_json, response_json, exitcode)
+    subroutine gremlin_handle(action, project_dir, request_json, response_json, exitcode, &
+            own_client)
+        !! own_client: the calling process is itself the client whose end stops a
+        !! task-owned lane (an MCP server); by default that client is its parent.
         character(len=*), intent(in) :: action, project_dir, request_json
         character(len=:), allocatable, intent(out) :: response_json
         integer, intent(out) :: exitcode
+        logical, intent(in), optional :: own_client
 
         type(gremlin_request_t), allocatable :: request
         type(gremlin_session_t) :: session
+        logical :: client_is_self
         character(len=PATH_LEN) :: error_message, owner_start
         character(len=GREMLIN_STATE_TEXT_MAX) :: status_text
         character(len=128) :: session_id
@@ -90,7 +96,10 @@ contains
 
         select case (trim(action))
         case ('start', 'gremlin_start')
-            call handle_start(project_dir, request, response_json, exitcode)
+            client_is_self = .false.
+            if (present(own_client)) client_is_self = own_client
+            call handle_start(project_dir, request, client_is_self, response_json, &
+                exitcode)
         case ('run')
             call run_owner(project_dir, request, response_json, exitcode)
         case ('status')
@@ -135,9 +144,10 @@ contains
     end subroutine gremlin_handle
 
 
-    subroutine handle_start(project_dir, request, response, exitcode)
+    subroutine handle_start(project_dir, request, client_is_self, response, exitcode)
         character(len=*), intent(in) :: project_dir
         type(gremlin_request_t), intent(in) :: request
+        logical, intent(in) :: client_is_self
         character(len=:), allocatable, intent(out) :: response
         integer, intent(out) :: exitcode
 
@@ -148,10 +158,11 @@ contains
         character(len=PATH_LEN) :: message, owner_start, log_file
         character(len=128) :: session_id
         character(len=HASH_LEN) :: stored_policy
-        integer :: ierr, owner_pid, spawn_exit, i, n_args
+        integer :: ierr, owner_pid, spawn_exit, i, n_args, client_pid
         integer, parameter :: READY_WAIT_POLLS = 1200
         logical :: ready, owner_exited
-        character(len=:), allocatable :: packed
+        character(len=64) :: client_start
+        character(len=:), allocatable :: packed, launch_env
 
         exitcode = 0
         call gremlin_session_acquire(project_dir, trim(request%lane_id), &
@@ -223,8 +234,25 @@ contains
             call argv_push(packed, n_args, trim(request%targets(i)))
         end do
         call push_scope_args(packed, n_args, request)
+        launch_env = 'FO_DISABLE_SELF_REFRESH=1;FO_SELF_REFRESH=0'
+        if (trim(request%lifetime) == 'task') then
+            ! The lane stops with the client that created it: this process for an
+            ! MCP server, otherwise the process that ran this `fo gremlin start`.
+            call gremlin_client_identity(.not. client_is_self, client_pid, &
+                client_start, ierr)
+            if (ierr /= 0) then
+                call error_response('start', 'cannot identify the client process '// &
+                    'of a task-owned lane (error '//int_text(ierr)//')', response)
+                exitcode = 2
+                return
+            end if
+            call argv_push(packed, n_args, '--owner')
+            call argv_push(packed, n_args, 'task')
+            launch_env = launch_env//';FO_GREMLIN_TASK_PID='//int_text(client_pid)// &
+                ';FO_GREMLIN_TASK_START='//trim(client_start)
+        end if
         call exec_start(launcher, project_dir, packed, n_args, log_file, spawn_exit, &
-            'FO_DISABLE_SELF_REFRESH=1;FO_SELF_REFRESH=0')
+            launch_env)
         if (spawn_exit /= 0) then
             call error_response('start', 'cannot launch the Gremlin owner '// &
                 '(process setup error '//int_text(spawn_exit)//')', response)

@@ -437,7 +437,7 @@ contains
             return
         end if
         call gremlin_handle(trim(core_action), fs_canonical_path(trim(project_dir)), &
-            trim(request_json), result_json, exitcode)
+            trim(request_json), result_json, exitcode, own_client=.true.)
         call make_tool_text_response(id_str, result_json, exitcode, response)
     end subroutine handle_gremlin_action
 

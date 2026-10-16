@@ -23,7 +23,7 @@ module fo_test_harness
     public :: terminate_process_group, spawn_heartbeat_process
     public :: reset_assertions_for_probe
     public :: exercise_failure_cleanup_probe, open_descriptor_count, harness_probe_entry
-    public :: resolve_test_executable
+    public :: resolve_test_executable, set_teardown_hook
     public :: sleep_ms, spawn_unowned_process
     public :: run_git, argv, run_list, spawn_list, copy_mtime, set_mtime, add_words, set_mode
 
@@ -52,6 +52,12 @@ module fo_test_harness
     type(string_t), allocatable, save :: failures(:)
     type(string_t), allocatable, save :: scratch_paths(:)
     integer, parameter :: MAX_SCRATCH_DIRECTORIES = 128
+
+    abstract interface
+        subroutine teardown_hook_i()
+        end subroutine teardown_hook_i
+    end interface
+    procedure(teardown_hook_i), pointer, save :: teardown_hook => null()
 
     type, bind(C) :: pollfd_t
         integer(c_int) :: descriptor
@@ -1588,6 +1594,14 @@ contains
         call move_alloc(grown, failures)
     end subroutine record_failure
 
+    subroutine set_teardown_hook(hook)
+        !! A fixture teardown that finish_assertions runs once, before it
+        !! removes scratch, whether or not assertions failed.
+        procedure(teardown_hook_i) :: hook
+
+        teardown_hook => hook
+    end subroutine set_teardown_hook
+
     subroutine finish_assertions(retain_failed_scratch)
         logical, optional, intent(in) :: retain_failed_scratch
         type(string_t), allocatable :: pending_failures(:)
@@ -1599,6 +1613,10 @@ contains
         integer :: i, j, path_length, failure_count
         logical :: retain
 
+        if (associated(teardown_hook)) then
+            call teardown_hook()
+            teardown_hook => null()
+        end if
         rc = c_gate_close_all()
         if (rc /= 0) call record_failure("close test-owned process gates")
         failure_count = 0

@@ -4,7 +4,7 @@ module fo_test_gremlin_oracle
     use fo_test_harness, only: string_list_t, process_result_t, list_add
     use fo_test_harness, only: make_scratch, join_path, make_directory, write_text
     use fo_test_harness, only: read_text, file_exists, run_process, assert_true
-    use fo_test_harness, only: terminate_process_group
+    use fo_test_harness, only: terminate_process_group, set_teardown_hook
     use fo_fs, only: fs_is_windows
     use fo_test_json, only: json_value_t, json_parse, json_member, json_string_value
     implicit none
@@ -17,7 +17,13 @@ module fo_test_gremlin_oracle
     public :: gremlin_gate_read_source, gremlin_pid_binding
     public :: gremlin_stop_child
     public :: gremlin_stop_lane
-    public :: gremlin_process_running
+    public :: gremlin_process_running, gremlin_owner_pid, gremlin_wait_exit
+
+    type :: lane_record_t
+        !! A lane this fixture started, remembered for teardown.
+        character(:), allocatable :: driver, project, cache, state, lane
+    end type lane_record_t
+    type(lane_record_t), allocatable, save :: started_lanes(:)
 
     interface
         integer(c_int) function c_setenv(name, value, overwrite) bind(C, name='fo_test_setenv')
@@ -75,6 +81,96 @@ contains
         gremlin_process_running = c_process_running(int(pid, c_int)) == 1
     end function gremlin_process_running
 
+    integer function gremlin_owner_pid(session) result(pid)
+        !! The owner process of a session ID ("PID-seconds-nanoseconds"), or -1.
+        character(len=*), intent(in) :: session
+        integer :: dash, ios
+
+        pid = -1
+        dash = index(session, '-')
+        if (dash < 2) return
+        read (session(:dash - 1), *, iostat=ios) pid
+        if (ios /= 0) pid = -1
+    end function gremlin_owner_pid
+
+    logical function gremlin_wait_exit(pid, timeout_ms) result(exited)
+        !! Poll until the process is gone, within timeout_ms.
+        integer, intent(in) :: pid, timeout_ms
+        integer :: waited
+
+        waited = 0
+        do
+            exited = .not. gremlin_process_running(pid)
+            if (exited .or. waited >= timeout_ms) return
+            call gremlin_wait_ms(50)
+            waited = waited + 50
+        end do
+    end function gremlin_wait_exit
+
+    subroutine note_started_lane(driver, cache, state, arguments)
+        !! Remember a successfully started lane so fixture teardown stops it.
+        character(len=*), intent(in) :: driver, cache, state
+        type(string_list_t), intent(in) :: arguments
+        type(lane_record_t), allocatable :: grown(:)
+        type(lane_record_t) :: record
+        integer :: i, n
+
+        record%driver = trim(driver)
+        record%cache = trim(cache)
+        record%state = trim(state)
+        record%lane = 'default'
+        record%project = ''
+        do i = 3, size(arguments%items) - 1
+            if (arguments%items(i)%value == '--dir') record%project = &
+                arguments%items(i + 1)%value
+            if (arguments%items(i)%value == '--lane') record%lane = &
+                arguments%items(i + 1)%value
+        end do
+        if (len(record%project) == 0) return
+        n = 0
+        if (allocated(started_lanes)) n = size(started_lanes)
+        allocate (grown(n + 1))
+        do i = 1, n
+            grown(i) = started_lanes(i)
+        end do
+        grown(n + 1) = record
+        call move_alloc(grown, started_lanes)
+    end subroutine note_started_lane
+
+    subroutine stop_started_lanes()
+        !! Fixture teardown: stop every lane this fixture started and require
+        !! its owner to exit, so no lane outlives the fixture or a failed
+        !! assertion.
+        type(string_list_t) :: args
+        type(process_result_t) :: stopped
+        type(json_value_t) :: reply
+        character(:), allocatable :: message
+        integer :: i, owner
+        logical :: valid
+
+        if (.not. allocated(started_lanes)) return
+        do i = 1, size(started_lanes)
+            args = string_list_t()
+            call list_add(args, 'gremlin')
+            call list_add(args, 'stop')
+            call list_add(args, '--dir')
+            call list_add(args, started_lanes(i)%project)
+            call list_add(args, '--lane')
+            call list_add(args, started_lanes(i)%lane)
+            call gremlin_run(started_lanes(i)%driver, started_lanes(i)%project, &
+                started_lanes(i)%cache, started_lanes(i)%state, args, stopped, &
+                timeout=20000)
+            if (stopped%exit_code /= 0) cycle
+            call json_parse(stopped%stdout, reply, valid, message)
+            if (.not. valid) cycle
+            owner = gremlin_owner_pid(gremlin_field(reply, 'session_id'))
+            if (owner <= 0) cycle
+            call assert_true(gremlin_wait_exit(owner, 20000), &
+                'fixture teardown stops lane '//started_lanes(i)%lane)
+        end do
+        deallocate (started_lanes)
+    end subroutine stop_started_lanes
+
     subroutine gremlin_setup(driver, scratch, project, cache, state, capture_counter)
         character(:), allocatable, intent(out) :: driver, scratch, project, cache, state
         character(:), allocatable, optional, intent(out) :: capture_counter
@@ -102,6 +198,8 @@ contains
                 driver = 'fo'
             end if
         end if
+        if (allocated(started_lanes)) deallocate (started_lanes)
+        call set_teardown_hook(stop_started_lanes)
         call make_scratch('fo-gremlin-fortran-oracle', scratch)
         project = join_path(scratch, 'project')
         cache = join_path(scratch, 'cache')
@@ -175,6 +273,13 @@ contains
             call run_process(command, cwd, result, child_environment, timeout_ms=timeout)
         else
             call run_process(command, cwd, result, child_environment)
+        end if
+        if (result%exit_code == 0 .and. allocated(arguments%items)) then
+            if (size(arguments%items) >= 2) then
+                if (arguments%items(1)%value == 'gremlin' .and. &
+                    arguments%items(2)%value == 'start') &
+                    call note_started_lane(driver, cache, state, arguments)
+            end if
         end if
     end subroutine gremlin_run
 

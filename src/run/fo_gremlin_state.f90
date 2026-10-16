@@ -47,7 +47,8 @@ module fo_gremlin_state
     public :: gremlin_session_state_dir
     public :: gremlin_session_recovery_complete
     public :: gremlin_session_request_stop, gremlin_session_stop_requested
-    public :: gremlin_session_process_matches
+    public :: gremlin_session_process_matches, gremlin_client_identity
+    public :: gremlin_session_bind_task
     public :: gremlin_lease_acquire, gremlin_lease_release
     public :: gremlin_host_lease_acquire_weighted, gremlin_host_lease_release
     public :: gremlin_generation_register_lease_at
@@ -133,6 +134,24 @@ module fo_gremlin_state
             character(kind=c_char), intent(in) :: dir(*), session(*)
             integer(c_int) :: requested
         end function c_session_stop_requested
+
+        function c_session_bind_task(dir, pid, start) &
+                bind(C, name='fo_gremlin_session_bind_task') result(ierr)
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: dir(*), start(*)
+            integer(c_int), value :: pid
+            integer(c_int) :: ierr
+        end function c_session_bind_task
+
+        function c_client_identity(parent, pid, start, cap) &
+                bind(C, name='fo_gremlin_client_identity') result(ierr)
+            import :: c_char, c_int
+            integer(c_int), value :: parent, cap
+            integer(c_int), intent(out) :: pid
+            character(kind=c_char), intent(out) :: start(*)
+            integer(c_int) :: ierr
+        end function c_client_identity
+
 
         function c_lease_acquire(kind, capacity, fd, slot) &
                 bind(C, name='fo_gremlin_lease_acquire') result(ierr)
@@ -455,6 +474,36 @@ contains
         end if
         message = error_text(ierr)
     end subroutine gremlin_session_stop_requested
+
+    subroutine gremlin_client_identity(parent, pid, start, ierr)
+        !! Process identity (pid and start stamp) of this process, or of its
+        !! parent, as a task-owned lane's creating client.
+        logical, intent(in) :: parent
+        integer, intent(out) :: pid, ierr
+        character(len=*), intent(out) :: start
+        character(kind=c_char) :: raw(64)
+        integer(c_int) :: c_pid
+
+        c_pid = 0
+        raw = c_null_char
+        ierr = int(c_client_identity(merge(1_c_int, 0_c_int, parent), c_pid, raw, &
+            int(size(raw), c_int)))
+        pid = int(c_pid)
+        start = c_string(raw)
+    end subroutine gremlin_client_identity
+
+    subroutine gremlin_session_bind_task(session, pid, start, ierr, message)
+        !! Make the owner's lane stop when the client process pid/start ends.
+        type(gremlin_session_t), intent(in) :: session
+        integer, intent(in) :: pid
+        character(len=*), intent(in) :: start
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+
+        ierr = int(c_session_bind_task(session%state_dir//c_null_char, &
+            int(pid, c_int), trim(start)//c_null_char))
+        message = error_text(ierr)
+    end subroutine gremlin_session_bind_task
 
     logical function gremlin_session_process_matches(session)
         type(gremlin_session_t), intent(in) :: session

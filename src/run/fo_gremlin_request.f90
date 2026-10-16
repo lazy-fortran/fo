@@ -37,6 +37,8 @@ module fo_gremlin_request
         character(len=HASH_LEN) :: generation_id = ''
         character(len=32) :: wait_until = ''
         character(len=8) :: detail = 'full'
+        !! 'persistent' lanes outlive their client; 'task' lanes stop with it.
+        character(len=10) :: lifetime = 'persistent'
         logical :: input_changed = .false.
         logical :: has_previous_generation = .false.
         character(len=NAME_LEN), allocatable :: impact_cases(:)
@@ -77,7 +79,7 @@ module fo_gremlin_request
         character(len=72) :: note = ''
     end type gremlin_option_t
 
-    integer, parameter, public :: N_GREMLIN_OPTIONS = 23
+    integer, parameter, public :: N_GREMLIN_OPTIONS = 24
     type(gremlin_option_t), parameter, public :: GREMLIN_OPTIONS(N_GREMLIN_OPTIONS) = [ &
         gremlin_option_t('lane_id', '--lane', '', 'string', GA_ANY), &
         gremlin_option_t('session_id', '--session', '', 'string', GA_ANY - GA_START), &
@@ -108,6 +110,9 @@ module fo_gremlin_request
             0, GA_UNBOUNDED), &
         gremlin_option_t('max_records', '--max-records', '', 'int', GA_READS, 1, 128), &
         gremlin_option_t('max_bytes', '--max-bytes', '', 'int', GA_READS, 1, 262144), &
+        gremlin_option_t('lifetime', '--owner', '--lifetime', 'string', GA_START, &
+            choices='persistent,task', &
+            note='task: the lane stops when the client that started it ends'), &
         gremlin_option_t('wait_ms', '--wait-ms', '', 'int', GA_WAIT, 0, 30000), &
         gremlin_option_t('wait_until', '--until', '', 'string', GA_WAIT, &
             choices='local-gate-green,ordinary-verified,fully-verified,quiescent,failure'), &
@@ -560,6 +565,8 @@ contains
                 request%filter = value
             case ('wait_until')
                 request%wait_until = value
+            case ('lifetime')
+                request%lifetime = value
             case ('detail')
                 request%detail = value
             end select
