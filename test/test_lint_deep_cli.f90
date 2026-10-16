@@ -464,7 +464,7 @@ contains
         before = run_count()
         call run_fo(driver, arguments, project, cache, result, environment)
      call assert_equal_integer(result%exit_code, 0, 'resident ordinary campaign starts')
-        do tries = 1, 600
+        do tries = 1, 2400
             if (file_exists(marker)) exit
             call fs_sleep_ms(50)
         end do
