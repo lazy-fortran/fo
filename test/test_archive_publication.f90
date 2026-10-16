@@ -883,7 +883,7 @@ contains
     subroutine exercise_stale_archive(archive_path)
         character(len=*), intent(in) :: archive_path
         character(:), allocatable :: stale_dir, stale_source, stale_object, module_dir
-        character(:), allocatable :: source, expected_digest
+        character(:), allocatable :: source, expected_digest, stale_mod_dir
         type(string_list_t) :: command, fo_arguments
         type(process_result_t) :: result
         integer :: before, after
@@ -898,9 +898,10 @@ contains
             new_line('a') // 'end function right_value' // new_line('a') // &
             'end module archive_right' // new_line('a')
         call write_text(stale_source, source)
-        call make_directory(join_path(stale_dir, 'mod'))
+        stale_mod_dir = join_path(stale_dir, 'mod')
+        call make_directory(stale_mod_dir)
         command = words([character(len=512) :: '-c', '-fPIC', '-I', module_dir, '-J', &
-            join_path(stale_dir, 'mod'), '-o', stale_object, stale_source])
+            stale_mod_dir, '-o', stale_object, stale_source])
         call run_external(real_fc, command, stale_dir, result)
         call assert_process_ok(result, 'compile independent stale archive member')
         command = words([character(len=512) :: 'rcs', archive_path, stale_object])

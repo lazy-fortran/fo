@@ -168,6 +168,7 @@ contains
     end subroutine check_expressions
 
     subroutine check_partitions()
+        character(len=16) :: hash_part
         character(:), allocatable :: full, joined
         character(len=2048) :: parts(6)
         character(len=16) :: names(5) = [character(len=16) :: 'test_base;', 'test_free;', 'test_lay_slow;', 'test_mid;', 'test_top;']
@@ -192,8 +193,9 @@ contains
         ! hash: disjoint and complete over three partitions.
         joined = ''
         do k = 1, 3
+            hash_part = 'hash:' // digit(k) // '/3'
             write (parts(k), '(a)') listing(layered, [character(len=160) :: '--all', &
-                '--partition', 'hash:'//digit(k)//'/3'])
+                '--partition', hash_part])
             joined = joined//trim(parts(k))
         end do
         n = 0

@@ -424,10 +424,12 @@ contains
 
     subroutine write_chain(root, body, interface_extra)
         character(len=*), intent(in) :: root, body, interface_extra
+        character(:), allocatable :: value_line
 
+        value_line = '  low_value = ' // body
         call write_lines(join_path(root, 'low.f90'), [character(len=70) :: &
             'module low_mod', 'implicit none', interface_extra, 'contains', &
-            'integer function low_value()', '  low_value = '//body, &
+            'integer function low_value()', value_line, &
             'end function', 'end module'])
     end subroutine write_chain
 

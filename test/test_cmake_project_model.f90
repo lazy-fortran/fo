@@ -75,10 +75,12 @@ contains
         ! A fixed-length local avoids gfortran 16 sizing a typed one-element
         ! constructor of a run-time concatenation by its value, not its type.
         character(len=256) :: preset
+        character(len=160) :: subdir_line
+        subdir_line = 'add_subdirectory("'//dependency//'" dep_build)'
         call write_lines(join_path(project, 'CMakeLists.txt'), [character(len=160) :: &
             'cmake_minimum_required(VERSION 3.20)', &
             'project(pm Fortran)', &
-            'add_subdirectory("'//dependency//'" dep_build)', &
+            subdir_line, &
             'add_subdirectory(core)', &
             'add_subdirectory(model)', &
             'add_executable(exe main.f90)', &

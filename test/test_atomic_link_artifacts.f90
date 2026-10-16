@@ -253,6 +253,7 @@ contains
         type(process_result_t), intent(in) :: failed
         character(:), allocatable :: target, digest
         character(len=4096) :: evidence_dir
+        character(:), allocatable :: evidence_copy
         type(process_result_t) :: inspected
         integer :: env_status
 
@@ -277,9 +278,9 @@ contains
             status=env_status)
         if (env_status /= 0 .or. len_trim(evidence_dir) == 0 .or. len(digest) /= 64) &
             return
+        evidence_copy = join_path(trim(evidence_dir), 'failed-exec-' // digest)
         call run_external('/bin/cp', &
-            words([character(len=4096) :: target, &
-            join_path(trim(evidence_dir), 'failed-exec-' // digest)]), &
+            words([character(len=4096) :: target, evidence_copy]), &
             scratch, inspected)
         call assert_process_ok(inspected, 'retain exact failed publication image')
     end subroutine describe_launch_failure

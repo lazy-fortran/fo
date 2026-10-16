@@ -85,7 +85,7 @@ contains
             call write_lines(join_path(dir, 'fpm.toml'), [character(len=80) :: &
                 'name = "tw"', '[extra.fo.layers]', &
                 'tw_core = { source = ["src/tw_core.f90"] }', &
-                trim(phys_layer), trim(aux_layer), &
+                phys_layer, aux_layer, &
                 '[extra.fo.test-groups]', &
                 'unit = { tests = ["test/test_core_a*", "test/test_phys_b*"] }', &
                 'io = { tests = ["test/test_io_c*"], inputs = ["data/io_ref.dat"] }', &
@@ -99,7 +99,7 @@ contains
                 'enable_testing()', &
                 'add_library(tw_core STATIC src/tw_core.f90)', &
                 'add_library(tw_phys STATIC src/tw_phys.f90)', &
-                trim(phys_link), trim(aux_library), &
+                phys_link, aux_library, &
                 'foreach(t core_a phys_b io_c slow_d)', &
                 '  add_executable(test_${t} test/test_${t}.f90)', &
                 '  add_test(NAME test_${t} COMMAND test_${t})', 'endforeach()', &

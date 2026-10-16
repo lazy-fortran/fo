@@ -2108,7 +2108,7 @@
             do k = 1, n_objects
                 candidate = objects(k)
                 call run_backend_argv('nm', &
-                    [character(len=512) :: '-P', '-g', trim(candidate)], &
+                    [character(len=512) :: '-P', '-g', candidate], &
                     symbols, stat)
                 if (stat /= 0) exit
                 defines_symbol = .false.

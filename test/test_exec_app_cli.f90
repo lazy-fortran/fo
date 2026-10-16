@@ -112,7 +112,7 @@ contains
                 call write_program(join_path(project, source), trim(values(i)))
                 previous = values(i)
             end if
-            command = words([character(len=32) :: 'exec', trim(target)])
+            command = words([character(len=32) :: 'exec', target])
             call invoke(project, command, child)
             call assert_process_ok(child, trim(target) // ' cold/warm/updated execution')
             call assert_equal_string(child%stdout, trim(values(i)) // new_line('a'), &
