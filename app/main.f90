@@ -45,6 +45,9 @@ program fo_main
     use fo_scaffold, only: scaffold_project
     use fo_version_info, only: FO_VERSION
     use fo_progress, only: progress_suppress
+    use fo_test_cache, only: test_cache_run
+    use fo_junit, only: junit_write
+    use fo_case_filter, only: partition_parse, partition_keep
     implicit none
 
     character(len=256) :: action
@@ -510,6 +513,15 @@ contains
         write (out, '(a)') '  -LE, --exclude-label RE'
         write (out, '(a)') '                  drop cases whose labels match RE (repeat: AND)'
         write (out, '(a)') '  --layer NAME    select cases of layer NAME (repeat: union)'
+        write (out, '(a)') '  -E, --filter EXPR'
+        write (out, '(a)') '                  case filter, e.g. ''name(core_*) & !slow & affected()'''
+        write (out, '(a)') '                  (name(GLOB) label(RE) layer(NAME) WORD affected() failed()'
+        write (out, '(a)') '                  with & | ! and parentheses; ANDed with the other flags)'
+        write (out, '(a)') '  --rerun         run every selected case, reuse no recorded PASS'
+        write (out, '(a)') '  --no-cache      neither reuse nor record PASS results (Gremlin cases)'
+        write (out, '(a)') '  --junit PATH    also write JUnit XML of the results to PATH'
+        write (out, '(a)') '  --partition hash:K/N | count:K/N'
+        write (out, '(a)') '                  run only part K of N of the selected cases'
         write (out, '(a)') '  --list          print the selection and build plan; no build'
         write (out, '(a)') '                  (cases of built executables are listed)'
         write (out, '(a)') '  --retries N     retry a failed test N times; pass after fail is FLAKY'
@@ -886,6 +898,7 @@ contains
         allocate (request%names(0), request%include_labels(0), &
             request%exclude_labels(0), request%layers(0))
         n = 0
+        request%filter = ''
         do i = 2, command_argument_count() - 1
             call get_command_argument(i, arg)
             select case (trim(arg))
@@ -911,10 +924,13 @@ contains
             case ('--layer')
                 call get_command_argument(i + 1, arg)
                 call append_request_string(request%layers, arg)
+            case ('-E', '--filter')
+                call get_command_argument(i + 1, arg)
+                request%filter = trim(arg)
             end select
         end do
         scoped = size(request%include_labels) + size(request%exclude_labels) + &
-            size(request%layers) > 0
+            size(request%layers) > 0 .or. len(request%filter) > 0
         if (.not. scoped) then
             if (n == 0) then
                 call project_inventory_cases(model, cases)
@@ -1111,8 +1127,16 @@ contains
         character(len=512) :: test_log, flags
         character(len=64) :: profile
         character(len=1024) :: all_flags
+        character(len=:), allocatable :: filter_text, partition_text, junit_path
+        logical :: rerun, by_hash, no_cache
+        integer :: part, parts
 
         allocate (test_names(MAX_NODES), random_candidates(MAX_NODES))
+        filter_text = ''
+        partition_text = ''
+        junit_path = ''
+        rerun = env_flag('FO_TEST_RERUN')
+        no_cache = .false.
         only_changed = .false.
         include_all = .false.
         verbose = .false.
@@ -1174,6 +1198,19 @@ contains
                     if (len_trim(arg) <= eq) call test_usage_error('--layer needs NAME')
                     call append_request_string(request%layers, arg(eq + 1:))
                     cycle
+                case ('--filter')
+                    if (len_trim(arg) <= eq) call test_usage_error('--filter needs EXPR')
+                    filter_text = trim(arg(eq + 1:))
+                    cycle
+                case ('--junit')
+                    if (len_trim(arg) <= eq) call test_usage_error('--junit needs PATH')
+                    junit_path = trim(arg(eq + 1:))
+                    cycle
+                case ('--partition')
+                    if (len_trim(arg) <= eq) &
+                        call test_usage_error('--partition needs hash:K/N or count:K/N')
+                    partition_text = trim(arg(eq + 1:))
+                    cycle
                 end select
             end if
             select case (trim(arg))
@@ -1216,6 +1253,22 @@ contains
                 call test_option_value(i, '--layer needs NAME', arg)
                 call append_request_string(request%layers, arg)
                 skip_next = .true.
+            case ('-E', '--filter')
+                call test_option_value(i, '--filter needs EXPR', arg)
+                filter_text = trim(arg)
+                skip_next = .true.
+            case ('--junit')
+                call test_option_value(i, '--junit needs PATH', arg)
+                junit_path = trim(arg)
+                skip_next = .true.
+            case ('--partition')
+                call test_option_value(i, '--partition needs hash:K/N or count:K/N', arg)
+                partition_text = trim(arg)
+                skip_next = .true.
+            case ('--rerun')
+                rerun = .true.
+            case ('--no-cache')
+                no_cache = .true.
             case ('--list')
                 list_mode = .true.
             case ('--strict-flaky')
@@ -1281,7 +1334,12 @@ contains
         end if
 
         filtered = size(request%include_labels) > 0 .or. &
-            size(request%exclude_labels) > 0 .or. size(request%layers) > 0
+            size(request%exclude_labels) > 0 .or. size(request%layers) > 0 .or. &
+            len(filter_text) > 0
+        if (len(partition_text) > 0) then
+            call partition_parse(partition_text, by_hash, part, parts, ierr, message)
+            if (ierr /= 0) call test_usage_error(message)
+        end if
         if (random_count > 0) then
             if (filtered .or. list_mode .or. only_changed) then
                 write (error_unit, '(a)') 'fo test: --random conflicts with '// &
@@ -1298,9 +1356,11 @@ contains
         if (.not. project_has_model(b)) then
             ! Frozen FO_CMAKE_NATIVE route: no project model, the CTest
             ! registry is authoritative and a no-match is rejected by the run.
-            if (filtered .or. list_mode .or. only_changed .or. random_count > 0) then
-                write (error_unit, '(a)') 'fo test: -L, -LE, --layer, --list, '// &
-                    '--random and --only-changed need the project model '// &
+            if (filtered .or. list_mode .or. only_changed .or. random_count > 0 .or. &
+                    len(partition_text) > 0) then
+                write (error_unit, '(a)') 'fo test: -L, -LE, --layer, -E, --list, '// &
+                    '--random, --partition and --only-changed need the '// &
+                    'project model '// &
                     '(unsupported with FO_CMAKE_NATIVE)'
                 stop 1
             end if
@@ -1328,6 +1388,7 @@ contains
             request%names(i)%s = trim(test_names(i))
         end do
         request%all = include_all
+        request%filter = filter_text
         call project_select(b, all_flags, request, only_changed, model, selection, &
             widen_reasons, ierr, message)
         if (ierr /= 0) then
@@ -1338,6 +1399,17 @@ contains
             write (error_unit, '(a)') 'fo: affected selection widened: '// &
                 widen_reasons(i)%s
         end do
+        if (.not. only_changed .and. random_count == 0 .and. &
+            selection%status /= SELECT_EMPTY) then
+            ! Executables that list their cases are selected, cached and run
+            ! as cases; --list shows the cases of the executables already built.
+            call project_list_expand(b, all_flags, request, model, selection, &
+                ierr, message, build=.not. list_mode .and. .not. no_build)
+            if (ierr /= 0) then
+                write (error_unit, '(a)') 'fo: '//message
+                stop 1
+            end if
+        end if
         if (random_count > 0) then
             ! Candidates are the model's default selection.
             if (size(selection%cases) > size(random_candidates)) then
@@ -1366,16 +1438,9 @@ contains
             selection%cases = [(model_find_case(model, trim(test_names(i))), &
                 i=1, n_arg_names)]
         end if
+        if (len(partition_text) > 0 .and. selection%status /= SELECT_EMPTY) &
+            call narrow_to_partition(model, selection, by_hash, part, parts)
         if (list_mode) then
-            ! Built executables that list their cases show them as cases.
-            if (.not. only_changed .and. random_count == 0) then
-                call project_list_expand(b, all_flags, request, model, selection, &
-                    ierr, message)
-                if (ierr /= 0) then
-                    write (error_unit, '(a)') 'fo: '//message
-                    stop 1
-                end if
-            end if
             if (use_json) then
                 call project_list_json(model, selection, text)
             else
@@ -1397,14 +1462,60 @@ contains
             stop 1
         end if
         call make_tmpfile('fo-test', test_log)
-        call project_run_cases(b, model, selection%cases, all_flags, no_build, &
-            test_log, exitcode, selection)
+        if (size(selection%cases) == 0) then
+            ! Nothing in this partition; the report is empty and succeeds.
+            if (len(junit_path) > 0) call write_junit(junit_path, test_log)
+            write (output_unit, '(a)') 'no tests in partition '//trim(partition_text)
+            call delete_tmpfile(test_log)
+            return
+        end if
+        if (no_cache) then
+            call project_run_cases(b, model, selection%cases, all_flags, no_build, &
+                test_log, exitcode, selection)
+        else
+            call test_cache_run(b, model, selection%cases, all_flags, no_build, &
+                test_log, exitcode, rerun .or. random_count > 0, selection)
+        end if
         call report_test_result(exitcode, test_log, &
             (random_count == 0 .and. n_arg_names == 0 .and. .not. filtered .and. &
             .not. verbose .and. .not. only_changed) .or. quiet, use_json, &
-            require_results=.true., json_full=json_full, full_text=verbose)
+            require_results=.true., json_full=json_full, full_text=verbose, &
+            junit_path=junit_path)
         call delete_tmpfile(test_log)
     end subroutine cmd_test
+
+    subroutine narrow_to_partition(model, selection, by_hash, part, parts)
+        !! Keep the selected cases of partition part of parts (--partition).
+        type(project_model_t), intent(in) :: model
+        type(model_selection_t), intent(inout) :: selection
+        logical, intent(in) :: by_hash
+        integer, intent(in) :: part, parts
+        type(string_t), allocatable :: names(:)
+        logical, allocatable :: keep(:)
+        integer :: k
+
+        allocate (names(size(selection%cases)), keep(size(selection%cases)))
+        do k = 1, size(names)
+            names(k)%s = model%cases(selection%cases(k))%name
+        end do
+        call partition_keep(by_hash, part, parts, names, keep)
+        selection%cases = pack(selection%cases, keep)
+    end subroutine narrow_to_partition
+
+    subroutine write_junit(path, log_file)
+        !! JUnit XML of the results in log_file; a failed write is an error.
+        character(len=*), intent(in) :: path, log_file
+        type(test_result_entry_t), allocatable :: entries(:)
+        integer :: n_entries, ierr
+
+        call parse_test_results(log_file, entries, n_entries, ierr)
+        if (ierr /= 0) n_entries = 0
+        call junit_write(path, entries, n_entries, log_file, ierr)
+        if (ierr /= 0) then
+            write (error_unit, '(a)') 'fo: cannot write JUnit report '//path
+            call process_exit(2)
+        end if
+    end subroutine write_junit
 
     subroutine test_option_value(i, message, value)
         integer, intent(in) :: i
@@ -1492,7 +1603,7 @@ contains
     end function env_flag
 
     subroutine report_test_result(exitcode, test_log, summary_mode, use_json, &
-            require_results, json_full, full_text)
+            require_results, json_full, full_text, junit_path)
         !! One report for a run: compact JSON by default for --json, the legacy
         !! full JSON for --json=full, and human text that ends in the verdict
         !! line. Failure output is excerpted unless full_text (--verbose).
@@ -1501,6 +1612,7 @@ contains
         logical, intent(in) :: summary_mode
         logical, intent(in) :: use_json
         logical, intent(in), optional :: require_results, json_full, full_text
+        character(len=*), intent(in), optional :: junit_path
 
         type(test_result_entry_t), allocatable :: entries(:)
         integer :: n_entries, parse_ierr
@@ -1525,6 +1637,9 @@ contains
             end if
             call process_exit(1)
             return
+        end if
+        if (present(junit_path)) then
+            if (len(junit_path) > 0) call write_junit(junit_path, test_log)
         end if
 
         if (present(require_results)) then

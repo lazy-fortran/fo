@@ -1113,7 +1113,7 @@ contains
         type(scan_unit_t), allocatable :: units(:)
         type(fpm_config_t), allocatable :: config
         type(current_test_t), allocatable :: tests(:)
-        integer :: n_units, n_tests, ierr, warn_s, i
+        integer :: n_units, n_tests, ierr, warn_s, i, log_unit, ios
         character(len=MAX_PATH) :: execution_cwd
         integer(8) :: wall0, wall1, wall_rate
         real :: wall_secs
@@ -1141,6 +1141,10 @@ contains
         end if
         call prepare_test_app_outputs(project_dir, execution_cwd, bin_dir, exitcode)
         if (exitcode /= 0) return
+        ! The report appends to the log; a build that had nothing to do left none.
+        open (newunit=log_unit, file=trim(log_file), position='append', &
+            status='unknown', iostat=ios)
+        if (ios == 0) close (log_unit)
         call prepare_current_cases(execution_cwd, config, selected_names, &
             n_selected, tests, n_tests)
         call system_clock(wall0, wall_rate)

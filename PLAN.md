@@ -1,6 +1,6 @@
 # Fo delivery goals
 
-Updated 2026-10-15 from a full audit of every open issue at main `342da71`.
+Updated 2026-10-16 at main `8cec6ed` (audit of 2026-10-15 at `342da71`).
 Issues define observable success and this plan orders delivery. Apply
 [goals and architectural freedom](doc/GOAL_DRIVEN_DEVELOPMENT.md), choose the
 smallest complete change, and preserve supported behaviour and independent
@@ -39,57 +39,82 @@ for people and AI agents. Gremlin is its centre.
 The product boundary in `CLAUDE.md` still holds: no hermetic environments,
 Nix/Spack replacement, CI/promotion engine or agent orchestrator.
 
-## Current state (main `342da71`)
+## Current state (main `8cec6ed`, 2026-10-16)
 
 The 2026-10-15 [backend-neutral project model](doc/CMAKE_GREMLIN_PLAN.md#backend-neutral-project-model-decision-2026-10-15)
-landed in about 30 commits (`3df99aa`..`342da71`), and all four phases have code
-on main:
+(`3df99aa`..`342da71`) is now the only selection path, and the wave-1 to wave-3
+packages are on main:
 
-- **P1:** model core; CMake File API and `ctest --show-only` adapter; `fo exec`
-  and `fo test` (globs, `-L`/`-LE`, `--layer`, `--list`, `--no-build`) select on
-  the model; CMake builds plan targets and runs exact cases in ctest batches.
-- **P2:** Gremlin loads the model once per generation, builds once
-  (`fo build --tests`), runs cases with `fo test --no-build`, scopes lanes by
-  label or layer, and reuses a case PASS while its input-closure digest is unchanged.
-- **P3:** `[extra.fo.layers]`, `test-groups` and `test-defaults` for fpm;
-  `fo graph --layers` on both backends.
-- **P4:** `--only-changed` against Git HEAD on both backends; CLI and MCP share it.
-- **Oracle:** a Fortran-generated twin fpm/CMake fixture checks identical
-  selections, plans and layering through `fo test` and Gremlin; CI runs the
-  bounded project-model gates.
-
-The model was added next to the paths it replaces. Production code is 66,082
-physical lines (+36.7% over the `8a0197d` baseline), and the remaining
-duplicates have already drifted into bugs B3 and B4 below. The interface-hash
-cutoff exists in the native build (`get_interface_key`, `fo_gfortran_build.f90`)
-but has no independent oracle yet.
+- **All 19 audit bugs are fixed**, each with a negative oracle (table below).
+  Further defects found and fixed along the way:
+  - Darwin `/var` vs `/private/var` in PASS reuse, lint and CMake presets; the
+    project root is now canonicalized at every entry point.
+  - An MCP server crash on `changed`, and invalid MCP error JSON.
+  - A no-op edit that left a lane stuck in `testing`.
+  - A truncated CMake preset fixture and stale tests.
+- **One service:** CLI, MCP, `fo check` and Gremlin select through one model
+  service (`e9f1494`), and CLI and MCP share one routine per command
+  (`32700fd`). One Gremlin option table drives the CLI, request validation and
+  the MCP schema.
+- **Native CMake split route:**
+  - fo builds natively from File API compile groups (`5b0f8ca`), delegating
+    only custom-command, generated-source and non-Ninja targets.
+  - CTest cases run natively from json-v1 properties (`5a575e9`); delegated
+    runs import JUnit.
+  - Interpreter track: GORILLA's default profile runs without CMake
+    (`4da4632`); its pFUnit coverage profile remains.
+- **Gremlin:**
+  - Parallel cases (`--jobs k`, `7540964`).
+  - A case-keyed PASS index independent of journal compaction (`8cc55e9`).
+  - Bounded, stop-aware reproduce; write-free idle quiescence.
+  - Clone-based warm generations: 0 payload bytes copied for a one-file edit
+    (`c6805f0`).
+  - Retention in status (`0bf1c43`).
+- **Output:** verdict-first compact JSON with bounded failure excerpts and live
+  per-case progress (`648aff0`).
+- **Cleanup:** `clean --stale` uses a recorded link graph (`ed8ffaf`); Fx's DAG
+  grows without limit (Fx `6d48605`).
+- **Code size:** D, F and H removed about 1,900 lines, but the new native
+  CMake build/test, parallel Gremlin and storage features added more.
+  Production code is 69,092 physical lines at `8cec6ed` (66,082 at
+  `342da71`). The remaining #205 candidates are below.
+- **Deployed 2026-10-16:**
+  - faepmac1: `/opt/homebrew/bin/fo`, release build of `8cec6ed`,
+    SHA256 `8c28a11e…`.
+  - mailuefterl: `~/.local/bin/fo`, SHA256 `3718ea38…`, after its gates pass on
+    Linux.
+  - faepkub4 is not updated, because its SSH host key failed verification.
+- **Host notes:** mailuefterl's global git config signs commits with a key that
+  is unavailable non-interactively, so fixture repositories must disable
+  signing (`8cec6ed`). fpm there is in `~/.local/bin`, which non-interactive SSH
+  does not put on PATH.
 
 ## Stage 1: fix every known bug
 
-Each repair starts with an independent negative oracle that fails on `342da71`.
-False greens and data loss come first.
+All audit bugs are fixed. Each repair started with an independent negative oracle
+that failed on its parent.
 
-| # | Defect | Owner |
-|---|---|---|
-| B1 | `fo fmt` truncates lines over 512 characters and deletes lines past 50,000 when rewriting | #214 |
-| B2 | CMake: edits to unclassified project files (test scripts, data, `*.in`, `.fypp`, `.pf`) select nothing and the old PASS is reused | #197 |
-| B3 | `fo check` and the `fo` pipeline treat "changed" as a compile-cache miss and report green after a warm build | #189 |
-| B4 | Module closure skips `use` statements of submodules and external units in linked libraries, so impact and digests miss them | #189 |
-| B5 | `--only-changed` misses edits in fpm path dependencies outside the project root | #189 |
-| B6 | Gremlin's first `--only-changed` generation uses cache misses (fpm) or all cases (CMake) instead of the model delta | #189 |
-| B7 | Source scanner skips `dependencies`, `_deps`, `venv` and other directories at any depth, and `build*`/`SRC` at the root, unlike FPM | #186 |
-| B8 | Silent truncation: Fx DAG 2,048 nodes, 8,192 scanned units, 512-character scan paths, 4,096-character `-I` list, manifest arrays and flags | #215 |
-| B9 | MCP lint and output buffers (16,384/8,192 characters) cut JSON | #185, #215 |
-| B10 | Bare fpm `fo test` and unnamed MCP `test` ignore `[extra.fo.test-defaults] exclude` | #167 |
-| B11 | CTest names with spaces lose them in the regex (`trim(regex)//ch`) | #194 |
-| B12 | Unknown top-level `fpm.toml` sections are silently ignored | #201 |
-| B13 | `gremlin reproduce` waits for its build without a time bound or stop check while holding the heavy-work slot | #139 |
-| B14 | Journal compaction to 512 records discards reusable PASS receipts in projects with more than about 512 cases | #140 |
-| B15 | A CMake header listed by a target the consumer does not link reaches only that target's cases | #197 |
-| B16 | Malformed MCP/Gremlin cursor values silently become 0 | #150 |
-| B17 | `fo_scaffold`/`fo_doc` shell out with unquoted paths | #163 |
-| B18 | An idle lane with a wait ticket writes 16 bytes every 100 ms | #155 |
-| B19 | The slow rule is name-based in coverage and the CLI but a label in the model, so CMake `slow` cases are counted differently | #167 |
+| # | Defect | Owner | Status |
+|---|---|---|---|
+| B1 | `fo fmt` truncates lines over 512 characters and deletes lines past 50,000 when rewriting | #214 | fixed `fc3d21e` |
+| B2 | CMake: edits to unclassified project files (test scripts, data, `*.in`, `.fypp`, `.pf`) select nothing and the old PASS is reused | #197 | fixed `337dae0` |
+| B3 | `fo check` and the `fo` pipeline treat "changed" as a compile-cache miss and report green after a warm build | #189 | fixed `e9f1494` |
+| B4 | Module closure skips `use` statements of submodules and external units in linked libraries, so impact and digests miss them | #189 | fixed `337dae0` |
+| B5 | `--only-changed` misses edits in fpm path dependencies outside the project root | #189 | fixed `e9f1494` |
+| B6 | Gremlin's first `--only-changed` generation uses cache misses (fpm) or all cases (CMake) instead of the model delta | #189 | fixed `e9f1494` |
+| B7 | Source scanner skips `dependencies`, `_deps`, `venv` and other directories at any depth, and `build*`/`SRC` at the root, unlike FPM | #186 | fixed `4204f2a` |
+| B8 | Silent truncation: Fx DAG 2,048 nodes, 8,192 scanned units, 512-character scan paths, 4,096-character `-I` list, manifest arrays and flags | #215 | fixed `855c75c`, Fx `6d48605`; some fixed fo arrays remain (#215) |
+| B9 | MCP lint and output buffers (16,384/8,192 characters) cut JSON | #185, #215 | fixed `32700fd` |
+| B10 | Bare fpm `fo test` and unnamed MCP `test` ignore `[extra.fo.test-defaults] exclude` | #167 | fixed `e9f1494` |
+| B11 | CTest names with spaces lose them in the regex (`trim(regex)//ch`) | #194 | fixed `e9f1494` |
+| B12 | Unknown top-level `fpm.toml` sections are silently ignored | #201 | fixed `855c75c` |
+| B13 | `gremlin reproduce` waits for its build without a time bound or stop check while holding the heavy-work slot | #139 | fixed `8cc55e9` |
+| B14 | Journal compaction to 512 records discards reusable PASS receipts in projects with more than about 512 cases | #140 | fixed `8cc55e9` |
+| B15 | A CMake header listed by a target the consumer does not link reaches only that target's cases | #197 | fixed `337dae0` (widens) |
+| B16 | Malformed MCP/Gremlin cursor values silently become 0 | #150 | fixed `32700fd` |
+| B17 | `fo_scaffold`/`fo_doc` shell out with unquoted paths | #163 | fixed `fc3d21e` |
+| B18 | An idle lane with a wait ticket writes 16 bytes every 100 ms | #155 | fixed `8cc55e9` |
+| B19 | The slow rule is name-based in coverage and the CLI but a label in the model, so CMake `slow` cases are counted differently | #167 | fixed `e9f1494` |
 
 ## Stage 2: one service, no duplication (#205, #167, #185, #149)
 
@@ -186,8 +211,10 @@ Coverage-based selection (testmon style) remains an opt-in audit experiment, nev
 | Stale artifact cleanup | #129 |
 | Optional audits (never gates) | #145 (also the real-Fluff deep-lint run), #190 |
 
-Closed by this audit: #161 (native fixtures delivered), #211 (store-root guard
-delivered) and #59 (deep lint delivered; the real-Fluff run moved to #145).
+Closed by the audit: #161, #211 and #59 (the real-Fluff run moved to #145).
+Closed by delivery since: #214, #150, #155, #216 and #129.
+In progress: #217 case discovery (M), #138/#189 one-shot PASS cache, filters,
+JUnit and partitions (N), #163/#184 shell-free tests (P).
 Every open issue has a 2026-10-15 audit comment stating what is delivered, what
 remains and the confirmed defects.
 

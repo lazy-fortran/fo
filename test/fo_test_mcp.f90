@@ -1,6 +1,6 @@
 module fo_test_mcp
     use fo_test_harness, only: string_list_t, process_result_t, list_add, list_with_first
-    use fo_test_harness, only: run_process
+    use fo_test_harness, only: run_process, list_extend, list_sets_variable
     use fo_test_json, only: json_value_t, json_parse, json_move_value
     use fo_test_harness, only: assert_true, assert_equal_integer
     implicit none
@@ -80,11 +80,15 @@ contains
             '{"name":"fo","arguments":' // trim(arguments) // '}')
     end function mcp_call
 
-    subroutine mcp_exchange(driver, cwd, cache, input, framed, responses, result)
+    subroutine mcp_exchange(driver, cwd, cache, input, framed, responses, result, &
+            extra_environment)
+        !! Tests prove execution, so the server reruns every test case unless
+        !! extra_environment sets FO_TEST_RERUN=0 (PASS reuse under test).
         character(len=*), intent(in) :: driver, cwd, cache, input
         logical, intent(in) :: framed
         type(json_value_t), allocatable, intent(out) :: responses(:)
         type(process_result_t), intent(out) :: result
+        type(string_list_t), optional, intent(in) :: extra_environment
         type(string_list_t) :: arguments, command, environment
         character(:), allocatable :: output, raw, error_message
         integer :: position, header_end, body_start, body_length, line_end
@@ -98,6 +102,13 @@ contains
         call list_add(environment, 'FO_CACHE_DIR=' // trim(cache))
         call list_add(environment, 'FO_DISABLE_SELF_REFRESH=1')
         call list_add(environment, 'FO_SELF_REFRESH=0')
+        if (present(extra_environment)) then
+            if (.not. list_sets_variable(extra_environment, 'FO_TEST_RERUN')) &
+                call list_add(environment, 'FO_TEST_RERUN=1')
+            call list_extend(environment, extra_environment)
+        else
+            call list_add(environment, 'FO_TEST_RERUN=1')
+        end if
         call list_add(environment, 'TMPDIR=/var/tmp')
         call run_process(command, cwd, result, environment, input=input, timeout_ms=300000)
         call assert_true(.not. result%runner_failed, 'MCP process runner completed')

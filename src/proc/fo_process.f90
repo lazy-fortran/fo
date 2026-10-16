@@ -4,7 +4,7 @@ module fo_process
     implicit none
     private
     public :: process_detect_nproc, process_configure_openmp
-    public :: process_setenv_default, process_export_self_driver
+    public :: process_setenv_default, process_export_self_driver, process_self_executable
     public :: process_scan_sources
     public :: process_has_fortran_source_ext
     public :: process_start_fo_check, process_start_argv_logged
@@ -252,18 +252,29 @@ contains
         call fo_c_setenv_default(trim(name)//c_null_char, trim(value)//c_null_char)
     end subroutine process_setenv_default
 
-    subroutine process_export_self_driver()
-        !! Default FO and FO_BIN to this running image for test children.
+    subroutine process_self_executable(path, found)
+        !! Path of this running executable (the OS image, not argv[0]).
+        character(len=*), intent(out) :: path
+        logical, intent(out) :: found
         character(kind=c_char) :: c_path(4097)
-        character(len=4096) :: path
         integer :: i
 
-        if (fo_c_self_executable(c_path, int(size(c_path), c_int)) /= 0_c_int) return
         path = ''
-        do i = 1, size(c_path) - 1
+        found = fo_c_self_executable(c_path, int(size(c_path), c_int)) == 0_c_int
+        if (.not. found) return
+        do i = 1, min(size(c_path) - 1, len(path))
             if (c_path(i) == c_null_char) exit
             path(i:i) = c_path(i)
         end do
+    end subroutine process_self_executable
+
+    subroutine process_export_self_driver()
+        !! Default FO and FO_BIN to this running image for test children.
+        character(len=4096) :: path
+        logical :: found
+
+        call process_self_executable(path, found)
+        if (.not. found) return
         call process_setenv_default('FO', trim(path))
         call process_setenv_default('FO_BIN', trim(path))
     end subroutine process_export_self_driver

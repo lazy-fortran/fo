@@ -10,6 +10,7 @@ module fo_test_harness
     private
 
     public :: string_list_t, process_result_t, list_add, list_extend, list_with_first
+    public :: list_sets_variable
     public :: make_scratch, join_path
     public :: make_directory, make_symlink, move_path, remove_path, remove_tree
     public :: current_directory, write_text, write_lines, append_text, read_text
@@ -1238,6 +1239,19 @@ contains
         inquire(file=path, exist=file_exists, iostat=io_status)
         call assert_equal_integer(io_status, 0, 'inspect path: ' // path)
     end function file_exists
+
+    logical function list_sets_variable(list, name) result(found)
+        !! Whether an environment list already holds NAME=...
+        type(string_list_t), intent(in) :: list
+        character(len=*), intent(in) :: name
+        integer :: i
+
+        found = .false.
+        if (.not. allocated(list%items)) return
+        do i = 1, size(list%items)
+            if (index(list%items(i)%value, name//'=') == 1) found = .true.
+        end do
+    end function list_sets_variable
 
     function environment_value(name) result(value)
         character(len=*), intent(in) :: name

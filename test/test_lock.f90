@@ -72,7 +72,7 @@ contains
         close (u)
         call execute_command_line('git -C '//trim(libdir)//' add src/depmod.f90')
         call execute_command_line('git -C '//trim(libdir)// &
-            ' -c user.email=fo@example.invalid -c user.name=fo commit -q -m drift')
+            ' -c user.email=fo@example.invalid -c user.name=fo -c commit.gpgsign=false commit -q -m drift')
 
         call lock_check(appdir, '', ok, message)
         call assert(.not. ok, 'lock check fails after git dependency moves')
@@ -115,7 +115,7 @@ contains
         close (u)
         call execute_command_line('git -C '//trim(libdir)//' add src/depmod.f90')
         call execute_command_line('git -C '//trim(libdir)// &
-            ' -c user.email=fo@example.invalid -c user.name=fo commit -q -m drift')
+            ' -c user.email=fo@example.invalid -c user.name=fo -c commit.gpgsign=false commit -q -m drift')
         call lock_check(appdir, '', ok, message)
         call assert(ok, 'explicit revision is stable when remote HEAD moves')
 
@@ -142,7 +142,7 @@ contains
         call execute_command_line('git -C '//trim(libdir)// &
             ' -c user.email=fo@example.invalid -c user.name=fo add fpm.toml src/depmod.f90')
         call execute_command_line('git -C '//trim(libdir)// &
-            ' -c user.email=fo@example.invalid -c user.name=fo commit -q -m init')
+            ' -c user.email=fo@example.invalid -c user.name=fo -c commit.gpgsign=false commit -q -m init')
         open (newunit=u, file=trim(appdir)//'/fpm.toml', status='replace')
         write (u, '(a)') 'name = "depapp"'
         write (u, '(a)') 'version = "0.1.0"'

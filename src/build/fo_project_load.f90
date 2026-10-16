@@ -27,7 +27,7 @@ module fo_project_load
         SELECT_UNKNOWN_NAME, SELECT_EMPTY, SELECT_NAMED_EXCLUDED, &
         CASE_DEFAULT_EXCLUDED
     use fo_project_model, only: model_unit_t, model_layering_t, model_layering, &
-        model_layering_sources, model_affected, CASE_SELECTED, &
+        model_layering_sources, model_affected, CASE_SELECTED, ORIGIN_PROJECT, &
         model_listing_t, model_expand_cases, model_collapse_cases
     use fo_build_tree, only: native_output_dir
     use fo_test_cases, only: CASE_SEP, case_list, case_listing_t, case_matches
@@ -37,6 +37,9 @@ module fo_project_load
     use fo_scan, only: scan_unit_t, scan_file
     use fo_process, only: process_has_fortran_source_ext
     use fx_json_build, only: json_key_int
+    use fo_case_filter, only: case_filter_t, filter_parse
+    use fo_test_index, only: test_index_t, test_index_dir, test_index_load, &
+        test_index_find
     implicit none
     private
 
@@ -212,11 +215,56 @@ contains
         type(model_selection_t), intent(out) :: selection
         integer, intent(out) :: ierr
         character(len=:), allocatable, intent(out) :: message
+        type(model_request_t) :: local
 
         call project_load(b, flags, model, ierr, message)
         if (ierr /= 0) return
-        call resolve_loaded(model, request, selection, ierr, message)
+        call attach_recorded_failures(b, model, request, local)
+        call resolve_loaded(model, local, selection, ierr, message)
     end subroutine project_resolve
+
+    subroutine filter_flags(request, affected, failed)
+        !! Whether the request's filter expression uses affected() / failed().
+        type(model_request_t), intent(in) :: request
+        logical, intent(out) :: affected, failed
+        type(case_filter_t) :: expression
+        character(len=:), allocatable :: message
+        integer :: ierr
+
+        affected = .false.
+        failed = .false.
+        if (.not. allocated(request%filter)) return
+        if (len_trim(request%filter) == 0) return
+        call filter_parse(trim(request%filter), expression, ierr, message)
+        if (ierr /= 0) return
+        affected = expression%uses_affected
+        failed = expression%uses_failed
+    end subroutine filter_flags
+
+    subroutine attach_recorded_failures(b, model, request, local)
+        !! local = request plus, when its filter uses failed(), the cases the
+        !! last recorded run of this project failed (fo_test_index).
+        type(backend_t), intent(in) :: b
+        type(project_model_t), intent(in) :: model
+        type(model_request_t), intent(in) :: request
+        type(model_request_t), intent(out) :: local
+        type(test_index_t) :: recorded
+        logical :: uses_affected, uses_failed
+        integer :: i, k
+
+        local = request
+        call filter_flags(request, uses_affected, uses_failed)
+        if (.not. uses_failed) return
+        call test_index_load(test_index_dir(model, trim(b%project_dir)), recorded)
+        allocate (local%failed(model%n_cases))
+        local%failed = .false.
+        do i = 1, model%n_cases
+            k = test_index_find(recorded, model%cases(i)%name)
+            if (k == 0) cycle
+            local%failed(i) = recorded%status(k)%s == 'FAIL' .or. &
+                recorded%status(k)%s == 'TIMEOUT'
+        end do
+    end subroutine attach_recorded_failures
 
     subroutine resolve_loaded(model, request, selection, ierr, message)
         !! model_select with the diagnostics of project_resolve.
@@ -279,9 +327,10 @@ contains
         character(len=:), allocatable, intent(out) :: message
         type(string_t), allocatable :: changed(:)
         character(len=:), allocatable :: reason
-        logical :: git_ok
+        logical :: git_ok, uses_affected, uses_failed
 
-        if (.not. only_changed) then
+        call filter_flags(request, uses_affected, uses_failed)
+        if (.not. only_changed .and. .not. uses_affected) then
             allocate (widen_reasons(0))
             call project_resolve(b, flags, request, model, selection, ierr, message)
             return
@@ -289,15 +338,16 @@ contains
         call project_changed_files(trim(b%project_dir), changed, git_ok, reason)
         if (git_ok) then
             call project_affected(b, flags, request, changed, model, selection, &
-                widen_reasons, ierr, message)
+                widen_reasons, ierr, message, restrict=only_changed)
         else
             call project_affected(b, flags, request, changed, model, selection, &
-                widen_reasons, ierr, message, force_reason=reason)
+                widen_reasons, ierr, message, force_reason=reason, &
+                restrict=only_changed)
         end if
     end subroutine project_select
 
     subroutine project_affected(b, flags, request, changed, model, selection, &
-            widen_reasons, ierr, message, force_reason)
+            widen_reasons, ierr, message, force_reason, restrict)
         !! project_resolve restricted by model_affected to the cases the
         !! changed files affect (`fo test --only-changed`, MCP only_changed,
         !! `fo check`). changed: paths below the project root (relative, or
@@ -315,6 +365,13 @@ contains
         integer, intent(out) :: ierr
         character(len=:), allocatable, intent(out) :: message
         character(len=*), intent(in), optional :: force_reason
+        !! .false.: keep the whole selection (only the filter expression
+        !! sees the delta, through affected()). Default .true.
+        logical, intent(in), optional :: restrict
+        type(model_request_t) :: local
+        integer, allocatable :: project_cases(:), hit(:)
+        type(string_t), allocatable :: more(:)
+        logical :: uses_affected, uses_failed
         type(string_t), allocatable :: extra(:), paths(:), unscanned(:), roots(:)
         type(string_t), allocatable :: kept(:), ignored(:)
         type(model_unit_t), allocatable :: units(:)
@@ -324,8 +381,6 @@ contains
 
         allocate (widen_reasons(0))
         call project_load(b, flags, model, ierr, message, scanned=extra)
-        if (ierr /= 0) return
-        call resolve_loaded(model, request, selection, ierr, message)
         if (ierr /= 0) return
         allocate (roots(1))
         roots(1)%s = trim(b%project_dir)
@@ -347,8 +402,25 @@ contains
         end do
         call model_layering_sources(model, extra, paths)
         call scan_units(paths, units, unscanned)
+        call attach_recorded_failures(b, model, request, local)
+        call filter_flags(request, uses_affected, uses_failed)
+        if (uses_affected) then
+            project_cases = pack([(k, k=1, model%n_cases)], &
+                [(model%cases(k)%origin == ORIGIN_PROJECT, k=1, model%n_cases)])
+            call project_affected_cases(model, units, roots, project_cases, &
+                kept(1:n), hit, widen_reasons, force_reason)
+            allocate (local%affected(model%n_cases))
+            local%affected = .false.
+            local%affected(hit) = .true.
+        end if
+        call resolve_loaded(model, local, selection, ierr, message)
+        if (ierr /= 0) return
+        if (present(restrict)) then
+            if (.not. restrict) return
+        end if
         call model_affected(model, units, roots, kept(1:n), selection, &
-            widen_reasons, force_reason)
+            more, force_reason)
+        widen_reasons = [widen_reasons, more]
     end subroutine project_affected
 
     subroutine project_model_units(model, extra, units, from_root, to_root)
@@ -800,22 +872,35 @@ contains
     end subroutine filtered_names
 
     subroutine project_list_expand(b, flags, request, model, selection, ierr, &
-            message)
-        !! `fo test --list`: split the selected executables that list their
-        !! cases (built ones only: the listing runs the executable) into their
-        !! cases and select again, so `exe::case` names and globs resolve on
-        !! the cases.
-        type(backend_t), intent(in) :: b
+            message, build)
+        !! Split the selected executables that list their cases (built ones
+        !! only: the listing runs the executable) into their cases and select
+        !! again, so `exe::case` names and globs resolve on the cases and each
+        !! case has its own digest and verdict. build: build the selected
+        !! cases first (`fo test`); a failing build leaves the selection as is
+        !! for the run to report.
+        type(backend_t), intent(inout) :: b
         character(len=*), intent(in) :: flags
         type(model_request_t), intent(in) :: request
         type(project_model_t), intent(inout) :: model
         type(model_selection_t), intent(inout) :: selection
         integer, intent(out) :: ierr
         character(len=:), allocatable, intent(out) :: message
-        integer :: n
+        logical, intent(in), optional :: build
+        character(len=1024) :: log_file
+        integer :: n, code
 
         ierr = 0
         message = ''
+        if (present(build)) then
+            if (build) then
+                call make_tmpfile('fo-expand-build', log_file)
+                call project_build_cases(b, model, selection%cases, flags, &
+                    trim(log_file), code)
+                call delete_tmpfile(trim(log_file))
+                if (code /= 0) return
+            end if
+        end if
         call expand_listed(b, flags, model, selection%cases, n, ierr, message)
         if (ierr /= 0 .or. n == 0) return
         call resolve_loaded(model, request, selection, ierr, message)

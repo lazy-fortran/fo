@@ -8,7 +8,7 @@ program test_test_cases_twin
     !! then passes is FLAKY (and fails under --strict-flaky), and a slow case
     !! prints a SLOW line and is terminated as TIMEOUT. Runs the driver named
     !! by FO.
-    use fo_test_harness, only: process_result_t, string_list_t, list_add
+    use fo_test_harness, only: process_result_t, string_list_t, list_add, list_extend
     use fo_test_harness, only: make_scratch, join_path, remove_tree
     use fo_test_harness, only: file_exists, remove_path, make_directory
     use fo_test_harness, only: assert_contains, assert_not_contains
@@ -37,7 +37,7 @@ contains
     subroutine run_backend(backend)
         character(len=*), intent(in) :: backend
         character(:), allocatable :: dir, marks, state
-        type(string_list_t) :: env
+        type(string_list_t) :: env, cached
         type(process_result_t) :: result
 
         dir = join_path(scratch, trim(backend))
@@ -89,6 +89,22 @@ contains
         call run(dir, env, 'unknown', result, [character(len=24) :: 'test', 'test_multi::nope'])
         call assert_true(result%exit_code /= 0, backend// &
             ' an unknown case fails the run')
+
+        ! The PASS cache keys each case: the second run reuses both cases, and
+        ! a case that was FLAKY is not reused as PASS.
+        call list_add(cached, 'FO_TEST_RERUN=0')
+        call list_extend(cached, env)
+        call run(dir, cached, 'first', result, [character(len=24) :: 'test', 'test_multi'])
+        call run(dir, cached, 'second', result, [character(len=24) :: 'test', 'test_multi'])
+        call assert_contains(result%stdout, '2 reused', backend// &
+            ' an unchanged rerun reuses both cases: '//result%stdout)
+        call remove_path(state)
+        call run(dir, cached, 'flaky', result, [character(len=24) :: 'test', 'test_sched::flaky'])
+        call assert_contains(result%stdout, '1 flaky', backend//' flaky verdict: '// &
+            result%stdout)
+        call run(dir, cached, 'after flaky', result, [character(len=24) :: 'test', 'test_sched::flaky'])
+        call assert_not_contains(result%stdout, 'reused', backend// &
+            ' a flaky case is not reused as PASS: '//result%stdout)
 
         ! FLAKY: fails once, passes on the retry; never PASS.
         call remove_path(state)

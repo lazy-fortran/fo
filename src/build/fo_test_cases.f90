@@ -225,7 +225,7 @@ contains
         integer :: code, pos, next, tab
         type(string_t) :: none(0)
 
-        call run_capture(bin, cwd, none, 'FO_TEST_LIST=1', output, code)
+        call run_capture(bin, cwd, none, marker('1=TSIL_TSET_OF'), output, code)
         if (code /= 0) then
             write (code_text, '(a,i0)') 'listing exited with code ', code
             listing%reason = trim(code_text)

@@ -1426,6 +1426,7 @@ contains
         call argv_push(packed, n_args, trim(executable))
         call argv_push(packed, n_args, 'test')
         call argv_push(packed, n_args, '--no-build')
+        call argv_push(packed, n_args, '--no-cache')
         call argv_push(packed, n_args, '--json=full')
         if (case_needs_all(generation, request%case_id)) &
             call argv_push(packed, n_args, '--all')
@@ -3760,6 +3761,7 @@ contains
         ! The generation was built once by start_build; a case never builds.
         call argv_push(packed, n_args, 'test')
         call argv_push(packed, n_args, '--no-build')
+        call argv_push(packed, n_args, '--no-cache')
         call argv_push(packed, n_args, '--json=full')
         if (case_needs_all(generation, selected(index_case))) then
             call argv_push(packed, n_args, '--all')
@@ -4946,6 +4948,8 @@ contains
                 trim(int_text(len_trim(request%layers(i))))//':'// &
                 trim(request%layers(i))
         end do
+        if (len_trim(request%filter) > 0) canonical = canonical//'|filter:'// &
+            trim(int_text(len_trim(request%filter)))//':'//trim(request%filter)
         key = text_digest(canonical)
     end function request_policy_key
 
@@ -4953,7 +4957,7 @@ contains
         type(gremlin_request_t), intent(in) :: request
 
         request_scoped = request%n_labels + request%n_exclude_labels + &
-            request%n_layers > 0
+            request%n_layers > 0 .or. len_trim(request%filter) > 0
     end function request_scoped
 
     subroutine push_scope_args(packed, n_args, request)
@@ -4975,6 +4979,10 @@ contains
             call argv_push(packed, n_args, '--layer')
             call argv_push(packed, n_args, trim(request%layers(i)))
         end do
+        if (len_trim(request%filter) > 0) then
+            call argv_push(packed, n_args, '-E')
+            call argv_push(packed, n_args, trim(request%filter))
+        end if
     end subroutine push_scope_args
 
     subroutine scope_model_request(request, model_request)
@@ -4986,6 +4994,7 @@ contains
         allocate (model_request%include_labels(request%n_labels))
         allocate (model_request%exclude_labels(request%n_exclude_labels))
         allocate (model_request%layers(request%n_layers))
+        model_request%filter = trim(request%filter)
         do i = 1, request%n_labels
             model_request%include_labels(i)%s = trim(request%labels(i))
         end do
