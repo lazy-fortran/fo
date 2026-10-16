@@ -681,7 +681,8 @@ contains
         use fo_build_backend, only: backend_test, backend_test_names
         use fo_project_model, only: model_request_t, model_selection_t, &
             project_model_t, SELECT_EMPTY
-        use fo_project_load, only: project_has_model, project_select
+        use fo_project_load, only: project_has_model, project_select, &
+            project_list_expand
         use fo_test_cache, only: test_cache_run
         use fx_string, only: string_t
         use fo_test_results, only: test_result_entry_t, parse_test_results, &
@@ -811,8 +812,11 @@ contains
                 return
             end if
             call progress_suppress(.true.)
+            if (.not. only_changed .and. selection%status /= SELECT_EMPTY) &
+                call project_list_expand(b, '', request, model, selection, ierr, &
+                    message, build=.true.)
             call test_cache_run(b, model, selection%cases, '', .false., tmpfile, &
-                exitcode, rerun)
+                exitcode, rerun, selection)
             call progress_suppress(.false.)
         end if
 

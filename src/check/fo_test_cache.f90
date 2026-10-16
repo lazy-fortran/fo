@@ -13,7 +13,7 @@ module fo_test_cache
     !! the digest empty: the case always runs.
     use fx_hash, only: sha256_file, sha256_string
     use fo_build_backend, only: backend_t
-    use fo_project_model, only: project_model_t, model_find_case
+    use fo_project_model, only: project_model_t, model_selection_t, model_find_case
     use fo_project_load, only: project_run_cases
     use fo_gremlin_generation, only: generation_t
     use fo_gremlin_context, only: case_identity_capture
@@ -31,7 +31,7 @@ module fo_test_cache
 contains
 
     subroutine test_cache_run(b, model, cases, flags, no_build, log_file, exitcode, &
-            rerun)
+            rerun, selection)
         !! project_run_cases for the cases that need to run, plus a REUSED
         !! result line for every case whose recorded PASS is current. rerun
         !! runs every case. log_file receives all results.
@@ -41,6 +41,8 @@ contains
         character(len=*), intent(in) :: flags, log_file
         logical, intent(in) :: no_build, rerun
         integer, intent(out) :: exitcode
+        !! The case filters of executables not listed yet (project_run_cases).
+        type(model_selection_t), intent(in), optional :: selection
         character(len=64), allocatable :: digests(:)
         type(test_index_t) :: recorded
         character(len=:), allocatable :: dir, text, reused_lines
@@ -77,7 +79,7 @@ contains
         if (n_run > 0) then
             call make_tmpfile('fo-test-run', run_log)
             call project_run_cases(b, model, to_run(1:n_run), flags, no_build, &
-                trim(run_log), exitcode)
+                trim(run_log), exitcode, selection)
         end if
         open (newunit=unit, file=trim(log_file), position='append', &
             status='unknown', action='write', iostat=ios)

@@ -23,7 +23,8 @@ module fo_gremlin_supervisor
     use fo_gremlin_generation, only: generation_t, generation_driver_identity, &
         generation_model_key
     use fo_project_load, only: project_has_model, project_load_configured, &
-        project_inventory_cases, project_affected_cases, project_changed_files
+        project_inventory_cases, project_affected_cases, project_changed_files, &
+        project_expand_cases
     use fo_project_model, only: model_find_case, model_select, model_request_t, &
         model_selection_t, SELECT_OK, SELECT_EMPTY
     use fo_gremlin_log_text, only: gremlin_retain_build_log, gremlin_log_tail
@@ -2662,6 +2663,7 @@ contains
         request%gate_cases = ''
         if (was_active) then
             call generation_model_adopt(active, candidate)
+            call generation_model_expand(candidate)
             ! Impact on the candidate's model and its built view.
             call compute_generation_impact(active, candidate, request)
         else if (allocated(candidate%model)) then
@@ -2855,7 +2857,30 @@ contains
         if (generation%input_inventory_ready) generation%model_key = &
             generation_model_key(generation%input_inventory, &
             generation%driver_digest, generation%model_full_key)
+        call generation_model_expand(generation)
     end subroutine generation_model_ensure
+
+    subroutine generation_model_expand(generation)
+        !! Split the executables of the built generation that list their
+        !! cases into model cases `exe::case` (#217), so each case has its
+        !! own verdict, receipt and input closure digest. A model kept from an
+        !! earlier generation is expanded again from the new executables.
+        type(generation_t), intent(inout) :: generation
+        type(backend_t) :: backend
+        character(len=:), allocatable :: detail
+        integer :: n, ierr
+
+        if (.not. allocated(generation%model)) return
+        ! The executables are in the built view, where the cases run.
+        if (len_trim(generation%build_project_root) > 0) then
+            backend = detect_backend(trim(generation%build_project_root))
+        else
+            backend = detect_backend(campaign_project(generation))
+        end if
+        call project_expand_cases(backend, '', generation%model, n, ierr, detail, &
+            trim(generation%model_root), trim(generation%build_project_root))
+        if (allocated(generation%case_digests)) deallocate (generation%case_digests)
+    end subroutine generation_model_expand
 
     function active_model_identity(generation) result(identity)
         type(generation_t), intent(in) :: generation

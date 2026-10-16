@@ -27,7 +27,10 @@ module fo_project_load
         SELECT_UNKNOWN_NAME, SELECT_EMPTY, SELECT_NAMED_EXCLUDED, &
         CASE_DEFAULT_EXCLUDED
     use fo_project_model, only: model_unit_t, model_layering_t, model_layering, &
-        model_layering_sources, model_affected, CASE_SELECTED, ORIGIN_PROJECT
+        model_layering_sources, model_affected, CASE_SELECTED, ORIGIN_PROJECT, &
+        model_listing_t, model_expand_cases, model_collapse_cases
+    use fo_build_tree, only: native_output_dir
+    use fo_test_cases, only: CASE_SEP, case_list, case_listing_t, case_matches
     use fo_process, only: argv_push, process_run_argv_logged
     use fo_fs, only: fs_realpath
     use fo_ctest_run, only: ctest_native_select, ctest_native_run, ctest_log_note
@@ -42,7 +45,7 @@ module fo_project_load
 
     public :: project_has_model, project_load, project_resolve, project_run_cases
     public :: project_affected, project_changed_files, project_run_affected
-    public :: project_select
+    public :: project_select, project_list_expand, project_expand_cases
     public :: project_load_configured, project_inventory_cases, project_build_cases
     public :: project_model_units, project_affected_cases
     public :: project_list_text, project_list_json
@@ -784,12 +787,13 @@ contains
     end subroutine scan_units
 
     subroutine project_run_cases(b, model, cases, flags, no_build, log_file, &
-            exitcode)
+            exitcode, selection)
         !! Build what the cases need, then run exactly them. The model is
         !! already loaded (CMake is configured), so nothing configures again.
         !! CMake: build the plan targets only, then ctest with exact anchored
         !! names in batches. fpm: its named-test path. no_build runs without
-        !! building.
+        !! building. selection: the `exe::glob` filters of an executable not
+        !! listed yet are applied where it is run (the listing needs the build).
         type(backend_t), intent(inout) :: b
         type(project_model_t), intent(in) :: model
         integer, intent(in) :: cases(:)
@@ -797,12 +801,20 @@ contains
         logical, intent(in) :: no_build
         character(len=*), intent(in) :: log_file
         integer, intent(out) :: exitcode
+        type(model_selection_t), intent(in), optional :: selection
         character(len=:), allocatable :: names(:)
         type(model_plan_t) :: plan
-        type(string_t), allocatable :: targets(:)
+        type(string_t), allocatable :: targets(:), filters(:), selected(:)
         integer :: k, width
         logical :: lift
 
+        allocate (filters(size(cases)))
+        do k = 1, size(cases)
+            filters(k)%s = ''
+            if (.not. present(selection)) cycle
+            if (allocated(selection%filters)) filters(k)%s = &
+                selection%filters(cases(k))%s
+        end do
         width = 1
         do k = 1, size(cases)
             width = max(width, len(model%cases(cases(k))%name))
@@ -817,27 +829,254 @@ contains
             call plan_names(model, cases, plan, targets)
             call backend_set_build_targets(b, targets, plan%widened)
             call run_cmake_cases(b, model, cases, names, flags, no_build, lift, &
-                log_file, exitcode)
+                log_file, exitcode, filters)
         else
+            call filtered_names(names, filters, selected)
+            width = 1
+            do k = 1, size(selected)
+                width = max(width, len(selected(k)%s))
+            end do
+            deallocate (names)
+            allocate (character(len=width) :: names(size(selected)))
+            do k = 1, size(selected)
+                names(k) = selected(k)%s
+            end do
             call backend_test_names(b, names, size(names), exitcode, .true., &
                 log_file, flags=flags, no_build=no_build)
         end if
     end subroutine project_run_cases
 
+    subroutine filtered_names(names, filters, selected)
+        !! The names a runner receives: a case with filter globs once per
+        !! glob as `name::glob`, any other case as its name.
+        character(len=*), intent(in) :: names(:)
+        type(string_t), intent(in) :: filters(:)
+        type(string_t), allocatable, intent(out) :: selected(:)
+        integer :: k, pos, next
+
+        allocate (selected(0))
+        do k = 1, size(names)
+            if (len(filters(k)%s) == 0) then
+                selected = [selected, string_t(trim(names(k)))]
+                cycle
+            end if
+            pos = 1
+            do while (pos <= len(filters(k)%s))
+                next = index(filters(k)%s(pos:), new_line('a'))
+                if (next == 0) next = len(filters(k)%s) - pos + 2
+                selected = [selected, string_t(trim(names(k))//CASE_SEP// &
+                    filters(k)%s(pos:pos + next - 2))]
+                pos = pos + next
+            end do
+        end do
+    end subroutine filtered_names
+
+    subroutine project_list_expand(b, flags, request, model, selection, ierr, &
+            message, build)
+        !! Split the selected executables that list their cases (built ones
+        !! only: the listing runs the executable) into their cases and select
+        !! again, so `exe::case` names and globs resolve on the cases and each
+        !! case has its own digest and verdict. build: build the selected
+        !! cases first (`fo test`); a failing build leaves the selection as is
+        !! for the run to report.
+        type(backend_t), intent(inout) :: b
+        character(len=*), intent(in) :: flags
+        type(model_request_t), intent(in) :: request
+        type(project_model_t), intent(inout) :: model
+        type(model_selection_t), intent(inout) :: selection
+        integer, intent(out) :: ierr
+        character(len=:), allocatable, intent(out) :: message
+        logical, intent(in), optional :: build
+        character(len=1024) :: log_file
+        integer :: n, code
+
+        ierr = 0
+        message = ''
+        if (present(build)) then
+            if (build) then
+                call make_tmpfile('fo-expand-build', log_file)
+                call project_build_cases(b, model, selection%cases, flags, &
+                    trim(log_file), code)
+                call delete_tmpfile(trim(log_file))
+                if (code /= 0) return
+            end if
+        end if
+        call expand_listed(b, flags, model, selection%cases, n, ierr, message)
+        if (ierr /= 0 .or. n == 0) return
+        call resolve_loaded(model, request, selection, ierr, message)
+    end subroutine project_list_expand
+
+    subroutine project_expand_cases(b, flags, model, n_expanded, ierr, message, &
+            from_root, to_root)
+        !! Gremlin: after a generation build, replace the executable cases of
+        !! every built executable that lists its cases by its cases (an
+        !! earlier expansion is dropped first, so a rebuilt executable lists
+        !! again). Executables that list nothing stay one case.
+        type(backend_t), intent(in) :: b
+        character(len=*), intent(in) :: flags
+        type(project_model_t), intent(inout) :: model
+        integer, intent(out) :: n_expanded, ierr
+        character(len=:), allocatable, intent(out) :: message
+        !! A model reused from a tree that is gone names its executables
+        !! below from_root: they are looked up below to_root instead.
+        character(len=*), intent(in), optional :: from_root, to_root
+        integer :: k
+        integer, allocatable :: all(:)
+
+        n_expanded = 0
+        call model_collapse_cases(model, ierr, message)
+        if (ierr /= 0) return
+        all = [(k, k=1, model%n_cases)]
+        call expand_listed(b, flags, model, all, n_expanded, ierr, message, &
+            from_root, to_root)
+    end subroutine project_expand_cases
+
+    subroutine expand_listed(b, flags, model, cases, n_expanded, ierr, message, &
+            from_root, to_root)
+        !! Expand the given model cases whose executable is built and lists
+        !! cases: a case runs one executable when its target artifact (fpm: the
+        !! executable of that name) or its single-token CTest command is one.
+        type(backend_t), intent(in) :: b
+        character(len=*), intent(in) :: flags
+        type(project_model_t), intent(inout) :: model
+        integer, intent(in) :: cases(:)
+        integer, intent(out) :: n_expanded, ierr
+        character(len=:), allocatable, intent(out) :: message
+        character(len=*), intent(in), optional :: from_root, to_root
+        type(model_listing_t), allocatable :: listings(:)
+        type(case_listing_t) :: listing
+        character(len=:), allocatable :: exe
+        logical :: exists
+        integer :: k
+
+        allocate (listings(0))
+        n_expanded = 0
+        ierr = 0
+        message = ''
+        do k = 1, size(cases)
+            exe = case_executable(b, flags, model, cases(k))
+            if (len(exe) == 0) cycle
+            if (present(from_root) .and. present(to_root)) &
+                exe = rebased(exe, from_root, to_root)
+            inquire (file=exe, exist=exists)
+            if (.not. exists) cycle
+            call case_list(exe, trim(b%project_dir), listing)
+            if (size(listing%names) == 0) cycle
+            listings = [listings, model_listing_t(cases(k), listing%names, &
+                listing%sources)]
+        end do
+        n_expanded = size(listings)
+        if (n_expanded == 0) return
+        call model_expand_cases(model, listings, ierr, message)
+    end subroutine expand_listed
+
+    function rebased(path, from_root, to_root) result(out)
+        !! path below from_root, spelled below to_root. The CMake File API
+        !! reports resolved paths (/private/var for /var on Darwin), so the
+        !! two roots are compared without a leading /private.
+        character(len=*), intent(in) :: path, from_root, to_root
+        character(len=:), allocatable :: out, plain, root
+
+        out = path
+        if (len(from_root) == 0) return
+        plain = unprivate(path)
+        root = unprivate(from_root)
+        if (len(plain) <= len(root)) return
+        if (plain(1:len(root) + 1) /= root//'/') return
+        out = to_root//plain(len(root) + 1:)
+    end function rebased
+
+    function unprivate(path) result(out)
+        character(len=*), intent(in) :: path
+        character(len=:), allocatable :: out
+
+        out = path
+        if (len(path) > 9) then
+            if (path(1:9) == '/private/') out = path(9:)
+        end if
+    end function unprivate
+
+    function case_executable(b, flags, model, k) result(exe)
+        !! The executable that runs model case k as a whole, or ''.
+        type(backend_t), intent(in) :: b
+        character(len=*), intent(in) :: flags
+        type(project_model_t), intent(in) :: model
+        integer, intent(in) :: k
+        character(len=:), allocatable :: exe
+        integer :: t
+
+        exe = ''
+        associate (c => model%cases(k))
+            if (c%explicit_only .or. c%expanded) return
+            if (allocated(c%parent)) return
+            t = c%command_target
+            if (b%kind == BACKEND_NATIVE) then
+                if (t < 1) return
+                if (model%targets(t)%name /= c%name) return
+                exe = native_output_dir(trim(b%project_dir), flags, 'bin')//'/'// &
+                    c%name
+            else
+                if (.not. allocated(c%command)) return
+                if (size(c%command) /= 1) return
+                exe = c%command(1)%s
+                if (len(exe) == 0) return
+                if (exe(1:1) /= '/') then
+                    exe = ''
+                else if (ordered(model, k)) then
+                    exe = ''
+                end if
+            end if
+        end associate
+    end function case_executable
+
+    logical function ordered(model, k) result(yes)
+        !! A CTest case that takes part in an ordering the model cannot
+        !! carry over to its cases: a fixture setup or cleanup, or a DEPENDS
+        !! target of another case. It is never split.
+        type(project_model_t), intent(in) :: model
+        integer, intent(in) :: k
+        integer :: j, a, m
+
+        yes = .false.
+        do a = 1, size(model%cases(k)%attrs)
+            select case (model%cases(k)%attrs(a)%key)
+            case ('FIXTURES_SETUP', 'FIXTURES_CLEANUP')
+                yes = .true.
+                return
+            end select
+        end do
+        do j = 1, model%n_cases
+            do a = 1, size(model%cases(j)%attrs)
+                if (model%cases(j)%attrs(a)%key /= 'DEPENDS') cycle
+                if (.not. allocated(model%cases(j)%attrs(a)%items)) cycle
+                do m = 1, size(model%cases(j)%attrs(a)%items)
+                    if (model%cases(j)%attrs(a)%items(m)%s == &
+                        model%cases(k)%name) yes = .true.
+                end do
+            end do
+        end do
+    end function ordered
+
     subroutine run_cmake_cases(b, model, cases, names, flags, no_build, lift, &
-            log_file, exitcode)
+            log_file, exitcode, filters)
         !! Build once, run the cases whose CTest properties fo implements
         !! natively, and delegate the rest to ctest (FO_CTEST_DELEGATE=1
-        !! delegates all). Delegated cases are named in the log.
+        !! delegates all). Delegated cases are named in the log. The native
+        !! cases run per listed case: each executable that lists its cases
+        !! becomes its cases (the `filters` select among them).
         type(backend_t), intent(inout) :: b
         type(project_model_t), intent(in) :: model
         integer, intent(in) :: cases(:)
         character(len=*), intent(in) :: names(:), flags, log_file
         logical, intent(in) :: no_build, lift
         integer, intent(out) :: exitcode
+        type(string_t), intent(in) :: filters(:)
+        type(project_model_t) :: listed
         type(string_t), allocatable :: reasons(:)
         logical, allocatable :: native(:)
+        integer, allocatable :: run_cases(:)
         character(len=8) :: forced
+        character(len=:), allocatable :: message
         integer :: k, status, code
 
         allocate (native(size(cases)), reasons(size(cases)))
@@ -851,6 +1090,8 @@ contains
             call ctest_native_select(model, cases, native, reasons)
         end if
         if (.not. any(native)) then
+            call refuse_filters(filters, log_file, exitcode)
+            if (exitcode /= 0) return
             call backend_test_cases(b, names, size(names), exitcode, &
                 log_file=log_file, flags=flags, no_build=no_build, &
                 configured=.true., lift_preset_filter=lift)
@@ -862,9 +1103,21 @@ contains
                 log_file=log_file, flags=flags, configured=.true., build_only=.true.)
             if (exitcode /= 0) return
         end if
-        call ctest_native_run(model, pack(cases, native), log_file, &
+        call listed_cases(b, flags, model, pack(cases, native), &
+            pack(filters, native), listed, run_cases, message)
+        if (len(message) > 0) then
+            call ctest_log_failure(log_file, message)
+            exitcode = 1
+            return
+        end if
+        call ctest_native_run(listed, run_cases, log_file, &
             .not. no_build, exitcode)
         if (all(native)) return
+        call refuse_filters(pack(filters, .not. native), log_file, code)
+        if (code /= 0) then
+            exitcode = code
+            return
+        end if
         do k = 1, size(cases)
             if (native(k)) cycle
             call ctest_log_note(log_file, 'fo: delegated to ctest: '// &
@@ -876,6 +1129,88 @@ contains
             append_log=.true.)
         if (code /= 0) exitcode = code
     end subroutine run_cmake_cases
+
+    subroutine ctest_log_failure(log_file, message)
+        !! A selection that cannot be applied, as a failed result line.
+        character(len=*), intent(in) :: log_file, message
+        integer :: u, ios
+
+        open (newunit=u, file=trim(log_file), position='append', status='old', &
+            action='write', iostat=ios)
+        if (ios /= 0) return
+        write (u, '(a)') 'TEST_REASON '//message
+        write (u, '(a)') 'TEST_RESULT fo-case-selection FAIL 1 0.00'
+        close (u)
+    end subroutine ctest_log_failure
+
+    subroutine refuse_filters(filters, log_file, exitcode)
+        !! Cases of a test that ctest itself runs cannot be selected.
+        type(string_t), intent(in) :: filters(:)
+        character(len=*), intent(in) :: log_file
+        integer, intent(out) :: exitcode
+        integer :: k
+
+        exitcode = 0
+        do k = 1, size(filters)
+            if (len(filters(k)%s) == 0) cycle
+            call ctest_log_failure(log_file, 'cannot select cases of a test that '// &
+                'ctest runs: '//filters(k)%s)
+            exitcode = 1
+            return
+        end do
+    end subroutine refuse_filters
+
+    subroutine listed_cases(b, flags, model, cases, filters, listed, run_cases, &
+            message)
+        !! listed: the model with the listed executables of cases expanded;
+        !! run_cases: the cases to run in it (each executable's cases that
+        !! match its filter, or the executable). message: why a filter fails.
+        type(backend_t), intent(in) :: b
+        character(len=*), intent(in) :: flags
+        type(project_model_t), intent(in) :: model
+        integer, intent(in) :: cases(:)
+        type(string_t), intent(in) :: filters(:)
+        type(project_model_t), intent(out) :: listed
+        integer, allocatable, intent(out) :: run_cases(:)
+        character(len=:), allocatable, intent(out) :: message
+        character(len=:), allocatable :: reason
+        integer :: k, j, i, n, ierr
+
+        listed = model
+        message = ''
+        allocate (run_cases(0))
+        call expand_listed(b, flags, listed, cases, n, ierr, reason)
+        if (ierr /= 0) then
+            message = 'cannot expand the listed cases: '//reason
+            return
+        end if
+        do k = 1, size(cases)
+            i = model_find_case(listed, model%cases(cases(k))%name)
+            if (.not. listed%cases(i)%expanded) then
+                if (len(filters(k)%s) > 0) then
+                    message = 'cannot select cases of '// &
+                        model%cases(cases(k))%name//': it does not list cases'
+                    return
+                end if
+                run_cases = [run_cases, i]
+                cycle
+            end if
+            j = 0
+            do n = 1, listed%n_cases
+                if (.not. allocated(listed%cases(n)%parent)) cycle
+                if (listed%cases(n)%parent /= listed%cases(i)%name) cycle
+                if (.not. case_matches(filters(k)%s, listed%cases(n)%name( &
+                    len(listed%cases(i)%name) + len(CASE_SEP) + 1:))) cycle
+                run_cases = [run_cases, n]
+                j = j + 1
+            end do
+            if (j == 0) then
+                message = 'no case of '//listed%cases(i)%name//' matches '// &
+                    filters(k)%s
+                return
+            end if
+        end do
+    end subroutine listed_cases
 
     function pack_names(names, keep) result(kept)
         character(len=*), intent(in) :: names(:)

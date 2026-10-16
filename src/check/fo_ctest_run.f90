@@ -18,14 +18,16 @@ module fo_ctest_run
     !!
     !! ctest_import_junit turns the JUnit file of a delegated ctest run into
     !! the same lines, so verdicts and names need no console scraping.
-    use, intrinsic :: iso_fortran_env, only: int64
+    use, intrinsic :: iso_fortran_env, only: int64, error_unit
     use fx_string, only: string_t
     use fo_util, only: make_tmpfile, read_text_file_alloc
     use fo_fs, only: fs_sleep_ms, fs_find_executable, fs_append_file, fs_remove_file
     use fo_pattern, only: pattern_t, pattern_compile, pattern_matches
     use fo_process, only: argv_push, process_start_argv_logged, &
         process_poll_pid, process_cancel_pid, process_detect_nproc
-    use fo_test_budget, only: test_wall_cap_seconds, test_timeout_seconds
+    use fo_test_budget, only: test_wall_cap_seconds, test_timeout_seconds, &
+        test_strict_flaky, test_retries_override
+    use fo_test_cases, only: CASE_SEP, case_list, case_listing_t, case_run_setup
     use fo_project_model, only: project_model_t, model_case_t, model_find_case
     implicit none
     private
@@ -57,6 +59,13 @@ module fo_ctest_run
         character(len=10) :: status = ''
         integer :: exit_code = 0
         real :: secs = 0.0
+        !! Retries after a failure (FO_RETRIES, label flaky, --retries), the
+        !! attempt running, and the SLOW period and terminate-after count.
+        integer :: retries = 0, attempt = 1
+        integer :: slow_period = 0, slow_after = 0, slow_seen = 0
+        logical :: flaky = .false.
+        character(len=4096) :: first_log = ''
+        real :: prior_secs = 0.0
     end type run_case_t
 
 contains
@@ -271,10 +280,12 @@ contains
         integer, intent(in) :: case_index
         type(run_case_t), intent(inout) :: rc
         type(string_t), allocatable :: items(:)
-        character(len=:), allocatable :: key, exe
-        logical :: ok
-        integer :: a, k, ios
+        character(len=:), allocatable :: key, exe, case_args, case_env
+        type(case_listing_t) :: listing
+        logical :: ok, retries_set
+        integer :: a, k, ios, override
 
+        retries_set = .false.
         associate (c => model%cases(case_index))
             rc%model_index = case_index
             rc%name = c%name
@@ -387,6 +398,25 @@ contains
                     rc%fix_cleanup = items
                 case ('DEPENDS')
                     rc%depends = items
+                case ('FO_RETRIES')
+                    if (size(items) == 1) read (items(1)%s, *, iostat=ios) rc%retries
+                    if (size(items) /= 1 .or. ios /= 0 .or. rc%retries < 0) then
+                        rc%reason = 'unsupported FO_RETRIES'
+                        return
+                    end if
+                    retries_set = .true.
+                case ('FO_SLOW_PERIOD')
+                    if (size(items) == 1) read (items(1)%s, *, iostat=ios) rc%slow_period
+                    if (size(items) /= 1 .or. ios /= 0 .or. rc%slow_period < 1) then
+                        rc%reason = 'unsupported FO_SLOW_PERIOD'
+                        return
+                    end if
+                case ('FO_SLOW_TERMINATE_AFTER')
+                    if (size(items) == 1) read (items(1)%s, *, iostat=ios) rc%slow_after
+                    if (size(items) /= 1 .or. ios /= 0 .or. rc%slow_after < 1) then
+                        rc%reason = 'unsupported FO_SLOW_TERMINATE_AFTER'
+                        return
+                    end if
                 case ('COST', '_BACKTRACE_TRIPLES')
                 case default
                     rc%reason = 'property '//key//' not implemented natively'
@@ -408,11 +438,35 @@ contains
             do k = 1, size(c%command)
                 call argv_push(rc%packed, rc%n_args, c%command(k)%s)
             end do
+            if (allocated(c%parent)) then
+                ! One listed case of the executable: select it for the process.
+                call case_list(exe, rc%cwd, listing)
+                if (size(listing%names) == 0) then
+                    rc%reason = 'the executable no longer lists its cases'
+                    return
+                end if
+                call case_run_setup(listing%adapter, c%name(len(c%parent) + &
+                    len(CASE_SEP) + 1:), case_args, case_env)
+                call argv_push_split_nl_text(rc%packed, rc%n_args, case_args)
+                if (len(case_env) > 0) then
+                    if (len(rc%env) > 0) rc%env = rc%env//';'
+                    rc%env = rc%env//case_env
+                end if
+            end if
+            if (.not. retries_set) then
+                do k = 1, size(c%labels)
+                    if (c%labels(k)%s == 'flaky') rc%retries = 2
+                end do
+            end if
         end associate
+        override = test_retries_override()
+        if (override >= 0) rc%retries = override
         rc%supported = .true.
         rc%reason = ''
         if (rc%timeout <= 0.0) rc%timeout = real(test_wall_cap_seconds( &
             budget=test_timeout_seconds()))
+        if (rc%slow_period > 0 .and. rc%slow_after > 0) rc%timeout = &
+            min(rc%timeout, real(rc%slow_period*rc%slow_after))
     end subroutine build_case
 
     logical function is_directory(path) result(yes)
@@ -632,7 +686,8 @@ contains
     end subroutine start_case
 
     logical function poll_case(rc) result(done)
-        !! Poll a running case; classify and finish it when it ended.
+        !! Poll a running case; classify and finish it when it ended. A
+        !! failure with retries left runs the case again, not finished.
         type(run_case_t), intent(inout) :: rc
         integer :: code, ec
         integer(int64) :: now, rate
@@ -644,9 +699,15 @@ contains
         elapsed = real(now - rc%t0) / real(rate)
         done = .false.
         if (.not. ended) then
+            if (rc%slow_period > 0) then
+                if (elapsed >= real(rc%slow_period*(rc%slow_seen + 1))) then
+                    rc%slow_seen = rc%slow_seen + 1
+                    call slow_note(rc, elapsed)
+                end if
+            end if
             if (elapsed <= rc%timeout) return
             call process_cancel_pid(rc%pid, ec)
-            rc%secs = elapsed
+            rc%secs = rc%prior_secs + elapsed
             rc%exit_code = 124
             rc%status = 'TIMEOUT'
             rc%reason = 'Timeout'
@@ -654,11 +715,62 @@ contains
             done = .true.
             return
         end if
-        rc%secs = elapsed
+        rc%secs = rc%prior_secs + elapsed
         call classify(rc, code)
+        if (rc%status == 'FAIL' .and. rc%attempt <= rc%retries) then
+            ! Keep the first failure as the evidence of a FLAKY verdict.
+            if (len_trim(rc%first_log) == 0) then
+                rc%first_log = rc%log
+            else
+                call fs_remove_file(trim(rc%log))
+            end if
+            rc%prior_secs = rc%secs
+            rc%attempt = rc%attempt + 1
+            rc%slow_seen = 0
+            call start_case(rc)
+            done = rc%state == FINISHED
+            return
+        end if
+        if (rc%status == 'PASS' .and. rc%attempt > 1) then
+            rc%status = 'FLAKY'
+            rc%reason = 'failed first, passed on retry'
+            call fs_remove_file(trim(rc%log))
+            rc%log = rc%first_log
+            rc%first_log = ''
+        else if (len_trim(rc%first_log) > 0) then
+            call fs_remove_file(trim(rc%first_log))
+            rc%first_log = ''
+        end if
         rc%state = FINISHED
         done = .true.
     end function poll_case
+
+    subroutine slow_note(rc, elapsed)
+        !! SLOW progress line of a case still running after its period.
+        type(run_case_t), intent(in) :: rc
+        real, intent(in) :: elapsed
+        character(len=16) :: secs
+
+        write (secs, '(i0)') int(elapsed)
+        write (error_unit, '(a)') 'fo: SLOW '//rc%name//' running for '// &
+            trim(secs)//'s'
+    end subroutine slow_note
+
+    subroutine argv_push_split_nl_text(packed, n_args, lines)
+        !! Append each newline-separated line as one argv token.
+        character(len=:), allocatable, intent(inout) :: packed
+        integer, intent(inout) :: n_args
+        character(len=*), intent(in) :: lines
+        integer :: pos, next
+
+        pos = 1
+        do while (pos <= len(lines))
+            next = index(lines(pos:), new_line('a'))
+            if (next == 0) next = len(lines) - pos + 2
+            call argv_push(packed, n_args, lines(pos:pos + next - 2))
+            pos = pos + next
+        end do
+    end subroutine argv_push_split_nl_text
 
     subroutine classify(rc, code)
         !! The CTest verdict of a finished case.
@@ -765,7 +877,8 @@ contains
         do i = 1, size(rcs)
             associate (rc => rcs(i))
                 if (len_trim(rc%log) > 0) then
-                    if (rc%status == 'FAIL' .or. rc%status == 'TIMEOUT') then
+                    if (rc%status == 'FAIL' .or. rc%status == 'TIMEOUT' .or. &
+                        rc%status == 'FLAKY') then
                         call ctest_log_note(log_file, '--- stdout '//rc%name//' ---')
                         call fs_append_file(trim(rc%log), log_file)
                         call ctest_log_note(log_file, '--- end stdout '//rc%name// &
@@ -778,6 +891,8 @@ contains
                     exitcode = max(exitcode, 1)
                     if (rc%status == 'TIMEOUT') exitcode = 124
                 end if
+                if (rc%status == 'FLAKY' .and. test_strict_flaky()) &
+                    exitcode = max(exitcode, 1)
                 exit_text = '-'
                 if (rc%status == 'FAIL') write (exit_text, '(i0)') rc%exit_code
                 if (rc%status == 'TIMEOUT') exit_text = '124'
@@ -785,6 +900,8 @@ contains
                 open (newunit=u, file=trim(log_file), position='append', &
                     status='old', action='write', iostat=ios)
                 if (ios /= 0) cycle
+                if (rc%slow_seen > 0) write (u, '(a,i0,a)') 'fo: SLOW '//rc%name// &
+                    ' exceeded its period of ', rc%slow_period, 's'
                 if (len(rc%reason) > 0) write (u, '(a)') 'TEST_REASON '//rc%reason
                 write (u, '(a)') 'TEST_RESULT '//rc%name//' '//trim(rc%status)// &
                     ' '//trim(exit_text)//' '//trim(adjustl(secs_text))

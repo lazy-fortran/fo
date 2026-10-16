@@ -25,7 +25,9 @@ program fo_main
     use fo_project_load, only: project_has_model, &
         project_run_cases, project_list_text, project_list_json, &
         project_select, project_run_affected, &
-        project_load, project_inventory_cases, project_build_cases
+        project_load, project_inventory_cases, project_build_cases, &
+        project_list_expand
+    use fo_test_budget, only: test_set_retry_options
     use fo_fmt, only: fmt_sources, FMT_SELECT_ALL, FMT_SELECT_FILES, FMT_SELECT_CHANGED, &
         write_git_changed_source_list
     use fo_process, only: process_exit, process_run_argv_logged, argv_push, &
@@ -521,6 +523,9 @@ contains
         write (out, '(a)') '  --partition hash:K/N | count:K/N'
         write (out, '(a)') '                  run only part K of N of the selected cases'
         write (out, '(a)') '  --list          print the selection and build plan; no build'
+        write (out, '(a)') '                  (cases of built executables are listed)'
+        write (out, '(a)') '  --retries N     retry a failed test N times; pass after fail is FLAKY'
+        write (out, '(a)') '  --strict-flaky  a FLAKY test fails the run'
         write (out, '(a)') '  --random N      sample N tests without replacement'
         write (out, '(a)') '  --seed S        replay a random sample with seed S'
         write (out, '(a)') '  --verbose       show all tests (default for named runs)'
@@ -900,6 +905,9 @@ contains
             case ('--case')
                 call get_command_argument(i + 1, arg)
                 k = model_find_case(model, trim(arg))
+                ! `exe::case` builds what its executable needs.
+                if (k == 0 .and. index(arg, '::') > 1) &
+                    k = model_find_case(model, arg(1:index(arg, '::') - 1))
                 if (k == 0) then
                     write (error_unit, '(a)') 'fo: unknown test case: '//trim(arg)
                     call process_exit(1)
@@ -1107,6 +1115,8 @@ contains
         logical :: only_changed, include_all, verbose, use_json, skip_next
         logical :: json_full, quiet
         logical :: end_options, flags_seen, list_mode, filtered, no_build
+        logical :: strict_flaky
+        integer :: retries
         type(string_t), allocatable :: widen_reasons(:)
         type(model_request_t) :: request
         type(model_selection_t) :: selection
@@ -1143,6 +1153,8 @@ contains
         end_options = .false.
         list_mode = .false.
         no_build = .false.
+        strict_flaky = .false.
+        retries = -1
         allocate (request%include_labels(0), request%exclude_labels(0), &
             request%layers(0))
         do i = 2, command_argument_count()
@@ -1259,6 +1271,14 @@ contains
                 no_cache = .true.
             case ('--list')
                 list_mode = .true.
+            case ('--strict-flaky')
+                strict_flaky = .true.
+            case ('--retries')
+                call test_option_value(i, '--retries needs N', arg)
+                read (arg, *, iostat=ierr) retries
+                if (ierr /= 0 .or. retries < 0) &
+                    call test_usage_error('invalid --retries N')
+                skip_next = .true.
             case ('--no-build')
                 no_build = .true.
             case ('--only-changed')
@@ -1290,6 +1310,7 @@ contains
                 test_names(n_arg_names) = trim(arg)
             end select
         end do
+        call test_set_retry_options(retries, strict_flaky)
         ! Agent-facing and summary modes get the report only, no live lines.
         if (use_json .or. quiet) call progress_suppress(.true.)
 
@@ -1378,6 +1399,17 @@ contains
             write (error_unit, '(a)') 'fo: affected selection widened: '// &
                 widen_reasons(i)%s
         end do
+        if (.not. only_changed .and. random_count == 0 .and. &
+            selection%status /= SELECT_EMPTY) then
+            ! Executables that list their cases are selected, cached and run
+            ! as cases; --list shows the cases of the executables already built.
+            call project_list_expand(b, all_flags, request, model, selection, &
+                ierr, message, build=.not. list_mode .and. .not. no_build)
+            if (ierr /= 0) then
+                write (error_unit, '(a)') 'fo: '//message
+                stop 1
+            end if
+        end if
         if (random_count > 0) then
             ! Candidates are the model's default selection.
             if (size(selection%cases) > size(random_candidates)) then
@@ -1439,10 +1471,10 @@ contains
         end if
         if (no_cache) then
             call project_run_cases(b, model, selection%cases, all_flags, no_build, &
-                test_log, exitcode)
+                test_log, exitcode, selection)
         else
             call test_cache_run(b, model, selection%cases, all_flags, no_build, &
-                test_log, exitcode, rerun .or. random_count > 0)
+                test_log, exitcode, rerun .or. random_count > 0, selection)
         end if
         call report_test_result(exitcode, test_log, &
             (random_count == 0 .and. n_arg_names == 0 .and. .not. filtered .and. &

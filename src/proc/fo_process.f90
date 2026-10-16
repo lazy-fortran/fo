@@ -176,6 +176,19 @@ module fo_process
             integer(c_long_long), intent(out) :: cpu_ms, wall_ms
         end subroutine fo_c_run_argv_budget
 
+        subroutine fo_c_run_argv_slow(cwd, args, args_len, n_args, log_file, &
+                append, cpu_budget_s, timeout_s, slow_period_s, slow_label, &
+                env_extra, exitcode, timeout_kind, cpu_ms, wall_ms) &
+                bind(C, name='fo_c_run_argv_slow')
+            import :: c_char, c_int, c_long_long
+            character(kind=c_char), intent(in) :: cwd(*), args(*), log_file(*)
+            character(kind=c_char), intent(in) :: slow_label(*), env_extra(*)
+            integer(c_int), value :: args_len, n_args, append, cpu_budget_s
+            integer(c_int), value :: timeout_s, slow_period_s
+            integer(c_int), intent(out) :: exitcode, timeout_kind
+            integer(c_long_long), intent(out) :: cpu_ms, wall_ms
+        end subroutine fo_c_run_argv_slow
+
         subroutine fo_c_exit(code) bind(C, name='fo_c_exit')
             import :: c_int
             integer(c_int), value :: code
@@ -330,7 +343,7 @@ contains
 
     recursive subroutine process_run_argv_logged(cwd, packed, n_args, log_file, append, &
             timeout_s, exitcode, env_extra, heartbeat_s, cpu_budget_s, &
-            timeout_kind, cpu_seconds, wall_seconds)
+            timeout_kind, cpu_seconds, wall_seconds, slow_period_s, slow_label)
         !! Run a command given as an argv vector with no shell. packed holds
         !! n_args NUL-terminated tokens back-to-back (built by argv_begin/
         !! argv_push). This is the quote-proof, async-signal-safe path for
@@ -349,6 +362,10 @@ contains
         integer, intent(in), optional :: cpu_budget_s
         integer, intent(out), optional :: timeout_kind
         real, intent(out), optional :: cpu_seconds, wall_seconds
+        !! With cpu_budget_s: a "fo: SLOW <label> running for Ns" line every
+        !! slow_period_s seconds (instead of the heartbeat).
+        integer, intent(in), optional :: slow_period_s
+        character(len=*), intent(in), optional :: slow_label
         integer(c_int) :: ec, ap, heartbeat, kind
         integer(c_long_long) :: cpu_ms, wall_ms
         character(kind=c_char) :: c_env(C_PATH_LEN)
@@ -367,7 +384,14 @@ contains
         else
             c_env(1) = c_null_char
         end if
-        if (present(cpu_budget_s)) then
+        if (present(cpu_budget_s) .and. present(slow_period_s) .and. &
+            present(slow_label)) then
+            call fo_c_run_argv_slow(trim(cwd)//c_null_char, packed, &
+                int(args_len, c_int), int(n_args, c_int), &
+                trim(log_file)//c_null_char, ap, int(cpu_budget_s, c_int), &
+                int(timeout_s, c_int), int(slow_period_s, c_int), &
+                trim(slow_label)//c_null_char, c_env, ec, kind, cpu_ms, wall_ms)
+        else if (present(cpu_budget_s)) then
             call fo_c_run_argv_budget(trim(cwd)//c_null_char, packed, &
                 int(args_len, c_int), int(n_args, c_int), &
                 trim(log_file)//c_null_char, ap, int(cpu_budget_s, c_int), &

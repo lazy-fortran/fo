@@ -23,6 +23,7 @@ module fo_project_model
     use fo_pattern, only: pattern_t, pattern_compile, pattern_compile_glob, &
         pattern_matches, pattern_is_glob
     use fo_util, only: int_text
+    use fo_test_cases, only: CASE_SEP, case_filter_add
     use fo_case_filter, only: case_filter_t, filter_parse, filter_eval
     implicit none
     private
@@ -123,6 +124,13 @@ module fo_project_model
         !! Runs only when named exactly: never selected by globs, labels,
         !! layers, --all or an empty name list (the fpm dispatcher program).
         logical :: explicit_only = .false.
+        !! A listed executable (model_expand_cases): its cases follow as
+        !! `name::case` children, and it is selected only through them.
+        logical :: expanded = .false.
+        !! Child: the executable case it belongs to, and the project files
+        !! its own code lives in (empty: the whole executable's closure).
+        character(len=:), allocatable :: parent
+        type(string_t), allocatable :: case_sources(:)
     end type model_case_t
 
     type, public :: name_index_t
@@ -189,7 +197,16 @@ module fo_project_model
         type(string_t), allocatable :: unknown(:)
         !! Globs that matched no case (not an error by themselves).
         type(string_t), allocatable :: unmatched(:)
+        !! Per model case: newline-joined case globs of `exe::glob` names
+        !! that selected an executable not yet expanded; empty = all cases.
+        type(string_t), allocatable :: filters(:)
     end type model_selection_t
+
+    type, public :: model_listing_t
+        !! The listed cases of the executable case `parent` (model_expand_cases).
+        integer :: parent = 0
+        type(string_t), allocatable :: names(:), sources(:)
+    end type model_listing_t
 
     type, public :: model_plan_t
         !! Target indices to build, in model order.
@@ -254,6 +271,7 @@ module fo_project_model
     public :: model_find_target, model_find_artifact, model_find_layer
     public :: model_find_case, model_cache_key
     public :: model_affected, model_case_digests
+    public :: model_expand_cases, model_collapse_cases
     public :: index_insert, index_lookup
 
 contains
@@ -676,10 +694,14 @@ contains
         end if
 
         allocate(named(model%n_cases), exact(model%n_cases), origin(model%n_cases))
+        allocate(selection%filters(model%n_cases))
         named = size(names) == 0
         exact = .false.
         do i = 1, model%n_cases
-            if (model%cases(i)%explicit_only) named(i) = .false.
+            selection%filters(i)%s = ''
+            ! A listed executable is selected through its cases only.
+            if (model%cases(i)%explicit_only .or. model%cases(i)%expanded) &
+                named(i) = .false.
         end do
         do i = 1, model%n_cases
             origin(i)%s = 'all cases'
@@ -687,14 +709,22 @@ contains
         do k = 1, size(names)
             i = model_find_case(model, names(k)%s)
             if (i /= 0) then
-                if (model%cases(i)%origin == ORIGIN_PROJECT) then
+                if (model%cases(i)%origin /= ORIGIN_PROJECT) then
+                    call append_string(selection%unknown, names(k)%s// &
+                        ' (dependency test)')
+                else if (model%cases(i)%expanded) then
+                    call select_listed(names(k)%s, '', names(k)%s)
+                else
                     named(i) = .true.
                     exact(i) = .true.
                     origin(i)%s = 'name '//names(k)%s
-                else
-                    call append_string(selection%unknown, names(k)%s// &
-                        ' (dependency test)')
                 end if
+                cycle
+            end if
+            if (index(names(k)%s, CASE_SEP) > 1) then
+                call select_listed(names(k)%s(1:index(names(k)%s, CASE_SEP) - 1), &
+                    names(k)%s(index(names(k)%s, CASE_SEP) + len(CASE_SEP):), &
+                    names(k)%s)
                 cycle
             end if
             if (.not. pattern_is_glob(names(k)%s)) then
@@ -705,8 +735,11 @@ contains
             any_match = .false.
             do i = 1, model%n_cases
                 if (model%cases(i)%origin /= ORIGIN_PROJECT) cycle
-                if (model%cases(i)%explicit_only) cycle
-                if (.not. pattern_matches(glob, model%cases(i)%name)) cycle
+                if (model%cases(i)%explicit_only .or. model%cases(i)%expanded) cycle
+                if (.not. pattern_matches(glob, model%cases(i)%name)) then
+                    if (.not. allocated(model%cases(i)%parent)) cycle
+                    if (.not. pattern_matches(glob, model%cases(i)%parent)) cycle
+                end if
                 any_match = .true.
                 if (named(i)) cycle
                 named(i) = .true.
@@ -845,6 +878,49 @@ contains
                 width = 2*width
             end do
         end subroutine sort_by_name
+
+        subroutine select_listed(exe_text, case_text, full)
+            !! `exe::case` names (and an expanded executable's own name): the
+            !! children of a listed executable whose full name matches, and an
+            !! executable not listed yet, which carries the case globs as a
+            !! filter for the runner that lists it.
+            character(len=*), intent(in) :: exe_text, case_text, full
+            type(pattern_t) :: exe_glob, full_glob
+            integer :: j
+            logical :: hit, literal
+
+            literal = .not. pattern_is_glob(full)
+            call pattern_compile_glob(exe_text, exe_glob)
+            call pattern_compile_glob(full, full_glob)
+            hit = .false.
+            do j = 1, model%n_cases
+                associate (c => model%cases(j))
+                    if (c%origin /= ORIGIN_PROJECT .or. c%explicit_only) cycle
+                    if (allocated(c%parent)) then
+                        if (len(case_text) == 0) then
+                            if (.not. pattern_matches(exe_glob, c%parent)) cycle
+                        else
+                            if (.not. pattern_matches(full_glob, c%name)) cycle
+                        end if
+                    else
+                        if (c%expanded) cycle
+                        if (.not. pattern_matches(exe_glob, c%name)) cycle
+                        if (len(case_text) > 0) &
+                            call case_filter_add(selection%filters(j)%s, case_text)
+                    end if
+                    hit = .true.
+                    named(j) = .true.
+                    exact(j) = exact(j) .or. literal
+                    origin(j)%s = 'name '//full
+                end associate
+            end do
+            if (hit) return
+            if (literal) then
+                call append_string(selection%unknown, full)
+            else
+                call append_string(selection%unmatched, full)
+            end if
+        end subroutine select_listed
 
         subroutine mark(case_index, disposition, text)
             integer, intent(in) :: case_index, disposition
@@ -1429,6 +1505,117 @@ contains
 
 end subroutine model_affected
 
+subroutine model_expand_cases(model, listings, ierr, message)
+    !! Add the listed cases of executable cases (#217): each parent keeps
+    !! its place, is marked expanded and is followed by its children
+    !! `parent::case`, which inherit its labels, layer, mapping, command and
+    !! attributes. A child with sources narrows its input closure to them
+    !! (graph_closure). Earlier children are removed first, so expanding
+    !! again after a rebuild starts from the executable cases.
+    type(project_model_t), intent(inout) :: model
+    type(model_listing_t), intent(in) :: listings(:)
+    integer, intent(out) :: ierr
+    character(len=:), allocatable, intent(out) :: message
+    type(model_case_t), allocatable :: old(:), cases(:)
+    integer :: i, j, n, total
+
+    call model_collapse_cases(model, ierr, message)
+    if (ierr /= 0) return
+    total = model%n_cases
+    do j = 1, size(listings)
+        total = total + size(listings(j)%names)
+    end do
+    allocate(old(model%n_cases), cases(total))
+    old(:) = model%cases(1:model%n_cases)
+    n = 0
+    do i = 1, size(old)
+        n = n + 1
+        cases(n) = old(i)
+        do j = 1, size(listings)
+            if (listings(j)%parent /= i) cycle
+            if (size(listings(j)%names) == 0) cycle
+            cases(n)%expanded = .true.
+            call add_children(listings(j), old(i))
+        end do
+    end do
+    call model_replace_cases(model, cases(1:n), ierr, message)
+
+contains
+
+    subroutine add_children(listing, parent)
+        type(model_listing_t), intent(in) :: listing
+        type(model_case_t), intent(in) :: parent
+        integer :: k
+
+        do k = 1, size(listing%names)
+            n = n + 1
+            cases(n) = parent
+            cases(n)%name = parent%name//CASE_SEP//listing%names(k)%s
+            cases(n)%expanded = .false.
+            cases(n)%parent = parent%name
+            call split_sources(listing%sources(k)%s, cases(n)%case_sources)
+        end do
+    end subroutine add_children
+
+end subroutine model_expand_cases
+
+subroutine model_collapse_cases(model, ierr, message)
+    !! Drop the children of model_expand_cases.
+    type(project_model_t), intent(inout) :: model
+    integer, intent(out) :: ierr
+    character(len=:), allocatable, intent(out) :: message
+    type(model_case_t), allocatable :: cases(:)
+    integer :: i, n
+
+    ierr = 0
+    message = ''
+    if (.not. any([(model%cases(i)%expanded .or. allocated(model%cases(i)%parent), &
+        i=1, model%n_cases)])) return
+    allocate(cases(model%n_cases))
+    n = 0
+    do i = 1, model%n_cases
+        if (allocated(model%cases(i)%parent)) cycle
+        n = n + 1
+        cases(n) = model%cases(i)
+        cases(n)%expanded = .false.
+    end do
+    call model_replace_cases(model, cases(1:n), ierr, message)
+end subroutine model_collapse_cases
+
+subroutine model_replace_cases(model, cases, ierr, message)
+    !! Install cases, rebuild the name index and finalize again.
+    type(project_model_t), intent(inout) :: model
+    type(model_case_t), intent(in) :: cases(:)
+    integer, intent(out) :: ierr
+    character(len=:), allocatable, intent(out) :: message
+    integer :: i, existing
+
+    model%cases = cases
+    model%n_cases = size(cases)
+    model%case_index = name_index_t()
+    do i = 1, model%n_cases
+        call index_insert(model%case_index, model%cases(i)%name, i, existing)
+        if (existing /= 0) call note_duplicate(model, 'test case', &
+            model%cases(i)%name)
+    end do
+    call model_finalize(model, ierr, message)
+end subroutine model_replace_cases
+
+subroutine split_sources(text, items)
+    character(len=*), intent(in) :: text
+    type(string_t), allocatable, intent(out) :: items(:)
+    integer :: pos, next
+
+    allocate(items(0))
+    pos = 1
+    do while (pos <= len(text))
+        next = index(text(pos:), ';')
+        if (next == 0) next = len(text) - pos + 2
+        if (next > 1) items = [items, string_t(text(pos:pos + next - 2))]
+        pos = pos + next
+    end do
+end subroutine split_sources
+
 subroutine model_case_digests(model, units, roots, cases, files, contents, digests)
     !! Digest of the input closure of each case: the contents of every file
     !! whose change model_affected counts against the case (its declared
@@ -1648,7 +1835,11 @@ subroutine graph_closure(g, model, units, ci)
     type(model_unit_t), intent(in) :: units(:)
     integer, intent(in) :: ci
     integer :: q, p, r, t, u, m, e, head, tail, n_case
+    logical :: narrowed
 
+    narrowed = .false.
+    if (allocated(model%cases(ci)%case_sources)) &
+        narrowed = size(model%cases(ci)%case_sources) > 0
     g%token = g%token + 1
     head = 1
     tail = 0
@@ -1678,10 +1869,22 @@ subroutine graph_closure(g, model, units, ci)
                 r = index_lookup(g%unit_index, graph_relative(g%roots, tg%sources(p)%s))
                 if (r == 0) cycle
                 if (q > n_case .and. .not. g%plain_unit(r)) cycle
+                ! A listed case that names its own sources reaches the
+                ! modules those use, not everything its executable's driver
+                ! uses; the executable's own files still count as reached
+                ! (graph_reached), so editing the driver affects every case.
+                if (q <= n_case .and. narrowed) cycle
                 g%ustamp(r) = -g%token
             end do
         end associate
     end do
+    if (narrowed) then
+        do q = 1, size(model%cases(ci)%case_sources)
+            r = index_lookup(g%unit_index, &
+                graph_relative(g%roots, model%cases(ci)%case_sources(q)%s))
+            if (r > 0) g%ustamp(r) = -g%token
+        end do
+    end if
     ! Module-use closure over the root units.
     head = 1
     tail = 0
@@ -1955,6 +2158,12 @@ function model_digest(model) result(digest)
                 call field(b, c%attrs(k)%key)
                 call field(b, c%attrs(k)%value)
             end do
+            if (c%expanded) call field(b, 'expanded')
+            if (allocated(c%parent)) then
+                call field(b, 'parent')
+                call field(b, c%parent)
+                call list('case-sources', c%case_sources)
+            end if
         end associate
     end do
     digest = sha256_string(builder_to_string(b))
