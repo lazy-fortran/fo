@@ -588,7 +588,7 @@ contains
         if ((observed%complete .neqv. expected%complete) .or. &
             (observed%valid .neqv. expected%valid)) then
             ierr = 1
-            message = 'materialized generation differs from its canonical manifest'
+            message = 'materialized inventory status differs from its manifest'
             return
         end if
         call compare_materialized_inventory(expected, observed, ierr, message)
@@ -615,21 +615,40 @@ contains
                         if (trim(observed%roots(k)%aliases(l)) /= &
                             trim(expected%roots(i)%aliases(j))) cycle
                         if (trim(observed%roots(k)%bundle_paths(l)) /= &
-                            trim(expected%roots(i)%bundle_paths(j))) return
+                            trim(expected%roots(i)%bundle_paths(j))) then
+                            message = 'materialized alias path differs for '// &
+                                trim(expected%roots(i)%aliases(j))// &
+                                ': expected='// &
+                                trim(expected%roots(i)%bundle_paths(j))// &
+                                ', observed='// &
+                                trim(observed%roots(k)%bundle_paths(l))
+                            return
+                        end if
                         found = .true.
                         matches = matches + 1
                         exit
                     end do
                     if (found) exit
                 end do
-                if (.not. found) return
+                if (.not. found) then
+                    message = 'materialized inventory is missing alias: '// &
+                        trim(expected%roots(i)%aliases(j))
+                    return
+                end if
             end do
         end do
-        if (matches /= total_alias_count(observed)) return
+        if (matches /= total_alias_count(observed)) then
+            message = 'materialized inventory has unexpected root aliases'
+            return
+        end if
         do i = 1, expected%entry_count
             expected_root = alias_root(expected, &
                 trim(expected%entries(i)%root_alias))
-            if (expected_root == 0) return
+            if (expected_root == 0) then
+                message = 'manifest entry refers to an unknown root alias: '// &
+                    trim(expected%entries(i)%root_alias)
+                return
+            end if
             do j = 1, expected%roots(expected_root)%alias_count
                 found = .false.
                 do k = 1, observed%entry_count
@@ -637,7 +656,12 @@ contains
                             expected%entries(i), observed%entries(k))) cycle
                     observed_root = alias_root(observed, &
                         trim(observed%entries(k)%root_alias))
-                    if (observed_root == 0) return
+                    if (observed_root == 0) then
+                        message = &
+                            'materialized entry refers to an unknown root alias: '// &
+                            trim(observed%entries(k)%root_alias)
+                        return
+                    end if
                     do l = 1, observed%roots(observed_root)%alias_count
                         if (trim(observed%roots(observed_root)%aliases(l)) /= &
                             trim(expected%roots(expected_root)%aliases(j))) cycle
@@ -649,9 +673,10 @@ contains
                     if (found) exit
                 end do
                 if (.not. found) then
-                    message = 'materialized entry is missing: '// &
+                    message = 'materialized entry differs or is missing: '// &
                         trim(expected%roots(expected_root)%aliases(j))//':'// &
                         trim(expected%entries(i)%relative_path)
+                    call append_entry_mismatch(message, expected%entries(i), observed)
                     return
                 end if
             end do
@@ -659,14 +684,22 @@ contains
         do i = 1, observed%entry_count
             observed_root = alias_root(observed, &
                 trim(observed%entries(i)%root_alias))
-            if (observed_root == 0) return
+            if (observed_root == 0) then
+                message = 'materialized entry refers to an unknown root alias: '// &
+                    trim(observed%entries(i)%root_alias)
+                return
+            end if
             found = .false.
             do k = 1, expected%entry_count
                 if (.not. matching_materialized_entry( &
                         expected%entries(k), observed%entries(i))) cycle
                 expected_root = alias_root(expected, &
                     trim(expected%entries(k)%root_alias))
-                if (expected_root == 0) return
+                if (expected_root == 0) then
+                    message = 'manifest entry refers to an unknown root alias: '// &
+                        trim(expected%entries(k)%root_alias)
+                    return
+                end if
                 do j = 1, expected%roots(expected_root)%alias_count
                     do l = 1, observed%roots(observed_root)%alias_count
                         if (trim(expected%roots(expected_root)%aliases(j)) /= &
@@ -690,6 +723,40 @@ contains
         ierr = 0
         message = ''
     end subroutine compare_materialized_inventory
+
+    subroutine append_entry_mismatch(message, expected, observed_inventory)
+        character(len=*), intent(inout) :: message
+        type(input_entry_t), intent(in) :: expected
+        type(input_inventory_t), intent(in) :: observed_inventory
+        integer :: i
+
+        do i = 1, observed_inventory%entry_count
+            if (trim(observed_inventory%entries(i)%relative_path) /= &
+                    trim(expected%relative_path)) cycle
+            message = trim(message)//' (observed alias='// &
+                trim(observed_inventory%entries(i)%root_alias)
+            if (trim(expected%role) /= trim(observed_inventory%entries(i)%role)) then
+                message = trim(message)//', role differs'
+            else if (expected%kind /= observed_inventory%entries(i)%kind) then
+                message = trim(message)//', kind differs'
+            else if (expected%writable_at_execution .neqv. &
+                    observed_inventory%entries(i)%writable_at_execution) then
+                message = trim(message)//', writable flag differs'
+            else if (expected%content_digest /= &
+                    observed_inventory%entries(i)%content_digest) then
+                message = trim(message)//', content digest differs'
+            else if (expected%link_target /= &
+                    observed_inventory%entries(i)%link_target) then
+                message = trim(message)//', symlink target differs'
+            else if (expected%mode /= observed_inventory%entries(i)%mode) then
+                message = trim(message)//', mode differs'
+            else
+                message = trim(message)//', alias layout differs'
+            end if
+            message = trim(message)//')'
+            return
+        end do
+    end subroutine append_entry_mismatch
 
     logical function matching_materialized_entry(expected, observed)
         type(input_entry_t), intent(in) :: expected, observed
