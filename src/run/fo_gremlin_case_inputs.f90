@@ -22,6 +22,7 @@ module fo_gremlin_case_inputs
 
     public :: generation_model_roots, generation_units_ensure
     public :: generation_case_digests_ensure, generation_case_digest
+    public :: generation_oracle_digests_ensure, generation_oracle_digest
     public :: generation_inventory_changes
 
 contains
@@ -140,6 +141,84 @@ contains
         if (len(path) <= len(root) + 1) return
         below = path(1:len(root) + 1) == root//'/'
     end function below
+
+    subroutine generation_oracle_digests_ensure(generation, project)
+        !! A repair changes implementation inputs while keeping its oracle.
+        !! Native inventories distinguish those roles. CMake's undifferentiated
+        !! project inputs do not: an unknown identity never resolves a failure.
+        type(generation_t), intent(inout) :: generation
+        character(len=*), intent(in) :: project
+        type(string_t), allocatable :: files(:), contents(:), names(:), roots(:)
+        character(len=HASH_LEN), allocatable :: digests(:)
+        character(len=:), allocatable :: global, role
+        integer :: i, n, k
+        logical :: have_oracle
+
+        if (allocated(generation%oracle_digests)) return
+        if (.not. allocated(generation%model)) return
+        allocate (generation%oracle_digests(generation%model%n_cases))
+        generation%oracle_digests = ''
+        if (.not. generation%input_inventory_ready) return
+        if (.not. generation%input_inventory_complete) return
+        if (len_trim(generation%toolchain_key) /= HASH_LEN) return
+        if (generation%model%backend /= 'fpm') return
+        call generation_units_ensure(generation, project)
+        call generation_model_roots(generation, project, roots)
+        associate (inv => generation%input_inventory)
+            allocate (files(inv%entry_count), contents(inv%entry_count))
+            global = 'fo-case-oracle-v1|'//generation%toolchain_key//'|'// &
+                generation%driver_digest
+            n = 0
+            have_oracle = .false.
+            do i = 1, inv%entry_count
+                role = trim(inv%entries(i)%role)
+                if (trim(inv%entries(i)%root_alias) == PROJECT_ALIAS) then
+                    select case (role)
+                    case ('build-source', 'executable-source', 'executable-main', &
+                            'example-source', 'example-main')
+                        cycle
+                    end select
+                    if (role == 'test-oracle' .or. role == 'test-main') &
+                        have_oracle = .true.
+                end if
+                if (project_file(inv%entries(i))) then
+                    n = n + 1
+                    files(n)%s = trim(inv%entries(i)%relative_path)
+                    contents(n)%s = entry_text(inv%entries(i))
+                else
+                    global = global//new_line('a')// &
+                        trim(inv%entries(i)%root_alias)//':'// &
+                        trim(inv%entries(i)%relative_path)//'|'// &
+                        entry_text(inv%entries(i))
+                end if
+            end do
+        end associate
+        if (.not. have_oracle) return
+        allocate (names(generation%model%n_cases))
+        do k = 1, size(names)
+            names(k)%s = generation%model%cases(k)%name
+        end do
+        call model_case_digests(generation%model, generation%units, roots, names, &
+            files(1:n), contents(1:n), digests)
+        global = sha256_string(global)
+        do k = 1, size(names)
+            if (len_trim(digests(k)) == 0) cycle
+            generation%oracle_digests(k) = sha256_string(global//digests(k))
+        end do
+    end subroutine generation_oracle_digests_ensure
+
+    function generation_oracle_digest(generation, name) result(digest)
+        type(generation_t), intent(in) :: generation
+        character(len=*), intent(in) :: name
+        character(len=HASH_LEN) :: digest
+        integer :: k
+
+        digest = ''
+        if (.not. allocated(generation%model)) return
+        if (.not. allocated(generation%oracle_digests)) return
+        k = model_find_case(generation%model, trim(name))
+        if (k > 0) digest = generation%oracle_digests(k)
+    end function generation_oracle_digest
 
     subroutine generation_case_digests_ensure(generation, project)
         !! Input closure digest of every model case (model_case_digests over

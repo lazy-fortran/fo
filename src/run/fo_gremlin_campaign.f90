@@ -10,7 +10,8 @@ module fo_gremlin_campaign
     use fo_fpm_config, only: fpm_config_t, fpm_config_parse
     use fo_fs, only: fs_sleep_ms
     use fo_gremlin_case_inputs, only: generation_model_roots, generation_units_ensure, &
-        generation_case_digests_ensure, generation_inventory_changes
+        generation_case_digests_ensure, generation_inventory_changes, &
+        generation_oracle_digests_ensure, generation_oracle_digest
     use fo_gremlin_context, only: generation_inventory_restore
     use fo_gremlin_coverage, only: coverage_epoch_t, coverage_open, coverage_next_chunk, &
         coverage_record, coverage_recover_running, COVERAGE_OK
@@ -20,7 +21,7 @@ module fo_gremlin_campaign
     use fo_gremlin_policy, only: shuffle_gremlin_tests, GREMLIN_POLICY_OK, &
         GREMLIN_NONMANDATORY_LIMIT
     use fo_gremlin_receipts, only: NAME_LEN, PATH_LEN, gate_receipt_matches, &
-        coverage_state_path
+        coverage_state_path, campaign_failures, campaign_failure_t
     use fo_gremlin_request, only: gremlin_request_t, gremlin_json_field
     use fo_gremlin_session, only: gremlin_get_session_journal_path
     use fo_gremlin_state, only: gremlin_session_t, gremlin_lease_t, &
@@ -411,6 +412,7 @@ contains
         call project_expand_cases(backend, '', generation%model, n, ierr, detail, &
             trim(generation%model_root), trim(generation%build_project_root))
         if (allocated(generation%case_digests)) deallocate (generation%case_digests)
+        if (allocated(generation%oracle_digests)) deallocate (generation%oracle_digests)
     end subroutine generation_model_expand
 
     function active_model_identity(generation) result(identity)
@@ -513,6 +515,7 @@ contains
         call generation_model_ensure(generation, ierr, message)
         if (ierr /= 0) return
         call generation_case_digests_ensure(generation, trim(project_dir))
+        call generation_oracle_digests_ensure(generation, trim(project_dir))
         capacity = MAX_NODES
         if (allocated(generation%model)) then
             call project_inventory_cases(generation%model, model_cases)
@@ -577,7 +580,8 @@ contains
             call cmake_registered_names(backend, all_names, n_all, ierr, message)
             if (ierr /= 0) return
         end if
-        call read_campaign_history(session, all_names, n_all, history, n_history, &
+        call read_campaign_history(session, generation, all_names, n_all, &
+            history, n_history, &
             debt, n_debt, cursor_seed, ierr, message)
         if (ierr /= 0) return
         n_impacted = 0
@@ -879,9 +883,11 @@ contains
         end do
     end subroutine reconcile_coverage
 
-    subroutine read_campaign_history(session, inventory, n_inventory, history, &
+    subroutine read_campaign_history(session, generation, inventory, &
+            n_inventory, history, &
             n_history, debt, n_debt, cursor_seed, ierr, message)
         type(gremlin_session_t), intent(in) :: session
+        type(generation_t), intent(in) :: generation
         character(len=*), intent(in) :: inventory(:)
         integer, intent(in) :: n_inventory
         character(len=*), intent(out) :: history(:), debt(:)
@@ -889,9 +895,11 @@ contains
         character(len=*), intent(out) :: message
 
         type(journal_record_t), allocatable :: records(:)
+        type(campaign_failure_t), allocatable :: failures(:)
+        character(len=HASH_LEN) :: identity
         character(len=NAME_LEN) :: case_name
         character(len=16) :: status_name, seed_text
-        integer :: i, seed_value, ios
+        integer :: i, j, seed_value, ios
 
         history = ''
         debt = ''
@@ -900,6 +908,8 @@ contains
         cursor_seed = 0
         call journal_read_all(trim(session%state_dir)//'/campaign-journal.jsonl', &
             records, ierr, message)
+        if (ierr /= JOURNAL_OK) return
+        call campaign_failures(session, failures, ierr, message)
         if (ierr /= JOURNAL_OK) return
         do i = 1, size(records)
             call gremlin_json_field(records(i)%json, 'case_id', case_name)
@@ -911,8 +921,17 @@ contains
             read(seed_text, *, iostat=ios) seed_value
             if (ios == 0) cursor_seed = seed_value
             call move_to_recent(case_name, debt, n_debt)
-            if (status_name == 'FAIL' .or. status_name == 'TIMEOUT') &
+            do j = 1, size(failures)
+                if (.not. failures(j)%pending .or. failures(j)%order /= i) cycle
+                identity = generation_oracle_digest(generation, case_name)
+                ! Replaced oracles keep their historical failure evidence but
+                ! cannot block this generation's different test contract.
+                if (len_trim(identity) == HASH_LEN .and. &
+                    len_trim(failures(j)%identity) == HASH_LEN) then
+                    if (identity /= failures(j)%identity) cycle
+                end if
                 call move_to_priority(case_name, history, n_history)
+            end do
         end do
     end subroutine read_campaign_history
 

@@ -6,13 +6,15 @@ module fo_gremlin_receipts
     use, intrinsic :: iso_fortran_env, only: int64
     use fo_cache, only: HASH_LEN, cache_digest
     use fo_fs, only: fs_make_dir
-    use fo_gremlin_case_inputs, only: generation_case_digest
+    use fo_gremlin_case_inputs, only: generation_case_digest, generation_oracle_digest
     use fo_gremlin_coverage, only: coverage_read_view_path, coverage_record_path, &
         COVERAGE_OK
     use fo_gremlin_coverage_view, only: gremlin_coverage_view_t
     use fo_gremlin_generation, only: generation_t
     use fo_gremlin_journal, only: journal_append, journal_read_all, &
         journal_compact_tail, journal_record_t, JOURNAL_OK
+    use fo_gremlin_lifecycle, only: gremlin_lifecycle_event_t, &
+        gremlin_lifecycle_read_page, LIFECYCLE_OK, LIFECYCLE_MAX_EVENT
     use fo_gremlin_readiness, only: gremlin_readiness_input_t, gremlin_readiness_t, &
         gremlin_readiness_compute, GREMLIN_PHASE_STARTING, GREMLIN_PHASE_BUILDING, &
         GREMLIN_PHASE_TESTING, GREMLIN_PHASE_QUIESCENT, GREMLIN_PHASE_STOPPED, &
@@ -39,7 +41,15 @@ module fo_gremlin_receipts
     public :: record_receipt, case_reuse_source, prior_generation_case_passed
     public :: compute_readiness, lifecycle_path_for_session, coverage_state_path
     public :: gate_receipt_matches, status_is_failure, receipt_limit
-    public :: runner_case_outcome
+    public :: runner_case_outcome, campaign_failures, campaign_failure_resolution
+
+    type, public :: campaign_failure_t
+        character(len=1024) :: name = ''
+        character(len=HASH_LEN) :: identity = '', generation = ''
+        character(len=256) :: completion = ''
+        logical :: pending = .false.
+        integer :: order = 0
+    end type campaign_failure_t
 
     integer, parameter :: NAME_LEN = 1024, PATH_LEN = 4096
     integer, parameter :: GREMLIN_POLICY_RECEIPT_LIMIT = 512
@@ -295,7 +305,8 @@ contains
 
         type(json_builder_t) :: jb
         type(gremlin_coverage_view_t) :: coverage_view
-        character(len=HASH_LEN) :: closure
+        character(len=HASH_LEN) :: closure, oracle
+        character(len=256) :: resolves
         character(len=256) :: completion_id
         character(len=PATH_LEN) :: journal_path
         character(len=32) :: size_text
@@ -317,6 +328,13 @@ contains
         ! whether the case ran or reused an earlier PASS.
         closure = ''
         if (case_name /= '<build>') closure = generation_case_digest(generation, case_name)
+        oracle = generation_oracle_digest(generation, case_name)
+        resolves = ''
+        if (campaign .and. outcome == 'PASS' .and. len_trim(oracle) == HASH_LEN) then
+            call campaign_failure_resolution(session, generation%identity, &
+                case_name, oracle, resolves, ierr, message)
+            if (ierr /= JOURNAL_OK) return
+        end if
         write (size_text, '(i0)') generation%driver_size
         jb = json_new()
         call json_object_start(jb)
@@ -347,6 +365,9 @@ contains
             end associate
         end if
         if (case_name /= '<build>') then
+            call json_key_string(jb, 'oracle_identity', trim(oracle))
+            if (len_trim(resolves) > 0) &
+                call json_key_string(jb, 'resolves_completion_id', trim(resolves))
             if (len_trim(closure) > 0 .or. present(reused_from)) &
                 call json_key_string(jb, 'closure_digest', trim(closure))
             if (present(reused_from)) then
@@ -585,31 +606,210 @@ contains
         if (trim(match_verdict) == 'PASS') source = match_generation
     end subroutine case_reuse_source
 
+    subroutine campaign_failures(session, failures, ierr, message)
+        !! A same-generation PASS or a changed oracle cannot repair a failure.
+        !! Keep latest generation evidence even after resolution so a delayed
+        !! older receipt cannot resurrect a resolved reproducer.
+        type(gremlin_session_t), intent(in) :: session
+        type(campaign_failure_t), allocatable, intent(out) :: failures(:)
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+        type(journal_record_t), allocatable :: records(:)
+        type(campaign_failure_t), allocatable :: entries(:)
+        character(len=HASH_LEN), allocatable :: children(:), parents(:)
+        character(len=HASH_LEN) :: generation, identity
+        character(len=NAME_LEN) :: name
+        character(len=256) :: completion
+        character(len=16) :: verdict
+        integer :: i, j, n
+
+        allocate (failures(0))
+        call journal_read_all(trim(session%state_dir)//'/campaign-journal.jsonl', &
+            records, ierr, message)
+        if (ierr /= JOURNAL_OK) return
+        if (size(records) == 0) return
+        call generation_lineage(session, children, parents, ierr, message)
+        if (ierr /= LIFECYCLE_OK) return
+        allocate (entries(size(records)))
+        n = 0
+        do i = 1, size(records)
+            call gremlin_json_field(records(i)%json, 'case_id', name)
+            call gremlin_json_field(records(i)%json, 'status', verdict)
+            call gremlin_json_field(records(i)%json, 'generation', generation)
+            call gremlin_json_field(records(i)%json, 'oracle_identity', identity)
+            call gremlin_json_field(records(i)%json, 'completion_id', completion)
+            if (verdict /= 'PASS' .and. verdict /= 'FAIL' .and. &
+                verdict /= 'TIMEOUT') cycle
+            j = 1
+            do while (j <= n)
+                if (entries(j)%name == name) exit
+                j = j + 1
+            end do
+            if (j > n) then
+                n = n + 1
+                entries(n)%name = name
+            else if (strict_descendant(entries(j)%generation, generation, &
+                    children, parents)) then
+                cycle
+            end if
+            if (verdict == 'PASS') then
+                if (entries(j)%pending .and. len_trim(identity) == HASH_LEN) then
+                    if (entries(j)%identity == identity .and. &
+                        strict_descendant(generation, entries(j)%generation, &
+                            children, parents)) entries(j)%pending = .false.
+                end if
+                if (entries(j)%pending) cycle
+            else
+                entries(j)%pending = .true.
+                entries(j)%completion = completion
+                entries(j)%order = i
+            end if
+            entries(j)%generation = generation
+            entries(j)%identity = identity
+        end do
+        failures = entries(:n)
+    end subroutine campaign_failures
+
+    subroutine campaign_failure_resolution(session, generation, name, identity, &
+            completion, ierr, message)
+        type(gremlin_session_t), intent(in) :: session
+        character(len=*), intent(in) :: generation, name, identity
+        character(len=*), intent(out) :: completion, message
+        integer, intent(out) :: ierr
+        type(campaign_failure_t), allocatable :: failures(:)
+        character(len=HASH_LEN), allocatable :: children(:), parents(:)
+        integer :: i
+
+        completion = ''
+        call campaign_failures(session, failures, ierr, message)
+        if (ierr /= JOURNAL_OK) return
+        if (len_trim(identity) /= HASH_LEN) return
+        call generation_lineage(session, children, parents, ierr, message)
+        if (ierr /= LIFECYCLE_OK) return
+        do i = 1, size(failures)
+            if (.not. failures(i)%pending .or. failures(i)%name /= name) cycle
+            if (failures(i)%identity /= identity) cycle
+            if (strict_descendant(generation, failures(i)%generation, &
+                    children, parents)) completion = failures(i)%completion
+            return
+        end do
+    end subroutine campaign_failure_resolution
+
+    subroutine generation_lineage(session, children, parents, ierr, message)
+        type(gremlin_session_t), intent(in) :: session
+        character(len=HASH_LEN), allocatable, intent(out) :: children(:), parents(:)
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+        type(gremlin_lifecycle_event_t), allocatable :: events(:)
+        character(len=HASH_LEN), allocatable :: grown(:)
+        integer(int64) :: cursor, next_cursor
+        integer :: i, j, n, n_events
+        logical :: has_more
+
+        allocate (children(0), parents(0))
+        cursor = 0_int64
+        do
+            call gremlin_lifecycle_read_page(trim(session%state_dir)// &
+                '/lifecycle.jsonl', cursor, 128, int(LIFECYCLE_MAX_EVENT, int64), &
+                events, n_events, next_cursor, has_more, ierr, message)
+            if (ierr /= LIFECYCLE_OK) return
+            do i = 1, n_events
+                if (events(i)%event_type /= 'generation_superseded') cycle
+                if (len_trim(events(i)%generation) /= HASH_LEN .or. &
+                    len_trim(events(i)%previous_generation) /= HASH_LEN) cycle
+                n = size(children)
+                j = 1
+                do while (j <= n)
+                    if (children(j) == events(i)%generation) exit
+                    j = j + 1
+                end do
+                if (j <= n) then
+                    if (parents(j) /= events(i)%previous_generation) parents(j) = ''
+                    cycle
+                end if
+                allocate (grown(n + 1))
+                grown(:n) = children
+                grown(n + 1) = events(i)%generation
+                call move_alloc(grown, children)
+                allocate (grown(n + 1))
+                grown(:n) = parents
+                grown(n + 1) = events(i)%previous_generation
+                call move_alloc(grown, parents)
+            end do
+            if (.not. has_more) exit
+            if (next_cursor <= cursor) then
+                ierr = 1
+                message = 'lifecycle cursor did not advance during failure resolution'
+                return
+            end if
+            cursor = next_cursor
+        end do
+    end subroutine generation_lineage
+
+    logical function strict_descendant(generation, ancestor, children, parents) &
+            result(descends)
+        character(len=*), intent(in) :: generation, ancestor
+        character(len=HASH_LEN), intent(in) :: children(:), parents(:)
+        character(len=HASH_LEN) :: current
+        integer :: step, j
+
+        descends = .false.
+        if (len_trim(generation) /= HASH_LEN .or. len_trim(ancestor) /= HASH_LEN) return
+        if (generation == ancestor) return
+        current = generation
+        do step = 1, size(children)
+            do j = 1, size(children)
+                if (children(j) == current) exit
+            end do
+            if (j > size(children)) return
+            current = parents(j)
+            if (len_trim(current) /= HASH_LEN) return
+            if (current == ancestor) then
+                descends = .true.
+                return
+            end if
+        end do
+    end function strict_descendant
+
     subroutine prior_generation_case_passed(session, generation, case_name, passed, &
             ierr, message)
         type(gremlin_session_t), intent(in) :: session
-        character(len=*), intent(in) :: generation, case_name
+        type(generation_t), intent(in) :: generation
+        character(len=*), intent(in) :: case_name
         logical, intent(out) :: passed
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
-        character(len=HASH_LEN) :: match_generation
-        character(len=32) :: match_verdict
-        character(len=PATH_LEN) :: journal_path
-        logical :: in_generation
+        type(journal_record_t), allocatable :: records(:)
+        character(len=HASH_LEN), allocatable :: children(:), parents(:)
+        character(len=HASH_LEN) :: identity, receipt_identity, receipt_generation
+        character(len=NAME_LEN) :: name
+        character(len=16) :: verdict
+        integer :: i
 
         passed = .false.
-        if (.not. allocated(session%project_key) .or. &
-            .not. allocated(session%lane_id) .or. &
-            .not. allocated(session%session_id)) then
-            ierr = 1
-            message = 'Gremlin session has no receipt journal identity'
-            return
-        end if
-        call gremlin_get_session_journal_path(trim(session%project_key), &
-            trim(session%lane_id), trim(session%session_id), journal_path, ierr, message)
-        if (ierr /= 0) return
-        call case_history(trim(journal_path), case_name, generation, '', &
-            in_generation, passed, match_verdict, match_generation, ierr, message)
+        ierr = JOURNAL_OK
+        message = ''
+        identity = generation_oracle_digest(generation, case_name)
+        if (len_trim(identity) /= HASH_LEN) return
+        call journal_read_all(trim(session%state_dir)//'/campaign-journal.jsonl', &
+            records, ierr, message)
+        if (ierr /= JOURNAL_OK) return
+        call generation_lineage(session, children, parents, ierr, message)
+        if (ierr /= LIFECYCLE_OK) return
+        do i = 1, size(records)
+            call gremlin_json_field(records(i)%json, 'case_id', name)
+            call gremlin_json_field(records(i)%json, 'status', verdict)
+            call gremlin_json_field(records(i)%json, 'generation', receipt_generation)
+            call gremlin_json_field(records(i)%json, 'oracle_identity', &
+                receipt_identity)
+            if (name /= case_name .or. verdict /= 'PASS') cycle
+            if (identity /= receipt_identity) cycle
+            if (strict_descendant(generation%identity, receipt_generation, &
+                    children, parents)) then
+                passed = .true.
+                return
+            end if
+        end do
     end subroutine prior_generation_case_passed
 
     subroutine lifecycle_path_for_session(session, request, path, ierr, message)
