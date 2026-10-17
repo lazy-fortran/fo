@@ -1,6 +1,7 @@
 # Fo delivery goals
 
-Updated 2026-10-16 at main `20c7374` (audit of 2026-10-15 at `342da71`).
+Updated 2026-10-17; latest upstream main `fe9501e`, consolidation qualification
+`d1b4a69` (earlier audit of 2026-10-15 at `342da71`).
 Issues define observable success and this plan orders delivery. Apply
 [goals and architectural freedom](doc/GOAL_DRIVEN_DEVELOPMENT.md), choose the
 smallest complete change, and preserve supported behaviour and independent
@@ -82,6 +83,44 @@ Nix/Spack replacement, CI/promotion engine or agent orchestrator.
   Four native controls verify first-failure handling. Parent/child/job caps
   and every oracle command/assertion remain; the next native CI must expose
   the first failure or qualify the complete oracle and later checks.
+
+## Development branch consolidation (2026-10-17)
+
+- All 105 live remote development heads and 26 local heads are accounted for
+  by audited ports, existing replacements and explicit history merges. The
+  latest upstream main `fe9501e` is merged. Removed `fo work` and candidate-built
+  self-runtime modes remain superseded by the immutable controller-driver
+  contract. The old attached-cache warm-configure shortcut was rejected because
+  it does not establish current native-model freshness; configure stays conservative.
+- Native test `fo exec` builds the selected closure, including declared tests
+  and external helpers, while poisoned unrelated applications/tests remain outside
+  it. The raw executable-path guard is retained. `fo check` reports the actual
+  selected test count, including zero.
+- Campaign history uses compatible input/oracle identities and canonical lane
+  journal/lifecycle paths; unknown external identities stay conservative. The
+  real owner/session directory layout now has a regression oracle. Resuming an
+  epoch retains its original seeded default gate instead of inventing another
+  requirement after coverage completes. Explicit gates retain their selection.
+- Coverage controls distinguish reproductions from campaign credit, reject a
+  stale-generation receipt and restore the actual ledger saved while the final
+  child was blocked. Durable receipt replay completes the epoch with exactly
+  40 executions. Controlled failing reproductions explicitly use zero retries.
+- Release build and the final 13-program native gate qualify source `d1b4a69`
+  using immutable image SHA256
+  `a48023afbb1116dda88e47376c80441b5b9597e2eb0067571c79231bb0ef7dcd`,
+  GCC 16.1 on Darwin, FortFront `a34ada8` and Fx `d3f87b2`: **12 PASS,
+  1 SKIP**, no FLAKY/FAIL/TIMEOUT. The skip is the Linux `/proc` journal
+  durability process oracle; a focused Linux CI step is added, not locally
+  qualified. Both workflow YAML files and all 19 shell steps pass static checks.
+  Release/native builds have zero introduced warning locations; all 16 new
+  fixture array-temporary warnings were removed and their final tests pass.
+- Earlier evidence remains distinct: the initial image had an exec FLAKY result
+  on HFS+ and a real campaign path failure; a later attempt inherited an incorrect
+  600-second timeout override. The path and stable-gate defects are repaired,
+  and the final run uses normal fixture timing controls. APFS passes do not prove
+  the inferred HFS+ metadata explanation. Full-suite, performance and exact
+  Linux crash-cut qualification remain outside this focused gate; the cold
+  self-refresh CI limitation remains recorded above.
 
 ## Current state (main `8cec6ed`, 2026-10-16)
 
