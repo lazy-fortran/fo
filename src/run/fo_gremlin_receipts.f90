@@ -621,11 +621,13 @@ contains
         character(len=NAME_LEN) :: name
         character(len=256) :: completion
         character(len=16) :: verdict
+        character(len=PATH_LEN) :: journal_path
         integer :: i, j, n
 
         allocate (failures(0))
-        call journal_read_all(trim(session%state_dir)//'/campaign-journal.jsonl', &
-            records, ierr, message)
+        call campaign_journal_path(session, journal_path, ierr, message)
+        if (ierr /= JOURNAL_OK) return
+        call journal_read_all(trim(journal_path), records, ierr, message)
         if (ierr /= JOURNAL_OK) return
         if (size(records) == 0) return
         call generation_lineage(session, children, parents, ierr, message)
@@ -702,15 +704,25 @@ contains
         character(len=*), intent(out) :: message
         type(gremlin_lifecycle_event_t), allocatable :: events(:)
         character(len=HASH_LEN), allocatable :: grown(:)
+        character(len=PATH_LEN) :: lifecycle_path
+        type(gremlin_request_t) :: request
         integer(int64) :: cursor, next_cursor
         integer :: i, j, n, n_events
         logical :: has_more
 
         allocate (children(0), parents(0))
+        if (.not. allocated(session%lane_id)) then
+            ierr = 1
+            message = 'Gremlin session has no lifecycle lane identity'
+            return
+        end if
+        request%lane_id = session%lane_id
+        call lifecycle_path_for_session(session, request, lifecycle_path, ierr, message)
+        if (ierr /= LIFECYCLE_OK) return
         cursor = 0_int64
         do
-            call gremlin_lifecycle_read_page(trim(session%state_dir)// &
-                '/lifecycle.jsonl', cursor, 128, int(LIFECYCLE_MAX_EVENT, int64), &
+            call gremlin_lifecycle_read_page(trim(lifecycle_path), cursor, 128, &
+                int(LIFECYCLE_MAX_EVENT, int64), &
                 events, n_events, next_cursor, has_more, ierr, message)
             if (ierr /= LIFECYCLE_OK) return
             do i = 1, n_events
@@ -784,6 +796,7 @@ contains
         character(len=HASH_LEN) :: identity, receipt_identity, receipt_generation
         character(len=NAME_LEN) :: name
         character(len=16) :: verdict
+        character(len=PATH_LEN) :: journal_path
         integer :: i
 
         passed = .false.
@@ -791,8 +804,9 @@ contains
         message = ''
         identity = generation_oracle_digest(generation, case_name)
         if (len_trim(identity) /= HASH_LEN) return
-        call journal_read_all(trim(session%state_dir)//'/campaign-journal.jsonl', &
-            records, ierr, message)
+        call campaign_journal_path(session, journal_path, ierr, message)
+        if (ierr /= JOURNAL_OK) return
+        call journal_read_all(trim(journal_path), records, ierr, message)
         if (ierr /= JOURNAL_OK) return
         call generation_lineage(session, children, parents, ierr, message)
         if (ierr /= LIFECYCLE_OK) return
@@ -811,6 +825,27 @@ contains
             end if
         end do
     end subroutine prior_generation_case_passed
+
+    subroutine campaign_journal_path(session, path, ierr, message)
+        !! Read and owner sessions use different state_dir views. The lane
+        !! campaign ledger is addressed by project and lane identity in both.
+        type(gremlin_session_t), intent(in) :: session
+        character(len=*), intent(out) :: path, message
+        integer, intent(out) :: ierr
+        character(len=PATH_LEN) :: state_dir
+
+        path = ''
+        if (.not. allocated(session%project_key) .or. &
+            .not. allocated(session%lane_id)) then
+            ierr = 1
+            message = 'Gremlin session has no campaign journal identity'
+            return
+        end if
+        call gremlin_session_state_dir(session%project_key, session%lane_id, &
+            state_dir, ierr, message)
+        if (ierr /= 0) return
+        path = trim(state_dir)//'/campaign-journal.jsonl'
+    end subroutine campaign_journal_path
 
     subroutine lifecycle_path_for_session(session, request, path, ierr, message)
         type(gremlin_session_t), intent(in) :: session

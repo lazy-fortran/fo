@@ -3,13 +3,14 @@ program test_gremlin_campaign_resolution
     !! an implementation repair from replacing the oracle that observed it.
     use fo_test_harness, only: assert_true, assert_equal_string, finish_assertions
     use fo_test_harness, only: make_directory
-    use fo_util, only: make_tmpfile
     use fo_fs, only: fs_remove_tree
     use fo_cache, only: HASH_LEN
     use fo_gremlin_case_inputs, only: generation_oracle_digests_ensure, &
         generation_oracle_digest, generation_case_digests_ensure, generation_case_digest
     use fo_gremlin_generation, only: generation_t
-    use fo_gremlin_state, only: gremlin_session_t
+    use fo_gremlin_state, only: gremlin_session_t, gremlin_session_state_dir
+    use fo_gremlin_session, only: gremlin_get_session_journal_path
+    use fo_test_gremlin_oracle, only: gremlin_setup
     use fo_gremlin_receipts, only: campaign_failures, campaign_failure_t, &
         campaign_failure_resolution, prior_generation_case_passed
     use fo_gremlin_journal, only: journal_append, JOURNAL_OK
@@ -21,9 +22,11 @@ program test_gremlin_campaign_resolution
     implicit none
 
     type(generation_t) :: initial, changed
-    type(gremlin_session_t) :: session
+    type(gremlin_session_t) :: session, read_session
     type(campaign_failure_t), allocatable :: failures(:)
-    character(len=512) :: temporary, message
+    character(len=512) :: message
+    character(len=4096) :: lane_dir, journal_path
+    character(len=:), allocatable :: driver, scratch, project, cache, state, lifecycle_path
     character(len=HASH_LEN) :: oracle, closure
     character(len=256) :: resolves
     character(len=HASH_LEN), parameter :: first = repeat('a', HASH_LEN)
@@ -69,9 +72,25 @@ program test_gremlin_campaign_resolution
     call assert_equal_string(generation_oracle_digest(changed, 'probe'), '', &
         'undifferentiated CMake roles remain conservatively unknown')
 
-    call make_tmpfile('fo-campaign-resolution', temporary)
-    session%state_dir = trim(temporary)//'-state'
+    call gremlin_setup(driver, scratch, project, cache, state)
+    session%project_key = project
+    session%lane_id = 'campaign-resolution'
+    session%session_id = 'fixture-owner'
+    call gremlin_session_state_dir(project, session%lane_id, lane_dir, ierr, message)
+    call assert_true(ierr == 0, 'resolves the canonical campaign lane directory')
+    if (ierr /= 0) call finish_assertions()
+    session%state_dir = trim(lane_dir)
     call make_directory(session%state_dir)
+    call gremlin_get_session_journal_path(project, session%lane_id, &
+        session%session_id, journal_path, ierr, message)
+    call assert_true(ierr == 0, 'resolves the separate canonical session journal')
+    if (ierr /= 0) call finish_assertions()
+    read_session = session
+    read_session%state_dir = journal_path(:len_trim(journal_path) - len('/journal.jsonl'))
+    call make_directory(read_session%state_dir)
+    lifecycle_path = read_session%state_dir//'/lifecycle.jsonl'
+    call assert_true(read_session%state_dir /= session%state_dir, &
+        'owner and reader fixtures use the actual distinct journal layout')
     call lineage(first, second)
     call lineage(second, third)
     call receipt('failure', first, oracle, 'FAIL')
@@ -92,11 +111,11 @@ program test_gremlin_campaign_resolution
     call assert_true(failures(1)%pending, &
         'incompatible PASS leaves old evidence pending')
     initial%identity = second
-    call prior_generation_case_passed(session, initial, 'probe', passed, ierr, message)
+    call prior_generation_case_passed(read_session, initial, 'probe', passed, ierr, message)
     call assert_true(passed, 'compatible ancestral PASS permits regression attribution')
     changed = initial
     changed%oracle_digests = repeat('8', HASH_LEN)
-    call prior_generation_case_passed(session, changed, 'probe', passed, ierr, message)
+    call prior_generation_case_passed(read_session, changed, 'probe', passed, ierr, message)
     call assert_true(.not. passed, &
         'incompatible earlier PASS cannot confirm regression')
     call receipt('repair', second, oracle, 'PASS')
@@ -111,9 +130,7 @@ program test_gremlin_campaign_resolution
         ierr, message)
     call assert_equal_string(resolves, '', &
         'an already repaired failure is not relinked')
-    call fs_remove_tree(trim(temporary), ierr)
-    call assert_true(ierr == 0, 'removes owned temporary locator')
-    call fs_remove_tree(session%state_dir, ierr)
+    call fs_remove_tree(scratch, ierr)
     call assert_true(ierr == 0, 'removes owned receipt fixture')
     call finish_assertions()
 
@@ -184,7 +201,7 @@ contains
         event%event_type = 'generation_superseded'
         event%generation = child
         event%previous_generation = parent
-        call gremlin_lifecycle_append(session%state_dir//'/lifecycle.jsonl', event, &
+        call gremlin_lifecycle_append(lifecycle_path, event, &
             ierr, message)
         call assert_true(ierr == LIFECYCLE_OK, 'writes real generation lineage')
     end subroutine lineage
