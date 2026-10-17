@@ -230,6 +230,7 @@ program test_gremlin_coverage_restart
     call assert_true(interrupted_pass, 'recovered interrupted case has a PASS receipt')
 
     call reproduce_without_credit(trim(expected(1)), replacement, 1)
+    call wait_for_quiescence(replacement)
     call query_status(replacement, report)
     coverage = json_member(report, 'coverage')
     field = json_member(coverage, 'full_coverage')
@@ -249,6 +250,29 @@ program test_gremlin_coverage_restart
     call finish_assertions()
 
 contains
+
+    subroutine wait_for_quiescence(owner_id)
+        character(len=*), intent(in) :: owner_id
+        type(json_value_t) :: response, satisfied
+
+        args = string_list_t()
+        call list_add(args, 'gremlin')
+        call list_add(args, 'wait')
+        call list_add(args, '--dir')
+        call list_add(args, project)
+        call list_add(args, '--lane')
+        call list_add(args, lane)
+        call list_add(args, '--session')
+        call list_add(args, owner_id)
+        call list_add(args, '--until')
+        call list_add(args, 'quiescent')
+        call list_add(args, '--wait-ms')
+        call list_add(args, '30000')
+        call gremlin_json(driver, project, cache, state, args, response, process, 35000)
+        satisfied = json_member(response, 'wait_satisfied')
+        call assert_true(process%exit_code == 0 .and. json_boolean_value(satisfied), &
+            'the completed epoch stays quiescent after the differing reproduction')
+    end subroutine wait_for_quiescence
 
     subroutine reproduce_without_credit(case_name, owner_id, expected_exit)
         character(len=*), intent(in) :: case_name, owner_id
