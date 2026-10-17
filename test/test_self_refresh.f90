@@ -2,10 +2,10 @@ program test_self_refresh
     !! Standalone behavior oracle: after `fo build`, run
     !! `FO_RUN_SELF_REFRESH_ORACLE=1 FO_BIN=<worktree>/build/fo/app/fo fo test
     !! test_self_refresh`. Child commands use a temporary HOME and cache.
-    use fo_util, only: temporary_root
+    use fo_util, only: temporary_root, wall_time_seconds
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_long_long, &
         c_null_char
-    use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
+    use, intrinsic :: iso_fortran_env, only: output_unit, error_unit, dp => real64
     use fo_fs, only: fs_copy_exec, fs_identity, fs_make_dir, fs_remove_tree, &
         fs_stat, fs_write_text
     use fo_process, only: argv_push, process_getcwd, process_getpid, &
@@ -124,8 +124,7 @@ contains
         n_args = 0
         call argv_push(packed, n_args, trim(copied_driver))
         call argv_push(packed, n_args, 'build')
-        call process_run_argv_logged(trim(root), packed, n_args, trim(build_log), &
-            .false., 180, exitcode)
+        call run_stage(trim(root), packed, n_args, trim(build_log), exitcode)
         call read_file(trim(build_log), build_output, ok)
         call check(exitcode == 0, 'plain fo build succeeds in the linked worktree')
         if (exitcode /= 0 .and. len(build_output) > 0) &
@@ -152,8 +151,7 @@ contains
             call argv_push(packed, n_args, trim(private_driver))
             call argv_push(packed, n_args, 'test')
             call argv_push(packed, n_args, 'test_random_tests')
-            call process_run_argv_logged(trim(root), packed, n_args, trim(test_log), &
-                .false., 180, exitcode)
+            call run_stage(trim(root), packed, n_args, trim(test_log), exitcode)
             call read_file(trim(test_log), test_output, ok)
             call check(exitcode == 0, &
                 'plain fo test succeeds through the rebuilt private driver')
@@ -205,8 +203,8 @@ contains
             n_args = 0
             call argv_push(packed, n_args, trim(copied_driver))
             call argv_push(packed, n_args, 'build')
-            call process_run_argv_logged(trim(root), packed, n_args, &
-                trim(disabled_log), .false., 180, exitcode)
+            call run_stage(trim(root), packed, n_args, trim(disabled_log), &
+                exitcode)
             call read_file(trim(disabled_log), disabled_output, ok)
             call check(exitcode == 0, 'strict self-refresh opt-out still builds')
             call check(index(disabled_output, 'worktree driver ready') == 0, &
@@ -228,8 +226,8 @@ contains
             n_args = 0
             call argv_push(packed, n_args, trim(private_driver))
             call argv_push(packed, n_args, 'install')
-            call process_run_argv_logged(trim(root), packed, n_args, &
-                trim(install_log), .false., 180, exitcode)
+            call run_stage(trim(root), packed, n_args, trim(install_log), &
+                exitcode)
             call read_file(trim(install_log), install_output, ok)
             call check(exitcode == 0, &
                 'explicit fo install publishes under the isolated HOME')
@@ -240,8 +238,13 @@ contains
             call check(exists, 'explicit install creates ~/.local/bin/fo')
         end if
 
-        call fs_remove_tree(temporary_root()//'/fo-self-refresh-oracle-'// &
-            trim(pid_text))
+        if (n_fail == 0) then
+            call fs_remove_tree(temporary_root()//'/fo-self-refresh-oracle-'// &
+                trim(pid_text))
+        else
+            write (error_unit, '(a)') 'self-refresh logs retained: '// &
+                temporary_root()//'/fo-self-refresh-oracle-'//trim(pid_text)
+        end if
         call report()
     end subroutine run_oracle
 
@@ -266,10 +269,26 @@ contains
         call argv_push(command, n_args, 'build')
         call argv_push(command, n_args, '--flag')
         call argv_push(command, n_args, flags)
-        call process_run_argv_logged(trim(root), command, n_args, log_path, &
-            .false., 180, exitcode)
+        call run_stage(trim(root), command, n_args, log_path, exitcode)
         call read_file(log_path, output, read_ok)
     end subroutine run_profile_build
+
+    subroutine run_stage(root, packed, n_args, log_path, exitcode)
+        character(len=*), intent(in) :: root, packed, log_path
+        integer, intent(in) :: n_args
+        integer, intent(out) :: exitcode
+        real(dp) :: started
+
+        write (output_unit, '(a)') 'self-refresh stage started: '//log_path
+        flush (output_unit)
+        started = wall_time_seconds()
+        call process_run_argv_logged(root, packed, n_args, log_path, &
+            .false., 180, exitcode)
+        write (output_unit, '(a,i0,a,f8.2,a)') &
+            'self-refresh stage finished: exit ', exitcode, ', ', &
+            wall_time_seconds() - started, ' s; '//log_path
+        flush (output_unit)
+    end subroutine run_stage
 
     subroutine check(condition, label)
         logical, intent(in) :: condition
