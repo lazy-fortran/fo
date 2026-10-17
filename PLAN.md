@@ -46,14 +46,16 @@ Nix/Spack replacement, CI/promotion engine or agent orchestrator.
   five failures; the corrected test passes, including overlapping groups,
   shared-input deduplication and preservation of the slow label. The affected
   model and layering CLI tests also pass on GCC 16.1. This is focused
-  qualification; deployment requires the combined corrected app and consumer checks.
+  qualification. The combined app and original consumer checks now pass on
+  Darwin and Linux; the qualified image is deployed on both hosts below.
 
 - Native named FPM tests now link standalone external and mixed
   module/external test helpers together with their USE dependencies. Unrelated
   pure module helpers remain outside the selected closure. The focused backend
   regression changes from three passes/two failures to five passes, including
   warm execution, changed-helper invalidation and undefined-helper rejection.
-  The original FortGen consumer and combined release deployment are pending.
+  The original FortGen and NEO-RT consumers pass with the combined release
+  image. Darwin and Linux deployment and installed-consumer checks pass.
 
 - Native FPM `build --tests --case` now builds only the selected test
   closures, without executing tests. An unrelated test's
@@ -61,6 +63,24 @@ Nix/Spack replacement, CI/promotion engine or agent orchestrator.
   regression and one-target, random-zero Gremlin gate pass after the fix.
   Explicitly selecting the invalid case and unscoped slow-inclusive builds
   still fail. This is focused qualification, not a full-suite result.
+
+- Combined main `a61b5fc7` is installed on faepmac1 at
+  `/opt/homebrew/bin/fo` (SHA256 `b49a7ff61d427f68ee14fef6987195f7cb126b1236e43bdbb568113e35f295d5`)
+  and mailuefterl at `/home/ert/.local/bin/fo`
+  (SHA256 `6ffd7a5da229b5fb5b8d961391fb9036efed8928e469bd899d3aea143690d098`).
+  Installed hashes match the qualified immutable candidates; version, selected
+  test build and execution pass on both hosts. Existing resident pins remain.
+  faepkub4's host key is verified, but SSH authentication fails, so its
+  deployment remains unavailable.
+
+- Native CI at `2e4d701` passes the project-model and public-dispatch checks.
+  The self-refresh oracle reaches its parent 240-second safety cap: the plain
+  self-build passes in 90.08 seconds, its random test passes in 23.33 seconds,
+  and the next profile is still compiling. The retained logs show no nested
+  command failure. CI now inherits the existing 600-second manifest budget;
+  all child caps and assertions remain. Independent delayed-program controls
+  verify manifest inheritance and timeout enforcement. The next native CI
+  must qualify the complete oracle and later workflow checks.
 
 ## Current state (main `8cec6ed`, 2026-10-16)
 
