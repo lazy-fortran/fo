@@ -79,7 +79,7 @@ jobs:
             test_cmake_project_model test_project_selection_cli \
             test_project_layering_cli test_gremlin_case_reuse test_gremlin_cmake
 
-      - name: Test Linux journal and coverage recovery
+      - name: Test campaign, journal and coverage recovery
         run: |
           export PATH="$HOME/.local/bin:$PATH"
           export FO="$FO_DRIVER_A" FO_BIN="$FO_DRIVER_A"
@@ -89,7 +89,7 @@ jobs:
           export TMPDIR="$RUNNER_TEMP/fo-recovery-tests"
           mkdir -p "$TMPDIR"
           "$FO_DRIVER_A" test test_gremlin_journal_recovery \
-            test_gremlin_coverage_restart
+            test_gremlin_coverage_restart test_gremlin_campaign_resolution
 
       - name: Test public fo test dispatch
         run: |
