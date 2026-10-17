@@ -4,6 +4,7 @@ program test_check
         should_report_frontend_diagnostics, collect_failed_test_names
     use fo_check_output, only: check_result_compact_json, &
         check_result_full_json
+    use fo_commands, only: command_check
     use fo_diagnostics, only: diagnostic_t, diagnostic_from_log, &
         array_temporary_warnings_from_log
     use fo_exec_service, only: run_queue_t => exec_queue_t, RUN_IDLE, RUN_RUNNING, &
@@ -28,6 +29,7 @@ program test_check
 
     call test_check_from_child_reports_backend_error()
     call test_check_reports_test_failure_advice()
+    call test_check_reports_clean_selection_without_test_pass()
     call test_check_keeps_child_crash_as_target_failure()
     call test_check_rejects_zero_exit_with_failing_summary()
     call test_frontend_diagnostics_only_enrich_compiler_failure()
@@ -176,6 +178,51 @@ contains
         call fs_remove_tree(trim(project_dir))
     end subroutine test_check_reports_test_failure_advice
 
+    subroutine test_check_reports_clean_selection_without_test_pass()
+        type(check_result_t) :: res
+        character(len=512) :: project_dir
+        character(len=:), allocatable :: line, text, err_text
+        integer :: exitcode
+
+        call make_tmp_path('fo_clean_check_project', project_dir)
+        call make_failing_test_project(project_dir)
+        call git_in(project_dir, [character(len=64) :: 'init', '-q'])
+        call git_in(project_dir, [character(len=64) :: 'config', 'user.email', &
+            'fo@example.invalid'])
+        call git_in(project_dir, [character(len=64) :: 'config', 'user.name', 'fo-test'])
+        call git_in(project_dir, [character(len=64) :: 'config', 'commit.gpgsign', 'false'])
+        call git_in(project_dir, [character(len=64) :: 'add', 'fpm.toml', &
+            'src/ok.f90', 'test/test_fail.f90'])
+        call git_in(project_dir, [character(len=64) :: 'commit', '-q', '-m', 'init'])
+
+        call fo_check_run(project_dir, res)
+        call assert(res%build_ok .and. res%tests_ok, &
+            'clean affected check succeeds without running the failing test')
+        call assert(res%n_tests_selected == 0, &
+            'clean affected check reports zero selected cases')
+        call assert(res%n_test_results == 0, &
+            'clean affected check has no fabricated test results')
+        call assert(trim(res%rerun) == 'fo test', &
+            'empty affected check advises an explicit default-suite run')
+        line = check_result_compact_json(res)
+        call assert(index(line, '"summary":"build passed; no affected tests ran"') > 0, &
+            'compact clean summary does not claim tests passed')
+        call assert(index(line, '"tests_selected":0') > 0, &
+            'compact clean summary includes the zero selection')
+        line = check_result_full_json(res, '')
+        call assert(index(line, '"summary":"build passed; no affected tests ran"') > 0, &
+            'full clean summary does not claim tests passed')
+        call assert(index(line, '"tests_selected":0') > 0, &
+            'full clean summary includes the zero selection')
+        call command_check(project_dir, 0, .true., text, err_text, exitcode)
+        call assert(exitcode == 0, 'text check keeps successful empty selection')
+        call assert(index(text, 'Tests: not run (0 affected;') > 0, &
+            'text clean summary says no tests ran')
+        call assert(index(text, 'run fo test for the default suite') > 0, &
+            'text clean summary explains how to run the default suite')
+        call fs_remove_tree(project_dir)
+    end subroutine test_check_reports_clean_selection_without_test_pass
+
     subroutine test_check_keeps_child_crash_as_target_failure()
         !! A child can exit with a signal-shaped status while fo itself is
         !! healthy.  The report must retain that target failure and must not
@@ -283,6 +330,7 @@ contains
 
         res%build_ok = .true.
         res%tests_ok = .true.
+        res%n_tests_selected = 1
         res%elapsed = 0.125
         res%stage = 'done'
 
@@ -296,6 +344,8 @@ contains
             'compact success includes target')
         call assert(index(line, '"summary":"build and tests passed"') > 0, &
             'compact success includes summary')
+        call assert(index(line, '"tests_selected":1') > 0, &
+            'compact success includes selected test count')
         call assert(index(line, '"hint"') > 1, &
             'compact success includes hint key')
         call assert(index(line, '"rerun"') > 7, &

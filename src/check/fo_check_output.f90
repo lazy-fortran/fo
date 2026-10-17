@@ -18,7 +18,11 @@ contains
         if (len_trim(res%summary) > 0) then
             summary = res%summary
         else if (res%build_ok .and. res%tests_ok) then
-            summary = 'build and tests passed'
+            if (res%n_tests_selected == 0) then
+                summary = 'build passed; no affected tests ran'
+            else
+                summary = 'build and tests passed'
+            end if
         else if (len_trim(res%error_msg) > 0) then
             summary = res%error_msg
         else
@@ -47,6 +51,8 @@ contains
         call json_key_int(jb, 'modules', res%n_modules)
         call json_key_int(jb, 'cached', res%n_cached)
         call json_key_int(jb, 'changed', res%n_changed)
+        if (res%n_tests_selected >= 0) &
+            call json_key_int(jb, 'tests_selected', res%n_tests_selected)
         ! Every test that did not pass, and every failing test by name, so an
         ! agent sees the whole problem in one call; passing suites are counted.
         n_listed = 0

@@ -52,6 +52,8 @@ module fo_check
         integer :: diag_column = 0
         type(test_result_t), allocatable :: test_results(:)
         integer :: n_test_results = 0
+        ! -1 means the backend did not report an affected-case count.
+        integer :: n_tests_selected = -1
         character(len=:), allocatable :: failed_tests(:)
         integer :: n_failed_tests = 0
     end type check_result_t
@@ -458,9 +460,13 @@ contains
         ! `fo test --only-changed`) to the affected cases.
         call make_tmpfile('fo-test', test_log)
         call project_run_affected(b, '', .false., test_log, exitcode, n_run)
+        if (n_run /= 0 .or. exitcode == 0) res%n_tests_selected = n_run
         if (n_run == 0 .and. exitcode == 0) then
             call delete_tmpfile(test_log)
             res%tests_ok = .true.
+            res%hint = 'no tests selected by the Git delta; '// &
+                'run fo test for the default suite'
+            res%rerun = 'fo test'
             t1 = wall_time_seconds()
             res%elapsed = real(t1 - t0)
             return

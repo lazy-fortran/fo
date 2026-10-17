@@ -399,12 +399,20 @@ contains
         type(builder_t), intent(inout) :: b
         type(check_result_t), intent(in) :: res
         character(len=256) :: line
+        character(:), allocatable :: tests
 
-        write (line, '(a,i0,a,i0,a,i0,a,i0,a,f0.1,a)') &
+        if (res%n_tests_selected == 0) then
+            tests = 'not run (0 affected; '
+        else
+            tests = 'pass ('
+        end if
+        write (line, '(a,i0,a,i0,a,i0,a,i0,a,a,f0.1,a)') &
             'Build: OK (', res%n_modules, ' modules, ', res%n_cached, ' cached, ', &
-            res%n_changed, ' changed, ', res%n_affected, ' affected) Tests: pass (', &
-            res%elapsed, 's)'
+            res%n_changed, ' changed, ', res%n_affected, ' affected) Tests: ', &
+            tests, res%elapsed, 's)'
         call add_line(b, trim(line))
+        if (res%n_tests_selected == 0) call add_line(b, &
+            'fo: run fo test for the default suite')
     end subroutine add_summary
 
     function cycle_text(res) result(line)
