@@ -620,6 +620,7 @@ contains
         character(len=4096), allocatable :: words(:)
         character(len=512) :: build_log, configure_log, bin_path
         character(len=1024) :: all_flags
+        character(len=len(parsed%target)) :: selected_tests(1)
         character(len=:), allocatable :: packed, message
         integer :: n_args
         logical :: exists, configured, uses_model
@@ -694,7 +695,8 @@ contains
                 call backend_build(b, exitcode, flags=all_flags, log_file=build_log, &
                     configured=uses_model)
             else if (exec_target_is_test(b, parsed%target)) then
-                call backend_test_names(b, [parsed%target], 1, exitcode, &
+                selected_tests(1) = parsed%target
+                call backend_test_names(b, selected_tests, 1, exitcode, &
                     include_slow=.true., log_file=build_log, flags=all_flags, &
                     build_only=.true.)
             else
