@@ -38,7 +38,8 @@ program fo_main
         command_clean, command_install, command_check, command_lint, &
         failed_tests_text
     use fo_exec_target, only: resolve_exec_target, exec_target_is_app, &
-        exec_args_t, parse_exec_args, exec_uses_cmake_model, resolve_cmake_exec
+        exec_target_is_test, exec_args_t, parse_exec_args, exec_uses_cmake_model, &
+        resolve_cmake_exec
     use fo_build_tree, only: native_other_builds
     use fo_cover, only: fo_cover_run
     use fo_lock, only: lock_write
@@ -692,6 +693,10 @@ contains
             if (trim(action) == 'run') then
                 call backend_build(b, exitcode, flags=all_flags, log_file=build_log, &
                     configured=uses_model)
+            else if (exec_target_is_test(b, parsed%target)) then
+                call backend_test_names(b, [parsed%target], 1, exitcode, &
+                    include_slow=.true., log_file=build_log, flags=all_flags, &
+                    build_only=.true.)
             else
                 call backend_build(b, exitcode, flags=all_flags, log_file=build_log, &
                     with_tests=.not. exec_target_is_app(b, parsed%target), &

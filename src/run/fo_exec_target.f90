@@ -9,12 +9,12 @@ module fo_exec_target
     use fo_fpm_config, only: fpm_config_t, fpm_config_parse
     use fo_project_model, only: project_model_t, model_find_target, TARGET_EXECUTABLE
     use fo_gfortran_build, only: gfortran_app_source_name, gfortran_test_source_name, &
-        scan_project_app_units
+        scan_project_app_units, scan_project_test_units
     use fo_scan, only: scan_unit_t, scan_dir
     implicit none
     private
 
-    public :: resolve_exec_target, exec_target_is_app
+    public :: resolve_exec_target, exec_target_is_app, exec_target_is_test
     public :: exec_uses_cmake_model, resolve_cmake_exec
     public :: exec_args_t, parse_exec_args
 
@@ -178,6 +178,29 @@ contains
                 target, .true.)
         end if
     end function exec_target_is_app
+
+    logical function exec_target_is_test(b, target) result(is_test)
+        type(backend_t), intent(in) :: b
+        character(len=*), intent(in) :: target
+        type(fpm_config_t), allocatable :: config
+        type(scan_unit_t), allocatable :: units(:)
+        integer :: ierr, i, n_units
+
+        is_test = .false.
+        if (b%kind /= BACKEND_NATIVE) return
+        allocate (config)
+        call fpm_config_parse(b%project_dir, config, ierr)
+        if (ierr /= 0) return
+        call scan_project_test_units(b%project_dir, config, units, n_units, ierr)
+        if (ierr /= 0) return
+        do i = 1, n_units
+            if (.not. units(i)%is_program) cycle
+            if (gfortran_test_source_name(config, config%test_dir, &
+                units(i)%filename) /= target) cycle
+            is_test = .true.
+            return
+        end do
+    end function exec_target_is_test
 
     logical function source_dir_has_target(config, source_dir, target, tests) &
             result(found)
