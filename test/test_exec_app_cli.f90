@@ -1,6 +1,6 @@
 program test_exec_app_cli
     use fo_test_harness, only: string_list_t, process_result_t, list_add
-    use fo_test_harness, only: make_scratch, join_path, write_text, remove_tree
+    use fo_test_harness, only: make_scratch, join_path, write_text, read_text, remove_tree
     use fo_test_harness, only: assert_true, assert_equal_string, assert_equal_integer
     use fo_test_harness, only: assert_contains, assert_not_contains, assert_process_ok
     use fo_test_harness, only: file_exists
@@ -33,7 +33,16 @@ program test_exec_app_cli
         'name = "explicit_test"' // new_line('a') // '[[test]]' // new_line('a') // &
         'name = "smoke"' // new_line('a') // 'source-dir = "test"' // new_line('a') // &
         'main = "test_check.f90"' // new_line('a'), &
-        'test/test_check.f90', 'smoke', .false.)
+        'test/test_check.f90', 'smoke', .true.)
+    call exercise_fixture('custom_test', &
+        'name = "custom_test"' // new_line('a') // '[build]' // new_line('a') // &
+        'auto-tests = false' // new_line('a') // '[[test]]' // new_line('a') // &
+        'name = "smoke"' // new_line('a') // 'source-dir = "checks"' // &
+        new_line('a') // 'main = "check.f90"' // new_line('a') // &
+        '[[test]]' // new_line('a') // 'name = "broken"' // new_line('a') // &
+        'source-dir = "test"' // new_line('a') // 'main = "broken.f90"' // &
+        new_line('a'), 'checks/check.f90', 'smoke', .true.)
+    call exercise_selected_test()
 
     call setup_project('explicit_collision', &
         'name = "collision"' // new_line('a') // '[[executable]]' // new_line('a') // &
@@ -135,6 +144,48 @@ contains
 
         call run_fo(driver, command, project, join_path(scratch, '.fo-cache'), child)
     end subroutine invoke
+
+    subroutine exercise_selected_test()
+        character(:), allocatable :: project, marker
+        character(len=1), parameter :: nl = new_line('a')
+        type(string_list_t) :: command
+        type(process_result_t) :: child
+        integer :: phase
+
+        call setup_project('selected_test', 'name = "selected_test"'//nl, &
+            'test/selected.f90', .true., project)
+        marker = join_path(project, 'runs')
+        call write_text(join_path(project, 'app/broken.f90'), &
+            'program broken'//nl//'implicit none'//nl// &
+            'print *, missing_symbol'//nl//'end program broken'//nl)
+        call write_text(join_path(project, 'test/selected.f90'), &
+            'program selected'//nl//'implicit none'//nl// &
+            'character(len=256) :: arg'//nl//'integer :: unit, i'//nl// &
+            'open(newunit=unit, file="runs", status="unknown", &'//nl// &
+            '    position="append")'//nl//'write(unit, "(a)") "run"'//nl// &
+            'close(unit)'//nl//'print "(i0)", command_argument_count()'//nl// &
+            'do i = 1, command_argument_count()'//nl// &
+            '    call get_command_argument(i, arg)'//nl// &
+            '    print "(a)", trim(arg)'//nl//'end do'//nl// &
+            'end program selected'//nl)
+        command = words([character(len=32) :: &
+            'exec', 'selected', 'argument with spaces', '--flag'])
+        do phase = 1, 2
+            call invoke(project, command, child)
+            call assert_process_ok(child, &
+                'selected test avoids invalid unrelated app and test')
+            call assert_equal_string(child%stdout, &
+                '2'//nl//'argument with spaces'//nl//'--flag'//nl, &
+                'selected test receives original argv on cold and warm execution')
+            call assert_equal_string(read_text(marker), repeat('run'//nl, phase), &
+                'selected test runs exactly once per exec')
+        end do
+        command = words([character(len=32) :: 'exec', 'missing'])
+        call invoke(project, command, child)
+        call assert_true(child%exit_code /= 0, 'unknown target keeps build failure')
+        call assert_contains(child%stderr, 'fo exec: build failed', &
+            'unknown target preserves the combined-build fallback')
+    end subroutine exercise_selected_test
 
     subroutine exercise_custom_targets()
         character(:), allocatable :: project, prefix
