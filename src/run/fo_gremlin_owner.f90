@@ -1464,7 +1464,7 @@ contains
         failure_event = ''
         select case (trim(last_outcome))
         case ('FAIL')
-            if (ierr == 0) call prior_generation_case_passed(session, active%identity, &
+            if (ierr == 0) call prior_generation_case_passed(session, active, &
                 current_case, previous_pass, ierr, message)
             failure_event = 'test_failed'
             if (ierr == 0 .and. previous_pass) failure_event = 'regression_confirmed'

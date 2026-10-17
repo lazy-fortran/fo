@@ -69,6 +69,7 @@ module fo_gremlin_generation
         ! each model case (model_case_digests), computed once per generation.
         type(model_unit_t), allocatable :: units(:)
         character(len=HASH_LEN), allocatable :: case_digests(:)
+        character(len=HASH_LEN), allocatable :: oracle_digests(:)
         ! Digest of the compiler identity, flags and environment.
         character(len=HASH_LEN) :: toolchain_key = ''
     end type generation_t
