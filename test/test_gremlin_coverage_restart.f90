@@ -1,6 +1,5 @@
 program test_gremlin_coverage_restart
-    use fo_util, only: temporary_root
-    use, intrinsic :: iso_c_binding, only: c_int, c_int64_t
+    use, intrinsic :: iso_c_binding, only: c_int64_t
     use fo_test_harness, only: string_list_t, process_result_t, list_add
     use fo_test_harness, only: write_text, read_text, file_exists, remove_path
     use fo_test_harness, only: assert_true, assert_equal_integer, assert_equal_string
@@ -14,7 +13,9 @@ program test_gremlin_coverage_restart
     use fo_test_process_identity, only: mcp_process_identity_running
     use fo_test_json, only: json_value_t, json_member, json_element, json_size
     use fo_test_json, only: json_number_value, json_boolean_value, json_string_value
+    use fo_test_json, only: json_invalid
     use fo_test_gremlin_oracle, only: gremlin_gate_read_source, gremlin_pid_binding
+    use fo_gremlin_state, only: gremlin_session_state_dir
     implicit none
 
     integer, parameter :: n_cases = 40, interrupted_slot = 18
@@ -24,6 +25,10 @@ program test_gremlin_coverage_restart
     character(:), allocatable :: gate, ready, gate_after_marker, ready_after_marker
     character(:), allocatable :: marker, owner, replacement, session
     character(:), allocatable :: marker_text, child_text
+    character(:), allocatable :: generation, coverage_path, fail_flag
+    character(:), allocatable :: reproduction_flag, reproduction_marker
+    character(len=4096) :: state_dir
+    character(len=256) :: state_message
     type(string_list_t) :: args
     type(process_result_t) :: process
     type(json_value_t) :: report, coverage, field, events, event, event_case, event_status
@@ -39,6 +44,10 @@ program test_gremlin_coverage_restart
     gate_after_marker = scratch//'/final.fifo'
     ready_after_marker = scratch//'/final.pid'
     marker = scratch//'/cases.log'
+    fail_flag = scratch//'/reproduction-fails'
+    reproduction_flag = scratch//'/reproduction-active'
+    reproduction_marker = scratch//'/reproductions.log'
+    call write_text(reproduction_marker, '')
     call write_text(project//'/fpm.toml', 'name = "coverage_restart_probe"'//new_line('a'))
     call gremlin_gate_create(gate)
     call gremlin_gate_create(gate_after_marker)
@@ -62,6 +71,11 @@ program test_gremlin_coverage_restart
         'the interrupted epoch has exactly seventeen independent case markers')
     call assert_marker_prefix(marker_text, expected, 17)
     call query_status(session, report)
+    generation = gremlin_field(report, 'active_generation')
+    call gremlin_session_state_dir(project, lane, state_dir, signal_status, state_message)
+    call assert_equal_integer(signal_status, 0, 'resolves the lane coverage state')
+    if (signal_status /= 0) call finish_assertions()
+    coverage_path = trim(state_dir)//'/coverage-'//generation//'.state'
     coverage = json_member(report, 'coverage')
     field = json_member(coverage, 'running')
     call assert_equal_integer(int(json_number_value(field)), 1, &
@@ -72,6 +86,7 @@ program test_gremlin_coverage_restart
     field = json_member(coverage, 'pass')
     call assert_equal_integer(int(json_number_value(field)), 17, &
         'only completed behavior counts as PASS')
+    call reproduce_without_credit(trim(expected(19)), session, 0)
 
     owner = session
     owner_pid = -1
@@ -126,6 +141,7 @@ program test_gremlin_coverage_restart
     call wait_gone(owner_pid, owner_start, 5000)
     call wait_gone(child_pid, child_start, 5000)
     call remove_path(ready)
+    call inject_stale_receipt()
     call start_campaign()
     if (process%exit_code /= 0) call finish_assertions()
     replacement = gremlin_field(report, 'session_id')
@@ -135,6 +151,11 @@ program test_gremlin_coverage_restart
     call wait_for_progress(17, ready, 60000, ready_seen, replacement)
     call assert_true(ready_seen, 'restarted epoch reaches the interrupted permutation slot')
     if (.not. ready_seen) call finish_assertions()
+    call query_status(replacement, report)
+    coverage = json_member(report, 'coverage')
+    field = json_member(coverage, 'pass')
+    call assert_equal_integer(int(json_number_value(field)), 17, &
+        'a stale-generation journal PASS cannot satisfy the interrupted obligation')
     call gremlin_gate_release(gate)
     call remove_path(ready)
     call wait_for_progress(n_cases, ready_after_marker, 180000, ready_seen, replacement)
@@ -151,6 +172,7 @@ program test_gremlin_coverage_restart
     field = json_member(coverage, 'full_coverage')
     call assert_true(.not. json_boolean_value(field), &
         'markers alone do not satisfy the 40-case oracle')
+    call reproduce_without_credit(trim(expected(1)), replacement, 1)
     child_text = read_text(ready_after_marker)
     read(child_text, *, iostat=signal_status) child_pid
     call assert_true(signal_status == 0 .and. child_pid > 0, &
@@ -207,10 +229,156 @@ program test_gremlin_coverage_restart
         ' has a PASS receipt: '//logical_text(interrupted_pass)
     call assert_true(interrupted_pass, 'recovered interrupted case has a PASS receipt')
 
+    call reproduce_without_credit(trim(expected(1)), replacement, 1)
+    call query_status(replacement, report)
+    coverage = json_member(report, 'coverage')
+    field = json_member(coverage, 'full_coverage')
+    call assert_true(json_boolean_value(field), &
+        'a reproduction failure does not reopen the campaign epoch')
+
+    call gremlin_stop_lane(driver, project, cache, state, lane, replacement)
+    call set_coverage_unknown(trim(expected(n_cases)))
+    call start_campaign()
+    replacement = gremlin_field(report, 'session_id')
+    if (process%exit_code /= 0) call finish_assertions()
+    call wait_for_progress(n_cases, '', 60000, ready_seen, replacement)
+    call assert_true(ready_seen, 'restart repairs coverage from durable campaign receipts')
+    call assert_equal_integer(line_count(read_text(marker)), n_cases, &
+        'receipt-before-coverage recovery never reruns the receipted final case')
     call gremlin_stop_lane(driver, project, cache, state, lane, replacement)
     call finish_assertions()
 
 contains
+
+    subroutine reproduce_without_credit(case_name, owner_id, expected_exit)
+        character(len=*), intent(in) :: case_name, owner_id
+        integer, intent(in) :: expected_exit
+        character(:), allocatable :: before, expected_status
+        type(json_value_t) :: response, records, receipt, value
+        integer :: record, markers_before
+        logical :: found
+
+        before = read_text(coverage_path)
+        markers_before = line_count(read_text(reproduction_marker))
+        expected_status = 'PASS'
+        if (expected_exit /= 0) then
+            expected_status = 'FAIL'
+            call write_text(fail_flag, 'fail')
+        end if
+        call write_text(reproduction_flag, 'reproduce')
+        args = string_list_t()
+        call list_add(args, 'gremlin')
+        call list_add(args, 'reproduce')
+        call list_add(args, case_name)
+        call list_add(args, '--dir')
+        call list_add(args, project)
+        call list_add(args, '--lane')
+        call list_add(args, lane)
+        call list_add(args, '--session')
+        call list_add(args, owner_id)
+        call gremlin_json(driver, project, cache, state, args, response, process, 120000)
+        call assert_equal_integer(process%exit_code, expected_exit, &
+            'independent reproduction returns its controlled process result')
+        value = json_member(response, 'state')
+        call assert_equal_string(json_string_value(value), expected_status, &
+            'reproduction publishes its own result')
+        call remove_path(reproduction_flag)
+        call remove_path(fail_flag)
+        call assert_equal_integer(line_count(read_text(reproduction_marker)), &
+            markers_before + 1, 'independent marker proves the reproduction executed')
+        call assert_equal_string(read_text(coverage_path), before, &
+            'reproduction leaves the exact campaign coverage ledger unchanged')
+        call query_events(owner_id, records)
+        found = .false.
+        do record = 1, json_size(records)
+            receipt = json_element(records, record)
+            value = json_member(receipt, 'evidence_kind')
+            if (json_string_value(value) /= 'reproduction') cycle
+            value = json_member(receipt, 'case_id')
+            if (json_string_value(value) /= case_name) cycle
+            value = json_member(receipt, 'status')
+            if (json_string_value(value) /= expected_status) cycle
+            found = .true.
+            value = json_member(receipt, 'generation')
+            call assert_equal_string(json_string_value(value), generation, &
+                'the reproduction receipt binds the captured generation')
+            value = json_member(receipt, 'coverage_epoch')
+            call assert_equal_integer(value%kind, json_invalid, &
+                'a reproduction receipt has no campaign epoch')
+            value = json_member(receipt, 'inventory_digest')
+            call assert_equal_integer(value%kind, json_invalid, &
+                'a reproduction receipt has no campaign inventory credit')
+        end do
+        call assert_true(found, 'the independent reproduction has its own receipt')
+    end subroutine reproduce_without_credit
+
+    subroutine inject_stale_receipt()
+        character(:), allocatable :: text, digest, record, journal_path
+        integer :: first, last, unit, status
+
+        text = read_text(coverage_path)
+        first = index(text, '|') + 1
+        last = index(text, new_line('a')) - 1
+        call assert_true(first > 1 .and. last >= first, &
+            'reads the coverage inventory identity independently')
+        if (first <= 1 .or. last < first) call finish_assertions()
+        digest = text(first:last)
+        record = '{"completion_id":"stale-generation-pass","session_id":"'// &
+            session//'","lane_id":"'//lane//'","generation":"'// &
+            repeat('f', 64)//'","case_id":"'//trim(expected(interrupted_slot))// &
+            '","outcome":"pass","status":"PASS","exitcode":0,"seed":1729,'// &
+            '"coverage_epoch":1,"inventory_digest":"'//digest// &
+            '","order":18,"log_path":"stale"}'
+        call assert_true(generation /= repeat('f', 64), &
+            'the injected receipt belongs to another generation')
+        journal_path = trim(state_dir)//'/campaign-journal.jsonl'
+        open(newunit=unit, file=journal_path, status='old', position='append', &
+            action='write', iostat=status)
+        call assert_equal_integer(status, 0, 'opens the stopped-owner campaign journal')
+        if (status /= 0) call finish_assertions()
+        write(unit, '(a)', iostat=status) record
+        call assert_equal_integer(status, 0, 'writes the stale-generation receipt')
+        close(unit)
+    end subroutine inject_stale_receipt
+
+    subroutine set_coverage_unknown(case_name)
+        character(len=*), intent(in) :: case_name
+        character(:), allocatable :: text, target
+        integer :: at, after
+
+        text = read_text(coverage_path)
+        target = case_name//'|PASS'
+        at = index(text, target)
+        call assert_true(at > 0, 'finds a durable PASS for interrupted coverage publication')
+        if (at <= 0) call finish_assertions()
+        after = at + len(target)
+        call write_text(coverage_path, text(:at - 1)//case_name//'|UNKNOWN'//text(after:))
+    end subroutine set_coverage_unknown
+
+    subroutine query_events(owner_id, records)
+        character(len=*), intent(in) :: owner_id
+        type(json_value_t), intent(out) :: records
+        type(json_value_t) :: response
+
+        args = string_list_t()
+        call list_add(args, 'gremlin')
+        call list_add(args, 'events')
+        call list_add(args, '--dir')
+        call list_add(args, project)
+        call list_add(args, '--lane')
+        call list_add(args, lane)
+        call list_add(args, '--session')
+        call list_add(args, owner_id)
+        call list_add(args, '--cursor')
+        call list_add(args, '0')
+        call list_add(args, '--max-records')
+        call list_add(args, '128')
+        call list_add(args, '--max-bytes')
+        call list_add(args, '262144')
+        call gremlin_json(driver, project, cache, state, args, response, process, 10000)
+        call assert_equal_integer(process%exit_code, 0, 'reads the selected owner receipts')
+        records = json_member(response, 'events')
+    end subroutine query_events
 
     function logical_text(value) result(text)
         logical, intent(in) :: value
@@ -234,7 +402,7 @@ contains
         call list_add(args, '--campaign-seconds')
         call list_add(args, '60')
         call list_add(args, '--timeout-seconds')
-        call list_add(args, '10')
+        call list_add(args, '180')
         call gremlin_json(driver, project, cache, state, args, report, process, 30000)
         call assert_true(process%exit_code == 0, 'campaign start command returns success')
     end subroutine start_campaign
@@ -334,9 +502,25 @@ contains
         character(len=*), intent(in) :: name
         character(:), allocatable :: body
 
-        body = 'integer :: unit'//new_line('a')//'open(newunit=unit, file="'//marker// &
-            '", status="unknown", position="append")'//new_line('a')// &
+        body = 'integer :: unit'//new_line('a')
+        if (name == trim(expected(1)) .or. name == trim(expected(19))) then
+            body = body//'logical :: replay, fail'//new_line('a')// &
+                'inquire(file="'//reproduction_flag//'", exist=replay)'//new_line('a')// &
+                'if (replay) then'//new_line('a')// &
+                'open(newunit=unit, file="'//reproduction_marker// &
+                '", status="unknown", position="append")'//new_line('a')// &
+                'else'//new_line('a')
+        end if
+        body = body//'open(newunit=unit, file="'//marker// &
+            '", status="unknown", position="append")'//new_line('a')
+        if (name == trim(expected(1)) .or. name == trim(expected(19))) &
+            body = body//'end if'//new_line('a')
+        body = body// &
             'write(unit, "(a)") "'//name//'"'//new_line('a')//'close(unit)'
+        if (name == trim(expected(1)) .or. name == trim(expected(19))) &
+            body = body//new_line('a')// &
+            'inquire(file="'//fail_flag//'", exist=fail)'//new_line('a')// &
+            'if (fail) stop 1'
     end function marker_body
 
     function blocked_body(name) result(body)
