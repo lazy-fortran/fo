@@ -691,11 +691,8 @@ contains
             n_selected = n_selected_priorities
         end if
         if (n_priorities == 0) then
-            if (n_selected > 0) then
-                priorities(1) = selected(1)
-            else
-                priorities(1) = all_names(1)
-            end if
+            ! Keep the default gate stable when an owner resumes this epoch.
+            priorities(1) = coverage%order(1)
             n_priorities = 1
         end if
         if (len_trim(request%requirement_digest) /= HASH_LEN) then

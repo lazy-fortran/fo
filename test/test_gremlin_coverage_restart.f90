@@ -25,6 +25,7 @@ program test_gremlin_coverage_restart
     character(:), allocatable :: gate, ready, gate_after_marker, ready_after_marker
     character(:), allocatable :: marker, owner, replacement, session
     character(:), allocatable :: marker_text, child_text
+    character(:), allocatable :: coverage_before_terminal
     character(:), allocatable :: generation, coverage_path, fail_flag
     character(:), allocatable :: reproduction_flag, reproduction_marker
     character(len=4096) :: state_dir
@@ -48,7 +49,8 @@ program test_gremlin_coverage_restart
     reproduction_flag = scratch//'/reproduction-active'
     reproduction_marker = scratch//'/reproductions.log'
     call write_text(reproduction_marker, '')
-    call write_text(project//'/fpm.toml', 'name = "coverage_restart_probe"'//new_line('a'))
+    call write_text(project//'/fpm.toml', 'name = "coverage_restart_probe"'//new_line('a')// &
+        '[extra.fo]'//new_line('a')//'test-retries = 0'//new_line('a'))
     call gremlin_gate_create(gate)
     call gremlin_gate_create(gate_after_marker)
     do i = 1, n_cases
@@ -172,6 +174,10 @@ program test_gremlin_coverage_restart
     field = json_member(coverage, 'full_coverage')
     call assert_true(.not. json_boolean_value(field), &
         'markers alone do not satisfy the 40-case oracle')
+    coverage_before_terminal = read_text(coverage_path)
+    call assert_true(index(coverage_before_terminal, &
+        trim(expected(n_cases))//'|RUNNING') > 0, &
+        'the saved ledger captures the final child before its terminal receipt')
     call reproduce_without_credit(trim(expected(1)), replacement, 1)
     child_text = read_text(ready_after_marker)
     read(child_text, *, iostat=signal_status) child_pid
@@ -238,7 +244,7 @@ program test_gremlin_coverage_restart
         'a reproduction failure does not reopen the campaign epoch')
 
     call gremlin_stop_lane(driver, project, cache, state, lane, replacement)
-    call set_coverage_unknown(trim(expected(n_cases)))
+    call write_text(coverage_path, coverage_before_terminal)
     call start_campaign()
     replacement = gremlin_field(report, 'session_id')
     if (process%exit_code /= 0) call finish_assertions()
@@ -364,20 +370,6 @@ contains
         call assert_equal_integer(status, 0, 'writes the stale-generation receipt')
         close(unit)
     end subroutine inject_stale_receipt
-
-    subroutine set_coverage_unknown(case_name)
-        character(len=*), intent(in) :: case_name
-        character(:), allocatable :: text, target
-        integer :: at, after
-
-        text = read_text(coverage_path)
-        target = case_name//'|PASS'
-        at = index(text, target)
-        call assert_true(at > 0, 'finds a durable PASS for interrupted coverage publication')
-        if (at <= 0) call finish_assertions()
-        after = at + len(target)
-        call write_text(coverage_path, text(:at - 1)//case_name//'|UNKNOWN'//text(after:))
-    end subroutine set_coverage_unknown
 
     subroutine query_events(owner_id, records)
         character(len=*), intent(in) :: owner_id
