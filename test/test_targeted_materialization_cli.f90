@@ -130,6 +130,7 @@ program test_targeted_materialization_cli
     call assert_file_exists(join_path(bin_dir, trim(names(2))), &
         'second selected test is materialized')
     call assert_file_equals(marker, trim(values(2)) // new_line('a'), 'second target executes')
+    call check_build_case_selection()
     call remove_path(marker)
     call remove_tree(scratch)
     call remove_tree(env_scratch)
@@ -137,6 +138,78 @@ program test_targeted_materialization_cli
     write(*, '(a)') 'targeted-materialization-cli: sequential selected targets each build and run'
 
 contains
+
+    subroutine check_build_case_selection()
+        !! An unrelated, validly parsed test has an independent compiler error.
+        !! Selecting the good case must not compile that test or execute either.
+        character(:), allocatable :: dir, selected_marker
+        character, parameter :: nl = new_line('a')
+        type(string_list_t) :: args
+        type(process_result_t) :: child
+
+        dir = join_path(scratch, 'build-selection')
+        selected_marker = join_path(dir, 'executed')
+        call make_directory(join_path(dir, 'test'))
+        call write_text(join_path(dir, 'fpm.toml'), &
+            'name = "selected_build"' // nl)
+        call write_text(join_path(dir, 'test/test_good.f90'), &
+            'program test_good' // nl // 'implicit none' // nl // &
+            'integer :: unit' // nl // &
+            "open(newunit=unit, file='executed', status='replace')" // nl // &
+            "write(unit, '(a)') 'selected case ran'" // nl // &
+            'close(unit)' // nl // 'end program test_good' // nl)
+        call write_text(join_path(dir, 'test/test_bad_slow.f90'), &
+            'program test_bad_slow' // nl // 'implicit none' // nl // &
+            'integer, parameter :: invalid = 1 / 0' // nl // &
+            'print *, invalid' // nl // 'end program test_bad_slow' // nl)
+
+        call list_add(args, 'build')
+        call list_add(args, '--tests')
+        call list_add(args, '--case')
+        call list_add(args, 'test_good')
+        call run_fo(driver, args, dir, env_cache, child, environment)
+        call assert_process_ok(child, &
+            'named build excludes an unrelated compiler error')
+        call assert_file_exists(join_path(dir, 'build/fo/bin/test_good'), &
+            'named build materializes its selected executable')
+        call assert_file_absent(join_path(dir, 'build/fo/bin/test_bad_slow'), &
+            'named build does not materialize the unrelated executable')
+        call assert_file_absent(selected_marker, 'named build does not run the test')
+
+        args = string_list_t()
+        call list_add(args, 'test')
+        call list_add(args, '--no-build')
+        call list_add(args, 'test_good')
+        call run_fo(driver, args, dir, env_cache, child, environment)
+        call assert_process_ok(child, 'selected build supports the later no-build run')
+        call assert_file_equals(selected_marker, 'selected case ran' // nl, &
+            'the selected native test executes independently')
+
+        args = string_list_t()
+        call list_add(args, 'build')
+        call list_add(args, '--tests')
+        call list_add(args, '--case')
+        call list_add(args, 'test_bad_slow')
+        call run_fo(driver, args, dir, env_cache, child, environment)
+        call assert_true(child%exit_code /= 0 .and. child%term_signal == 0, &
+            'explicitly selecting the invalid slow test still fails compilation')
+        args = string_list_t()
+        call list_add(args, 'build')
+        call list_add(args, '--tests')
+        call list_add(args, '--case')
+        call list_add(args, 'no_such_case')
+        call run_fo(driver, args, dir, env_cache, child, environment)
+        call assert_true(child%exit_code /= 0 .and. child%term_signal == 0, &
+            'an unknown named build still fails')
+        call assert_contains(child%stderr, 'unknown test case: no_such_case', &
+            'the unknown case is diagnosed before unrelated compilation')
+        args = string_list_t()
+        call list_add(args, 'build')
+        call list_add(args, '--tests')
+        call run_fo(driver, args, dir, env_cache, child, environment)
+        call assert_true(child%exit_code /= 0 .and. child%term_signal == 0, &
+            'an unscoped test build still includes invalid slow tests')
+    end subroutine check_build_case_selection
 
     subroutine maybe_log_compiler_probe()
         character(:), allocatable :: log_path
