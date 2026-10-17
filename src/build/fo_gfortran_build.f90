@@ -3599,11 +3599,9 @@ contains
             call make_tmpfile('fo_test_case', run_logs(n_run))
         end do
 
-        ! Module-only files under test/ are helper modules a test program uses
-        ! (fpm compiles them and links their objects into the test executable).
-        ! Compile only those reachable from a selected test, in dependency order,
-        ! so their .mod files exist before the test programs compile, then fold
-        ! their objects into the link line.
+        ! Test helpers include modules reached through USE and external units
+        ! reached without a USE edge. Compile their dependency closures before
+        ! the test programs, then fold their objects into the link line.
         allocate (helper_objs(MAX_SRC_OBJS), helper_flags(MAX_NODES))
         call package_source_flags(filenames, test_flags, manifest_config, &
             devsrcs, n_dev, helper_flags, exitcode)
@@ -3616,7 +3614,8 @@ contains
             end if
             helper_flags(i) = merged_flags
         end do
-        call compile_test_helpers(project_dir, obj_dir, dag, filenames, is_prog, &
+        call compile_test_helpers(project_dir, obj_dir, tunits(:n_tests), &
+            dag, filenames, is_prog, &
             topo_order, n_order, run_nodes, n_run, incl_flag, log_file, &
             helper_objs, n_helper_objs, exitcode, helper_flags)
         if (exitcode /= 0) return
@@ -4479,15 +4478,16 @@ contains
         end if
     end subroutine remove_ephemeral_link_artifact
 
-    subroutine compile_test_helpers(project_dir, obj_dir, dag, filenames, is_prog, &
+    subroutine compile_test_helpers(project_dir, obj_dir, units, dag, &
+            filenames, is_prog, &
             topo_order, n_order, run_nodes, n_run, incl_flag, log_file, &
             helper_objs, n_helper_objs, exitcode, source_flags)
-        !! Compile the module-only helper files a selected test program depends
-        !! on, in dependency order, so their .mod files exist before the test
-        !! programs compile and their objects can be linked in. Scoped to the
-        !! dependency closure of the run set, exactly as fpm builds a test
-        !! target: an unrelated (possibly broken) test module is never compiled.
+        !! USE edges identify module helpers. External procedures and block data
+        !! have no USE edge from their callers, so retain them conservatively,
+        !! including mixed module/external files and their module dependencies.
+        !! Unrelated pure module helpers stay outside the selected closure.
         character(len=*), intent(in) :: project_dir, obj_dir, log_file
+        type(scan_unit_t), intent(in) :: units(:)
         type(dag_t), intent(in) :: dag
         character(len=MAX_PATH), intent(in) :: filenames(:)
         logical, intent(in) :: is_prog(:)
@@ -4504,10 +4504,23 @@ contains
 
         n_helper_objs = 0
         exitcode = 0
+        if (n_run == 0) return
         allocate (needed(MAX_NODES))
         needed = .false.
         do i = 1, n_run
             call mark_reachable(dag, run_nodes(i), needed)
+        end do
+        do i = 1, size(units)
+            if (units(i)%is_program) cycle
+            if (file_defines_program(units(i)%filename)) cycle
+            if (.not. units(i)%has_other_units) then
+                if (source_defines_module(units(i)%filename)) cycle
+            end if
+            node_id = dag_find_source_provider(units, size(units), dag, &
+                units(i)%module_name)
+            if (node_id == 0) cycle
+            needed(node_id) = .true.
+            call mark_reachable(dag, node_id, needed)
         end do
 
         do i = 1, n_order

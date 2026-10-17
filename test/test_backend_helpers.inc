@@ -932,6 +932,86 @@
         call fs_remove_file(trim(log_file))
     end subroutine test_gfortran_named_test_links_helper_modules
 
+    subroutine test_gfortran_named_test_links_external_helpers()
+        integer :: exitcode, u
+        character(len=512) :: project_dir, log_file
+        character(len=128) :: names(1)
+
+        call make_tmp_path('fo_test_external_helpers', project_dir)
+        call make_tmp_path('fo_backend_external_helpers', log_file)
+        call make_helper_module_project(project_dir)
+        ! Only the external procedure uses this module: its USE closure must
+        ! be compiled even though the selected main has no module dependency.
+        open (newunit=u, file=trim(project_dir)//'/test/kernel.f90', &
+            status='replace')
+        write (u, '(a)') 'subroutine kernel(value)'
+        write (u, '(a)') 'use test_support, only: support_value'
+        write (u, '(a)') 'implicit none'
+        write (u, '(a)') 'integer, intent(out) :: value'
+        write (u, '(a)') 'value = support_value()'
+        write (u, '(a)') 'end subroutine kernel'
+        close (u)
+        ! A module and an external function may also share one source.
+        open (newunit=u, file=trim(project_dir)//'/test/mixed.f90', &
+            status='replace')
+        write (u, '(a)') 'module unused_sibling'
+        write (u, '(a)') 'implicit none'
+        write (u, '(a)') 'end module unused_sibling'
+        write (u, '(a)') 'integer function adjustment()'
+        write (u, '(a)') 'implicit none'
+        write (u, '(a)') 'adjustment = 2'
+        write (u, '(a)') 'end function adjustment'
+        close (u)
+        ! An unrelated pure module must stay outside the selected closure.
+        open (newunit=u, file=trim(project_dir)//'/test/unrelated.f90', &
+            status='replace')
+        write (u, '(a)') 'module unrelated'
+        write (u, '(a)') 'use missing_unrelated_dependency'
+        write (u, '(a)') 'implicit none'
+        write (u, '(a)') 'end module unrelated'
+        close (u)
+        open (newunit=u, file=trim(project_dir)//'/test/test_uses_helpers.f90', &
+            status='replace')
+        write (u, '(a)') 'program test_uses_helpers'
+        write (u, '(a)') 'implicit none'
+        write (u, '(a)') 'integer :: value'
+        write (u, '(a)') 'interface'
+        write (u, '(a)') 'subroutine kernel(value)'
+        write (u, '(a)') 'integer, intent(out) :: value'
+        write (u, '(a)') 'end subroutine kernel'
+        write (u, '(a)') 'integer function adjustment()'
+        write (u, '(a)') 'end function adjustment'
+        write (u, '(a)') 'end interface'
+        write (u, '(a)') 'call kernel(value)'
+        write (u, '(a)') 'if (value + adjustment() /= 3) error stop 1'
+        write (u, '(a)') 'end program test_uses_helpers'
+        close (u)
+
+        names(1) = 'test_uses_helpers'
+        call native_test_run(project_dir, log_file, exitcode, names=names, n_names=1)
+        call assert(exitcode == 0, &
+            'named test links external and mixed helpers with their USE closure')
+        call native_test_run(project_dir, log_file, exitcode, names=names, n_names=1)
+        call assert(exitcode == 0, 'warm external helper test succeeds')
+
+        open (newunit=u, file=trim(project_dir)//'/test/kernel.f90', &
+            status='replace')
+        write (u, '(a)') 'subroutine kernel(value)'
+        write (u, '(a)') 'implicit none'
+        write (u, '(a)') 'integer, intent(out) :: value'
+        write (u, '(a)') 'value = 99'
+        write (u, '(a)') 'end subroutine kernel'
+        close (u)
+        call native_test_run(project_dir, log_file, exitcode, names=names, n_names=1)
+        call assert(exitcode /= 0, 'changed external helper invalidates linked result')
+        call fs_remove_file(trim(project_dir)//'/test/kernel.f90')
+        call native_test_run(project_dir, log_file, exitcode, names=names, n_names=1)
+        call assert(exitcode /= 0, 'undefined external helper remains a link failure')
+
+        call remove_tree(project_dir)
+        call fs_remove_file(trim(log_file))
+    end subroutine test_gfortran_named_test_links_external_helpers
+
     subroutine test_gfortran_builds_path_dependency()
         !! A project with a path dependency compiles the dependency's library
         !! sources through fo's own cache and links them, with no prior fpm

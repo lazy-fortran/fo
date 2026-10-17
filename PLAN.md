@@ -46,7 +46,14 @@ Nix/Spack replacement, CI/promotion engine or agent orchestrator.
   five failures; the corrected test passes, including overlapping groups,
   shared-input deduplication and preservation of the slow label. The affected
   model and layering CLI tests also pass on GCC 16.1. This is focused
-  qualification; deployment awaits the separate external test-helper repair.
+  qualification; deployment requires the combined corrected app and consumer checks.
+
+- Native named FPM tests now link standalone external and mixed
+  module/external test helpers together with their USE dependencies. Unrelated
+  pure module helpers remain outside the selected closure. The focused backend
+  regression changes from three passes/two failures to five passes, including
+  warm execution, changed-helper invalidation and undefined-helper rejection.
+  The original FortGen consumer and combined release deployment are pending.
 
 ## Current state (main `8cec6ed`, 2026-10-16)
 
