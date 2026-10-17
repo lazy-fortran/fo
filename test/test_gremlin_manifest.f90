@@ -283,6 +283,9 @@ program test_gremlin_manifest
             corrupted_reuse, ierr, message)
         call require(ierr /= 0, &
             'reuse rejects changed bytes in the materialized generation')
+        call require(index(message, 'project:fixture.dat') > 0 .and. &
+            index(message, 'content digest differs') > 0, &
+            'reuse diagnostic identifies the changed declared input and content')
     end if
 
     call verify_model_key()
