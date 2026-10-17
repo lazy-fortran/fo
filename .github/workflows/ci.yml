@@ -79,6 +79,18 @@ jobs:
             test_cmake_project_model test_project_selection_cli \
             test_project_layering_cli test_gremlin_case_reuse test_gremlin_cmake
 
+      - name: Test Linux journal and coverage recovery
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          export FO="$FO_DRIVER_A" FO_BIN="$FO_DRIVER_A"
+          export FO_DISABLE_SELF_REFRESH=1 FO_SELF_REFRESH=0 FO_JOBS=1
+          export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
+          export FO_TEST_WALL_TIMEOUT=300
+          export TMPDIR="$RUNNER_TEMP/fo-recovery-tests"
+          mkdir -p "$TMPDIR"
+          "$FO_DRIVER_A" test test_gremlin_journal_recovery \
+            test_gremlin_coverage_restart
+
       - name: Test public fo test dispatch
         run: |
           export PATH="$HOME/.local/bin:$PATH"
