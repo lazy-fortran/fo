@@ -39,6 +39,15 @@ for people and AI agents. Gremlin is its centre.
 The product boundary in `CLAUDE.md` still holds: no hermetic environments,
 Nix/Spack replacement, CI/promotion engine or agent orchestrator.
 
+## Focused infrastructure repairs (2026-10-17)
+
+- FPM test-group labels and declared-input attributes retain their text on
+  GCC 13 after array growth. The original native GCC 13.3 test reproduced
+  five failures; the corrected test passes, including overlapping groups,
+  shared-input deduplication and preservation of the slow label. The affected
+  model and layering CLI tests also pass on GCC 16.1. This is focused
+  qualification; deployment awaits the separate external test-helper repair.
+
 ## Current state (main `8cec6ed`, 2026-10-16)
 
 The 2026-10-15 [backend-neutral project model](doc/CMAKE_GREMLIN_PLAN.md#backend-neutral-project-model-decision-2026-10-15)
