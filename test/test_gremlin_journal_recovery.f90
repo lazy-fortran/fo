@@ -1,7 +1,8 @@
 program test_gremlin_journal_recovery
     use, intrinsic :: iso_c_binding, only: c_int, c_int64_t, c_char, c_null_char
     use fo_test_harness, only: string_list_t, process_result_t, list_add, run_process
-    use fo_test_harness, only: write_text, read_text, file_exists, remove_path
+    use fo_test_harness, only: write_text, read_text, append_text
+    use fo_test_harness, only: file_exists, remove_path
     use fo_test_harness, only: assert_true, assert_equal_integer, assert_equal_string
     use fo_test_harness, only: assert_contains, finish_assertions, current_directory
     use fo_test_gremlin_oracle, only: gremlin_setup, gremlin_json, gremlin_field
@@ -99,6 +100,12 @@ program test_gremlin_journal_recovery
     call crash_recorded_owner()
     call assert_true(.not. file_exists(first_done), &
         'interrupted execution has no completion marker')
+    call gremlin_get_session_journal_path(project, lane, first_owner, &
+        journal_path, status, message)
+    call assert_equal_integer(status, 0, 'locates the crashed owner journal')
+    if (status /= 0) call finish_assertions(retain_failed_scratch=.true.)
+    ! Recovery must retain complete receipts and ignore an unterminated tail.
+    call append_text(trim(journal_path), '{"completion_id":"partial')
     call remove_path(project//'/test/test_pass.f90')
     call remove_path(project//'/test/test_fail.f90')
     call write_blocked(second_gate, second_pid_file, second_done)
@@ -331,6 +338,8 @@ contains
                     call assert_true(valid, 'imported receipt parses independently')
                     call assert_equal_string(gremlin_field(receipt, 'session_id'), &
                         first_owner, 'partial import preserves original receipt owner')
+                    call assert_true(len(gremlin_field(receipt, 'completion_id')) > 0, &
+                        'first imported receipt preserves its completion identity')
                 end if
             end if
         end if
