@@ -73,14 +73,15 @@ Nix/Spack replacement, CI/promotion engine or agent orchestrator.
   faepkub4's host key is verified, but SSH authentication fails, so its
   deployment remains unavailable.
 
-- Native CI at `2e4d701` passes the project-model and public-dispatch checks.
-  The self-refresh oracle reaches its parent 240-second safety cap: the plain
-  self-build passes in 90.08 seconds, its random test passes in 23.33 seconds,
-  and the next profile is still compiling. The retained logs show no nested
-  command failure. CI now inherits the existing 600-second manifest budget;
-  all child caps and assertions remain. Independent delayed-program controls
-  verify manifest inheritance and timeout enforcement. The next native CI
-  must qualify the complete oracle and later workflow checks.
+- Native CI at `2e4d701` exposed the stale 240-second parent cap; CI
+  inherits the existing 600-second manifest allowance. At `f484fe3`, the first
+  oracle attempt fails after 488.68 seconds, then its default retry consumes
+  the remaining 20-minute job budget before failure logs upload. The original
+  assertion failure remains unknown. CI now runs this expensive oracle once
+  with `--rerun --retries 0 --verbose` and retains its captured `.tmp` transcripts.
+  Four native controls verify first-failure handling. Parent/child/job caps
+  and every oracle command/assertion remain; the next native CI must expose
+  the first failure or qualify the complete oracle and later checks.
 
 ## Current state (main `8cec6ed`, 2026-10-16)
 
