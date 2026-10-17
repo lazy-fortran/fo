@@ -168,8 +168,11 @@ contains
             '    call get_command_argument(i, arg)'//nl// &
             '    print "(a)", trim(arg)'//nl//'end do'//nl// &
             'end program selected'//nl)
-        command = words([character(len=32) :: &
-            'exec', 'selected', 'argument with spaces', '--flag'])
+        command = string_list_t()
+        call list_add(command, 'exec')
+        call list_add(command, 'selected')
+        call list_add(command, 'argument with spaces')
+        call list_add(command, '--flag')
         do phase = 1, 2
             call invoke(project, command, child)
             call assert_process_ok(child, &
@@ -180,7 +183,9 @@ contains
             call assert_equal_string(read_text(marker), repeat('run'//nl, phase), &
                 'selected test runs exactly once per exec')
         end do
-        command = words([character(len=32) :: 'exec', 'missing'])
+        command = string_list_t()
+        call list_add(command, 'exec')
+        call list_add(command, 'missing')
         call invoke(project, command, child)
         call assert_true(child%exit_code /= 0, 'unknown target keeps build failure')
         call assert_contains(child%stderr, 'fo exec: build failed', &
