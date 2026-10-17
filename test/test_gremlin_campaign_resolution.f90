@@ -138,34 +138,42 @@ contains
 
     subroutine model_fixture(generation)
         type(generation_t), intent(out) :: generation
+        type(string_t) :: sources(1), link_deps(2)
 
         allocate (generation%model, generation%units(4))
         call model_init(generation%model, 'fpm', 'fixture')
+        sources(1)%s = '/fixture/src/core.f90'
         call model_add_target(generation%model, 'core', TARGET_LIBRARY, &
-            sources=[string_t('/fixture/src/core.f90')])
+            sources=sources)
+        sources(1)%s = '/fixture/test/helper.f90'
         call model_add_target(generation%model, 'helper', TARGET_LIBRARY, &
-            sources=[string_t('/fixture/test/helper.f90')])
+            sources=sources)
+        sources(1)%s = '/fixture/test/probe.f90'
+        link_deps(1)%s = 'core'
+        link_deps(2)%s = 'helper'
         call model_add_target(generation%model, 'probe', TARGET_EXECUTABLE, &
-            sources=[string_t('/fixture/test/probe.f90')], &
-            link_deps=[string_t('core'), string_t('helper')], index=target)
+            sources=sources, link_deps=link_deps, index=target)
         call model_add_case(generation%model, 'probe', command_target=target)
+        sources(1)%s = '/fixture/test/other.f90'
         call model_add_target(generation%model, 'other', TARGET_EXECUTABLE, &
-            sources=[string_t('/fixture/test/other.f90')], index=target)
+            sources=sources, index=target)
         call model_add_case(generation%model, 'other', command_target=target)
         call model_finalize(generation%model, ierr, detail)
         call assert_true(ierr == 0, 'fixture model is valid')
-        do i = 1, 4
-            allocate (generation%units(i)%provides(0), generation%units(i)%uses(0))
-        end do
+        allocate (generation%units(1)%provides(1), generation%units(1)%uses(0))
+        allocate (generation%units(2)%provides(0), generation%units(2)%uses(2))
+        allocate (generation%units(3)%provides(0), generation%units(3)%uses(0))
+        allocate (generation%units(4)%provides(1), generation%units(4)%uses(0))
         generation%units(1)%path = '/fixture/src/core.f90'
-        generation%units(1)%provides = [string_t('core')]
+        generation%units(1)%provides(1)%s = 'core'
         generation%units(2)%path = '/fixture/test/probe.f90'
         generation%units(2)%other_units = .true.
-        generation%units(2)%uses = [string_t('core'), string_t('helper')]
+        generation%units(2)%uses(1)%s = 'core'
+        generation%units(2)%uses(2)%s = 'helper'
         generation%units(3)%path = '/fixture/test/other.f90'
         generation%units(3)%other_units = .true.
         generation%units(4)%path = '/fixture/test/helper.f90'
-        generation%units(4)%provides = [string_t('helper')]
+        generation%units(4)%provides(1)%s = 'helper'
         generation%model_root = '/fixture'
         generation%input_inventory_ready = .true.
         generation%input_inventory_complete = .true.

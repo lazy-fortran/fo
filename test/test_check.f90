@@ -181,19 +181,25 @@ contains
     subroutine test_check_reports_clean_selection_without_test_pass()
         type(check_result_t) :: res
         character(len=512) :: project_dir
+        character(len=64) :: init_args(2), config_args(3), add_args(4), commit_args(4)
         character(len=:), allocatable :: line, text, err_text
         integer :: exitcode
 
         call make_tmp_path('fo_clean_check_project', project_dir)
         call make_failing_test_project(project_dir)
-        call git_in(project_dir, [character(len=64) :: 'init', '-q'])
-        call git_in(project_dir, [character(len=64) :: 'config', 'user.email', &
-            'fo@example.invalid'])
-        call git_in(project_dir, [character(len=64) :: 'config', 'user.name', 'fo-test'])
-        call git_in(project_dir, [character(len=64) :: 'config', 'commit.gpgsign', 'false'])
-        call git_in(project_dir, [character(len=64) :: 'add', 'fpm.toml', &
-            'src/ok.f90', 'test/test_fail.f90'])
-        call git_in(project_dir, [character(len=64) :: 'commit', '-q', '-m', 'init'])
+        init_args = [character(len=64) :: 'init', '-q']
+        call git_in(project_dir, init_args)
+        config_args = [character(len=64) :: 'config', 'user.email', 'fo@example.invalid']
+        call git_in(project_dir, config_args)
+        config_args = [character(len=64) :: 'config', 'user.name', 'fo-test']
+        call git_in(project_dir, config_args)
+        config_args = [character(len=64) :: 'config', 'commit.gpgsign', 'false']
+        call git_in(project_dir, config_args)
+        add_args = [character(len=64) :: 'add', 'fpm.toml', &
+            'src/ok.f90', 'test/test_fail.f90']
+        call git_in(project_dir, add_args)
+        commit_args = [character(len=64) :: 'commit', '-q', '-m', 'init']
+        call git_in(project_dir, commit_args)
 
         call fo_check_run(project_dir, res)
         call assert(res%build_ok .and. res%tests_ok, &
