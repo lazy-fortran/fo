@@ -208,6 +208,29 @@ but does not replace CMake's target model.
 its journal tail. It is clamped to 16 through 512, the default. PASS reuse does
 not depend on it: a per-case index keeps the latest reusable PASS of every case.
 
+Gremlin state lives below `<base>/fo/gremlin`, where `<base>` is
+`FO_GREMLIN_STATE_DIR`, `XDG_CACHE_HOME` or `~/.cache`: `projects/<project>/<lane>`
+holds a lane's `owner.lock`, status, journals, logs, driver pins and execution
+views; `generations-v2/<id>` holds frozen generations with their lock, lease,
+pin and pending-release sidecars in `generations-v2/.state/<id>`; `terminal/`
+and `session-journals/` hold the small records of stopped sessions.
+
+An owner pins its active generation and keeps the pin after a stop, so the
+stopped lane can still `reproduce` it; a pin also stays when a child escaped
+cancellation. Pins therefore outlive their lanes. Retention (README, "Cache and
+concurrency") bounds `projects/` and `generations-v2/` by `FO_GREMLIN_MAX_SIZE`.
+A lane directory is removed only while its owner lock is free and neither its
+recorded owner nor any recorded async process is running
+(`fo_gremlin_process_matches`), after releasing its private execution scratch;
+it is renamed to a `.evict-*` tombstone under the lock, and a starting owner
+that locked the old inode starts over on a fresh directory. A generation loses
+its pin only under its guard while no lease holds it, then goes through the
+ordinary prune path, which records and completes the pending Fx root release.
+A lease acquisition refreshes the lease file's mtime as the generation's last
+use. Last use of a lane is the newest mtime among its entries and their direct
+entries; on filesystems whose locks are host-local, a lane idle on another host
+for longer than the grace period is indistinguishable from a dead one.
+
 ## Test selection
 
 `fo test` selects cases on one project model for both backends: the fpm

@@ -470,7 +470,8 @@ contains
         case ('exec', 'run')
             call print_exec_usage()
         case ('clean')
-            write (output_unit, '(a)') 'usage: fo clean [--cache|--all|--stale] [--keep N]'
+            write (output_unit, '(a)') 'usage: fo clean [--cache|--all|--stale'// &
+                '|--gremlin] [--keep N] [--dry-run]'
             write (output_unit, '(a)') '  --help, -h  show this help without deleting files'
         case ('check')
             write (output_unit, '(a)') &
@@ -1984,7 +1985,7 @@ contains
         character(len=512) :: arg
         integer :: i, n_removed, exitcode, keep
         integer(8) :: freed_bytes
-        logical :: purge_store, stale_only, stale_blocked
+        logical :: purge_store, stale_only, stale_blocked, gremlin_only, dry_run
         character(len=:), allocatable :: text
         logical :: want_help
 
@@ -2016,6 +2017,12 @@ contains
             write (output_unit, '(a)') &
                 '  --all        same as --cache'
             write (output_unit, '(a)') &
+                '  --gremlin    reclaim dead Gremlin lanes and stale generations'// &
+                ' above FO_GREMLIN_MAX_SIZE now'
+            write (output_unit, '(a)') &
+                '  --dry-run    with --gremlin: list what would be reclaimed,'// &
+                ' change nothing'
+            write (output_unit, '(a)') &
                 '  -h, --help   print this text and exit without deleting'// &
                 ' anything'
             return
@@ -2027,12 +2034,16 @@ contains
         ! Purge it only when explicitly asked.
         purge_store = .false.
         stale_only = .false.
+        gremlin_only = .false.
+        dry_run = .false.
         keep = CLEAN_STALE_DEFAULT_KEEP
         do i = 2, command_argument_count()
             call get_command_argument(i, arg)
             if (trim(arg) == '--cache' .or. trim(arg) == '--all') &
                 purge_store = .true.
             if (trim(arg) == '--stale') stale_only = .true.
+            if (trim(arg) == '--gremlin') gremlin_only = .true.
+            if (trim(arg) == '--dry-run') dry_run = .true.
             if (trim(arg) == '--keep') then
                 call get_command_argument(i + 1, arg)
                 read (arg, *, iostat=n_removed) keep
@@ -2044,6 +2055,15 @@ contains
         ! last build still references, delete the generations a content-addressed
         ! tree can never revisit. ffc carried 6.5 GB of unreachable link archives
         ! and stale compiler profile dirs this way.
+        if (gremlin_only) then
+            call clean_gremlin(dry_run)
+            return
+        end if
+        if (dry_run) then
+            write (error_unit, '(a)') 'fo clean: --dry-run applies only to'// &
+                ' --gremlin; nothing removed'
+            call process_exit(2)
+        end if
         if (stale_only) then
             b = detect_backend(fs_canonical_path('.'))
             call clean_stale_run(trim(b%project_dir), keep, n_removed, &
@@ -2063,6 +2083,40 @@ contains
         call command_clean('.', purge_store, text, exitcode)
         call emit_command(text, '', exitcode)
     end subroutine cmd_clean
+
+    subroutine clean_gremlin(dry_run)
+        !! `fo clean --gremlin [--dry-run]`: one Gremlin storage retention pass
+        !! now, under the same cap, grace and liveness rules as a lane's own.
+        use fo_gremlin_storage, only: gremlin_storage_policy, gremlin_storage_root, &
+            gremlin_storage_evict, gremlin_storage_report_t
+        logical, intent(in) :: dry_run
+        character(len=4096) :: root, message
+        integer(8) :: max_bytes, grace
+        integer :: ierr
+        type(gremlin_storage_report_t) :: report
+
+        call gremlin_storage_policy(max_bytes, grace)
+        call gremlin_storage_root(root, ierr, message)
+        if (ierr == 0) call gremlin_storage_evict(trim(root), max_bytes, grace, &
+            dry_run, report, ierr, message, output_unit)
+        write (output_unit, '(a,a,a,f0.1,a,f0.1,a,i0,a,i0,a,i0,a,i0,a)') &
+            'gremlin storage ', trim(root), ': ', &
+            real(report%total_bytes) / 1024.0**3, ' GiB, cap ', &
+            real(max_bytes) / 1024.0**3, ' GiB; ', report%lanes, ' lanes, ', &
+            report%generations, ' generations, ', report%tombstones, &
+            ' tombstones, ', report%kept, ' kept busy'
+        if (dry_run) then
+            write (output_unit, '(a,f0.1,a)') 'would reclaim ', &
+                real(report%reclaimed_bytes) / 1024.0**3, ' GiB (dry run)'
+        else
+            write (output_unit, '(a,f0.1,a)') 'reclaimed ', &
+                real(report%reclaimed_bytes) / 1024.0**3, ' GiB'
+        end if
+        if (ierr /= 0) then
+            write (error_unit, '(a)') 'fo clean --gremlin: '//trim(message)
+            call process_exit(1)
+        end if
+    end subroutine clean_gremlin
 
     subroutine cmd_update()
         use fo_dep_update, only: dep_update_run

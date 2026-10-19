@@ -243,6 +243,19 @@ recently used actions and deletes unreachable objects until the store is at
 while more than that is in active use. Leftover staging files of killed
 builds are removed after a day.
 
+Gremlin storage below `~/.cache/fo/gremlin` (doc/FO.md; lane directories with views,
+driver pins and logs, and retained generations) has its own cap,
+`FO_GREMLIN_MAX_SIZE` (default `8G`, same suffixes, `0` disables), with grace
+`FO_GREMLIN_GRACE` (default 86400 seconds). At most once an hour an idle lane
+owner checks the apparent size; above the cap it removes, least recently used
+first until 80 % of the cap remain, lane directories whose owner is not
+running (no `owner.lock` holder, no running recorded owner or child process)
+and generations no lease holds and no live or recently stopped lane names,
+dropping the stale pin of such a generation first. Nothing used within the
+grace period is removed, so a stopped lane stays reproducible for at least that
+long. `fo clean --gremlin` runs the same pass at once; add `--dry-run` to list
+what it would reclaim.
+
 The store is safe to share between hosts, including filesystems whose locks
 are host-local (BeeGFS) and NFS. It takes no lock for correctness: objects
 are published by exclusive link and verified by hash on every read, action

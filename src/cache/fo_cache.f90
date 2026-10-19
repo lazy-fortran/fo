@@ -24,6 +24,7 @@ module fo_cache
         cache_store_action, cache_action_mod_key
     public :: cache_store_binary, cache_restore_binary, cache_binary_matches
     public :: cache_digest, cache_file_digest, hash_mod_file
+    public :: cache_env_size
 
 contains
 
@@ -62,8 +63,8 @@ contains
         if (.not. policy_set) then
             max_bytes = 10_int64 * 1024_int64**3
             grace = 3600_int64
-            call env_size('FO_CACHE_MAX_SIZE', max_bytes, ok)
-            call env_size('FO_CACHE_GRACE', grace, ok)
+            call cache_env_size('FO_CACHE_MAX_SIZE', max_bytes, ok)
+            call cache_env_size('FO_CACHE_GRACE', grace, ok)
             call action_result_store_policy(max_bytes=max_bytes, &
                 grace_seconds=grace)
             policy_set = .true.
@@ -71,7 +72,7 @@ contains
         !$omp end critical (fo_cache_policy)
     end subroutine cache_init
 
-    subroutine env_size(name, value, ok)
+    subroutine cache_env_size(name, value, ok)
         !! Read a non-negative integer with an optional K/M/G/T (1024-based)
         !! suffix; an unset or malformed variable keeps the default.
         character(len=*), intent(in) :: name
@@ -105,6 +106,6 @@ contains
         if (number > huge(number) / scale) return
         value = number * scale
         ok = .true.
-    end subroutine env_size
+    end subroutine cache_env_size
 
 end module fo_cache

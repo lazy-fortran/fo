@@ -219,8 +219,19 @@ int fo_gremlin_session_acquire(const char *project, const char *lane,
     *lockfd = -1;
     *owner = 0;
     *pid = 0;
+    int locked = 0;
     for (int attempt = 0; attempt < 100; ++attempt) {
-        if (flock(fd, LOCK_EX | LOCK_NB) == 0) break;
+        if (flock(fd, LOCK_EX | LOCK_NB) == 0) {
+            /* An evictor renames a dead lane away while holding its lock
+               (fo_gremlin_lane_evict); then start over on a fresh directory. */
+            if (verify_owner_fd(dir, fd) == 0) { locked = 1; break; }
+            close(fd);
+            e = fo_sys_mkdirs(dir, 0700);
+            if (e) return e;
+            fd = open(lockpath, O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+            if (fd < 0) return errno;
+            continue;
+        }
         if (errno != EWOULDBLOCK && errno != EAGAIN) {
             e = errno;
             close(fd);
@@ -239,6 +250,10 @@ int fo_gremlin_session_acquire(const char *project, const char *lane,
             close(fd);
             return EAGAIN;
         }
+    }
+    if (!locked) {
+        close(fd);
+        return EAGAIN;
     }
     e = read_owner(dir, prior_id, sizeof(prior_id), &prior_pid,
                    prior_start, sizeof(prior_start));
@@ -1339,7 +1354,12 @@ static int generation_register_path(const char *root, int *lease_fd) {
     if (e == 0) {
         int lfd = lock_in(dir, "lease.lock", LOCK_SH | LOCK_NB);
         if (lfd < 0) e = -lfd;
-        else *lease_fd = lfd;
+        else {
+#if !defined(_WIN32) || defined(__CYGWIN__)
+            (void)futimens(lfd, NULL); /* last use, for storage retention */
+#endif
+            *lease_fd = lfd;
+        }
     }
     fo_sys_unlock(fd);
     return e;
@@ -1359,6 +1379,9 @@ static int generation_lease_path(const char *root, int *fdout) {
     int lfd = lock_in(dir, "lease.lock", LOCK_SH | LOCK_NB);
     fo_sys_unlock(gfd);
     if (lfd < 0) return -lfd;
+#if !defined(_WIN32) || defined(__CYGWIN__)
+    (void)futimens(lfd, NULL); /* last use, for storage retention */
+#endif
     *fdout = lfd;
     return 0;
 }
@@ -1512,4 +1535,491 @@ int fo_gremlin_generation_pin_at(const char *root, int pinned) {
 
 int fo_gremlin_generation_prune_at(const char *root) {
     return generation_prune_path(root);
+}
+
+/* ---- Storage retention: dead lanes and stale generations ----
+   The scan is read-only and advisory; every removal rechecks its guard under
+   the owning lock.  A lane is reclaimable only when no process holds its
+   owner.lock, its recorded owner and every recorded async process are not
+   running (fo_gremlin_process_matches), and nothing in it changed within the
+   grace period.  A generation is reclaimable only when no lease holds it, its
+   registration, pin and last lease are older than the grace period, and no
+   live lane status or recent terminal status names it. */
+
+enum { EVICT_LANE = 1, EVICT_GENERATION = 2, EVICT_TOMBSTONE = 3 };
+#define GREMLIN_REF_TEXT 65536
+
+struct evict_item {
+    char path[PATH_MAX];
+    int kind;
+    long long used;
+    long long bytes;
+};
+
+struct evict_scan {
+    struct evict_item *items;
+    size_t count, cap;
+    char (*refs)[65];
+    size_t nrefs, refcap;
+    long long total;
+};
+
+static long long evict_tree_bytes(const char *path, int depth) {
+    struct stat st;
+    long long total = 0;
+    if (depth > 128 || lstat(path, &st) != 0) return 0;
+    if (!S_ISDIR(st.st_mode)) return S_ISREG(st.st_mode) ? (long long)st.st_size : 0;
+    DIR *dir = opendir(path);
+    if (!dir) return 0;
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        char child[PATH_MAX];
+        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
+        if (snprintf(child, sizeof(child), "%s/%s", path, entry->d_name) >=
+            (int)sizeof(child)) continue;
+        total += evict_tree_bytes(child, depth + 1);
+    }
+    closedir(dir);
+    return total;
+}
+
+static void evict_newer(const char *path, long long *newest) {
+    struct stat st;
+    if (lstat(path, &st) == 0 && (long long)st.st_mtime > *newest)
+        *newest = (long long)st.st_mtime;
+}
+
+/* Newest mtime of the lane's entries and their direct entries: a status,
+   journal, log or view changes there while the lane is in use.  owner.lock is
+   never written and the evictor itself may create it, so it does not count. */
+static long long lane_last_use(const char *dir) {
+    long long newest = 0;
+    DIR *top = opendir(dir);
+    struct dirent *entry;
+    if (!top) return newest;
+    while ((entry = readdir(top)) != NULL) {
+        char child[PATH_MAX];
+        struct stat st;
+        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..") ||
+            !strcmp(entry->d_name, "owner.lock")) continue;
+        if (snprintf(child, sizeof(child), "%s/%s", dir, entry->d_name) >=
+            (int)sizeof(child)) continue;
+        if (lstat(child, &st) != 0) continue;
+        if ((long long)st.st_mtime > newest) newest = (long long)st.st_mtime;
+        if (!S_ISDIR(st.st_mode)) continue;
+        DIR *sub = opendir(child);
+        struct dirent *inner;
+        if (!sub) continue;
+        while ((inner = readdir(sub)) != NULL) {
+            char grandchild[PATH_MAX];
+            if (!strcmp(inner->d_name, ".") || !strcmp(inner->d_name, "..")) continue;
+            if (snprintf(grandchild, sizeof(grandchild), "%s/%s", child,
+                         inner->d_name) >= (int)sizeof(grandchild)) continue;
+            evict_newer(grandchild, &newest);
+        }
+        closedir(sub);
+    }
+    closedir(top);
+    return newest;
+}
+
+/* 1 when a process recorded in the lane's async registries may still run.
+   Record names are <pid>-<start>.<kind>; an unparsable one counts as running. */
+static int lane_async_running(const char *dir) {
+    char base[PATH_MAX];
+    DIR *registries;
+    struct dirent *entry;
+    int running = 0;
+    if (snprintf(base, sizeof(base), "%s/async-processes", dir) >= (int)sizeof(base))
+        return 1;
+    registries = opendir(base);
+    if (!registries) return errno == ENOENT ? 0 : 1;
+    while (!running && (entry = readdir(registries)) != NULL) {
+        char registry[PATH_MAX];
+        DIR *records;
+        struct dirent *record;
+        if (entry->d_name[0] == '.') continue;
+        if (snprintf(registry, sizeof(registry), "%s/%s", base, entry->d_name) >=
+            (int)sizeof(registry)) { running = 1; break; }
+        records = opendir(registry);
+        if (!records) continue;
+        while ((record = readdir(records)) != NULL) {
+            char name[256], *dash, *dot;
+            if (record->d_name[0] == '.') continue;
+            if (strlen(record->d_name) >= sizeof(name)) { running = 1; break; }
+            strcpy(name, record->d_name);
+            dash = strchr(name, '-');
+            dot = strrchr(name, '.');
+            if (!dash || !dot || dot < dash) { running = 1; break; }
+            *dash = '\0';
+            *dot = '\0';
+            if (fo_gremlin_process_matches(atoi(name), dash + 1)) { running = 1; break; }
+        }
+        closedir(records);
+    }
+    closedir(registries);
+    return running;
+}
+
+/* Probe or take the lane: returns an fd holding owner.lock exclusively when the
+   lane has no running owner or async process, -EBUSY when it is in use, or
+   another negative errno.  With create == 0 a missing lock file is no owner. */
+static int lane_claim(const char *dir, int create) {
+    char path[PATH_MAX], id[128], start[64];
+    int fd, pid = 0;
+    if (snprintf(path, sizeof(path), "%s/owner.lock", dir) >= (int)sizeof(path))
+        return -ENAMETOOLONG;
+    fd = open(path, O_RDWR | O_CLOEXEC | O_NOFOLLOW | (create ? O_CREAT : 0), 0600);
+    if (fd < 0) {
+        if (errno != ENOENT || create) return -errno;
+        fd = INT_MAX;
+    } else if (flock(fd, LOCK_EX | LOCK_NB) != 0) {
+        close(fd);
+        return -EBUSY;
+    }
+    if ((read_owner(dir, id, sizeof(id), &pid, start, sizeof(start)) == 0 &&
+         fo_gremlin_process_matches(pid, start)) || lane_async_running(dir)) {
+        if (fd != INT_MAX) fo_sys_unlock(fd);
+        return -EBUSY;
+    }
+    return fd;
+}
+
+static void lane_unclaim(int fd) {
+    if (fd >= 0 && fd != INT_MAX) fo_sys_unlock(fd);
+}
+
+static int evict_push(struct evict_scan *scan, const char *path, int kind,
+                      long long used, long long bytes) {
+    if (scan->count == scan->cap) {
+        size_t cap = scan->cap ? scan->cap * 2 : 64;
+        struct evict_item *next = realloc(scan->items, cap * sizeof(*next));
+        if (!next) return ENOMEM;
+        scan->items = next;
+        scan->cap = cap;
+    }
+    struct evict_item *item = &scan->items[scan->count++];
+    if (strlen(path) >= sizeof(item->path)) { --scan->count; return ENAMETOOLONG; }
+    strcpy(item->path, path);
+    item->kind = kind;
+    item->used = used;
+    item->bytes = bytes;
+    return 0;
+}
+
+/* Record every 64-hex generation identity a status text names. */
+static int evict_add_refs(struct evict_scan *scan, const char *path) {
+    char text[GREMLIN_REF_TEXT];
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    ssize_t n;
+    const char *key = "generation\":\"";
+    if (fd < 0) return 0;
+    n = read(fd, text, sizeof(text) - 1);
+    close(fd);
+    if (n <= 0) return 0;
+    text[n] = '\0';
+    for (char *at = strstr(text, key); at; at = strstr(at + 1, key)) {
+        char *id = at + strlen(key);
+        size_t i;
+        for (i = 0; i < 64; ++i)
+            if (!((id[i] >= '0' && id[i] <= '9') || (id[i] >= 'a' && id[i] <= 'f')))
+                break;
+        if (i != 64 || id[64] != '"') continue;
+        if (scan->nrefs == scan->refcap) {
+            size_t cap = scan->refcap ? scan->refcap * 2 : 64;
+            char (*next)[65] = realloc(scan->refs, cap * sizeof(*next));
+            if (!next) return ENOMEM;
+            scan->refs = next;
+            scan->refcap = cap;
+        }
+        memcpy(scan->refs[scan->nrefs], id, 64);
+        scan->refs[scan->nrefs++][64] = '\0';
+    }
+    return 0;
+}
+
+static int evict_referenced(const struct evict_scan *scan, const char *id) {
+    for (size_t i = 0; i < scan->nrefs; ++i)
+        if (!strcmp(scan->refs[i], id)) return 1;
+    return 0;
+}
+
+static int valid_lane_name(const char *name) {
+    if (strlen(name) != 16) return 0;
+    for (const char *p = name; *p; ++p)
+        if (!((*p >= '0' && *p <= '9') || (*p >= 'a' && *p <= 'f'))) return 0;
+    return 1;
+}
+
+static int scan_lanes(struct evict_scan *scan, const char *root, long long now,
+                      long long grace) {
+    char projects[PATH_MAX];
+    DIR *outer;
+    struct dirent *project;
+    int e = 0;
+    if (snprintf(projects, sizeof(projects), "%s/projects", root) >=
+        (int)sizeof(projects)) return ENAMETOOLONG;
+    outer = opendir(projects);
+    if (!outer) return errno == ENOENT ? 0 : errno;
+    while (e == 0 && (project = readdir(outer)) != NULL) {
+        char pdir[PATH_MAX];
+        DIR *inner;
+        struct dirent *lane;
+        if (!valid_lane_name(project->d_name)) continue;
+        if (snprintf(pdir, sizeof(pdir), "%s/%s", projects, project->d_name) >=
+            (int)sizeof(pdir)) continue;
+        inner = opendir(pdir);
+        if (!inner) continue;
+        while (e == 0 && (lane = readdir(inner)) != NULL) {
+            char dir[PATH_MAX], status[PATH_MAX];
+            struct stat st;
+            if (snprintf(dir, sizeof(dir), "%s/%s", pdir, lane->d_name) >=
+                (int)sizeof(dir)) continue;
+            if (!strncmp(lane->d_name, ".evict-", 7)) {
+                /* A tombstone outlives only an interrupted eviction. */
+                if (lstat(dir, &st) == 0 && S_ISDIR(st.st_mode) &&
+                    now - (long long)st.st_ctime >= 3600) {
+                    long long bytes = evict_tree_bytes(dir, 0);
+                    scan->total += bytes;
+                    e = evict_push(scan, dir, EVICT_TOMBSTONE, 0, bytes);
+                }
+                continue;
+            }
+            if (!valid_lane_name(lane->d_name)) continue;
+            if (lstat(dir, &st) != 0 || !S_ISDIR(st.st_mode)) continue;
+            long long bytes = evict_tree_bytes(dir, 0);
+            long long used = lane_last_use(dir);
+            scan->total += bytes;
+            int fd = lane_claim(dir, 0);
+            if (fd >= 0) lane_unclaim(fd);
+            if (fd >= 0 && now - used >= grace) {
+                e = evict_push(scan, dir, EVICT_LANE, used, bytes);
+                continue;
+            }
+            if (fd < 0 && fd != -EBUSY) continue;
+            /* A kept lane keeps the generations its status names. */
+            if (snprintf(status, sizeof(status), "%s/status", dir) <
+                (int)sizeof(status)) e = evict_add_refs(scan, status);
+        }
+        closedir(inner);
+    }
+    closedir(outer);
+    return e;
+}
+
+/* terminal/<project>/<lane>/<session>/status within the grace period. */
+static int scan_terminal_refs(struct evict_scan *scan, const char *root,
+                              long long now, long long grace) {
+    char level[3][PATH_MAX];
+    DIR *dirs[3] = {NULL, NULL, NULL};
+    struct dirent *entry;
+    int depth = 0, e = 0;
+    if (snprintf(level[0], sizeof(level[0]), "%s/terminal", root) >=
+        (int)sizeof(level[0])) return ENAMETOOLONG;
+    dirs[0] = opendir(level[0]);
+    if (!dirs[0]) return 0;
+    while (depth >= 0 && e == 0) {
+        entry = readdir(dirs[depth]);
+        if (!entry) {
+            closedir(dirs[depth]);
+            dirs[depth--] = NULL;
+            continue;
+        }
+        if (entry->d_name[0] == '.') continue;
+        char child[PATH_MAX];
+        if (snprintf(child, sizeof(child), "%s/%s", level[depth], entry->d_name) >=
+            (int)sizeof(child)) continue;
+        if (depth == 2) {
+            char status[PATH_MAX];
+            struct stat st;
+            if (snprintf(status, sizeof(status), "%s/status", child) <
+                    (int)sizeof(status) && lstat(status, &st) == 0 &&
+                now - (long long)st.st_mtime < grace)
+                e = evict_add_refs(scan, status);
+            continue;
+        }
+        DIR *next = opendir(child);
+        if (!next) continue;
+        strcpy(level[depth + 1], child);
+        dirs[++depth] = next;
+    }
+    for (int i = 0; i < 3; ++i) if (dirs[i]) closedir(dirs[i]);
+    return e;
+}
+
+/* Exclusive probe of an existing lock file without creating it: an fd, INT_MAX
+   when the file does not exist, or a negative errno (-EBUSY when held). */
+static int probe_lock(const char *dir, const char *name) {
+    char path[PATH_MAX];
+    int fd;
+    if (snprintf(path, sizeof(path), "%s/%s", dir, name) >= (int)sizeof(path))
+        return -ENAMETOOLONG;
+    fd = open(path, O_RDWR | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return errno == ENOENT ? INT_MAX : -errno;
+    if (flock(fd, LOCK_EX | LOCK_NB) != 0) {
+        close(fd);
+        return -EBUSY;
+    }
+    return fd;
+}
+
+static long long generation_last_use(const char *sidecar) {
+    static const char *names[] = {"registered", "pinned", "lease.lock",
+                                  "pending-root-release"};
+    long long newest = 0;
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i) {
+        char path[PATH_MAX];
+        if (snprintf(path, sizeof(path), "%s/%s", sidecar, names[i]) <
+            (int)sizeof(path)) evict_newer(path, &newest);
+    }
+    return newest;
+}
+
+static int scan_generations(struct evict_scan *scan, const char *root,
+                            long long now, long long grace) {
+    char base[PATH_MAX], states[PATH_MAX], resolved[PATH_MAX];
+    DIR *dir;
+    struct dirent *entry;
+    int e = 0;
+    if (snprintf(base, sizeof(base), "%s/generations-v2", root) >= (int)sizeof(base))
+        return ENAMETOOLONG;
+    if (!realpath(base, resolved)) return errno == ENOENT ? 0 : errno;
+    if (snprintf(states, sizeof(states), "%s/.state", resolved) >= (int)sizeof(states))
+        return ENAMETOOLONG;
+    dir = opendir(states);
+    if (!dir) return errno == ENOENT ? 0 : errno;
+    while (e == 0 && (entry = readdir(dir)) != NULL) {
+        char sidecar[PATH_MAX], generation[PATH_MAX], path[PATH_MAX];
+        struct stat st;
+        if (!valid_generation_id(entry->d_name)) continue;
+        if (snprintf(sidecar, sizeof(sidecar), "%s/%s", states, entry->d_name) >=
+                (int)sizeof(sidecar) ||
+            snprintf(generation, sizeof(generation), "%s/%s", resolved,
+                     entry->d_name) >= (int)sizeof(generation)) continue;
+        int exists = lstat(generation, &st) == 0 && S_ISDIR(st.st_mode);
+        long long bytes = exists ? evict_tree_bytes(generation, 0) : 0;
+        scan->total += bytes;
+        if (snprintf(path, sizeof(path), "%s/registered", sidecar) >=
+            (int)sizeof(path)) continue;
+        int registered = lstat(path, &st) == 0 && S_ISREG(st.st_mode);
+        if (snprintf(path, sizeof(path), "%s/pending-root-release", sidecar) >=
+            (int)sizeof(path)) continue;
+        int pending = lstat(path, &st) == 0 && S_ISREG(st.st_mode);
+        if (!(exists && registered) && !pending) continue;
+        long long used = generation_last_use(sidecar);
+        if (now - used < grace) continue;
+        if (evict_referenced(scan, entry->d_name)) continue;
+        /* Probe the lease under the guard, as fo_c_gremlin_retention does, so
+           a concurrent lease acquirer waits on the guard instead of failing. */
+        int gfd = probe_lock(sidecar, "guard.lock");
+        if (gfd < 0) continue;
+        int lfd = probe_lock(sidecar, "lease.lock");
+        if (lfd >= 0 && lfd != INT_MAX) fo_sys_unlock(lfd);
+        if (gfd != INT_MAX) fo_sys_unlock(gfd);
+        if (lfd < 0) continue;
+        e = evict_push(scan, generation, EVICT_GENERATION, used, bytes);
+    }
+    closedir(dir);
+    return e;
+}
+
+static int cmp_evict_item(const void *l, const void *r) {
+    const struct evict_item *a = l, *b = r;
+    if (a->used != b->used) return a->used < b->used ? -1 : 1;
+    return strcmp(a->path, b->path);
+}
+
+/* Reclaimable lanes, tombstones and generations below a Gremlin root, least
+   recently used first, at most limit of them in PATH_MAX slots.  total is the
+   apparent size of all lane directories and generations.  Read-only. */
+int fo_gremlin_evict_scan(const char *root, long long grace, char *paths,
+                          int slot_size, int limit, int *kinds, long long *used,
+                          long long *bytes, int *count, long long *total) {
+    struct evict_scan scan = {0};
+    long long now = (long long)time(NULL);
+    int e;
+    *count = 0;
+    *total = 0;
+    if (!root || !*root || slot_size < PATH_MAX || limit < 0 || grace < 0)
+        return EINVAL;
+    e = scan_lanes(&scan, root, now, grace);
+    if (e == 0) e = scan_terminal_refs(&scan, root, now, grace);
+    if (e == 0) e = scan_generations(&scan, root, now, grace);
+    if (e == 0) {
+        qsort(scan.items, scan.count, sizeof(*scan.items), cmp_evict_item);
+        for (size_t i = 0; i < scan.count && (int)i < limit; ++i) {
+            strcpy(paths + i * (size_t)slot_size, scan.items[i].path);
+            kinds[i] = scan.items[i].kind;
+            used[i] = scan.items[i].used;
+            bytes[i] = scan.items[i].bytes;
+            ++*count;
+        }
+        *total = scan.total;
+    }
+    free(scan.items);
+    free(scan.refs);
+    return e;
+}
+
+/* Remove a dead, unused lane directory.  Holding its owner.lock, recheck the
+   owner, async processes and last use, release its private execution scratch
+   like a replacement owner, then rename it to a tombstone so a concurrent
+   acquirer starts on a fresh directory (see fo_gremlin_session_acquire), and
+   delete the tombstone.  EBUSY: the lane is in use and stays. */
+int fo_gremlin_lane_evict(const char *dir, long long grace) {
+    char tomb[PATH_MAX];
+    const char *name;
+    struct stat st;
+    int fd, e;
+    if (!dir || !fo_path_is_absolute(dir) || grace < 0) return EINVAL;
+    name = strrchr(dir, '/');
+    if (!name || !valid_lane_name(name + 1)) return EINVAL;
+    if (lstat(dir, &st) != 0) return errno;
+    if (!S_ISDIR(st.st_mode) || !fo_private_path(dir)) return EPERM;
+    fd = lane_claim(dir, 1);
+    if (fd < 0) return -fd;
+    if ((long long)time(NULL) - lane_last_use(dir) < grace) {
+        lane_unclaim(fd);
+        return EBUSY;
+    }
+    e = cleanup_view_scratch(dir);
+    if (e == 0 &&
+        snprintf(tomb, sizeof(tomb), "%.*s/.evict-%s-%ld", (int)(name - dir), dir,
+                 name + 1, (long)getpid()) >= (int)sizeof(tomb)) e = ENAMETOOLONG;
+    if (e == 0 && rename(dir, tomb) != 0) e = errno;
+    lane_unclaim(fd);
+    if (e == 0 && fo_c_rm_rf(tomb) != 0) e = errno ? errno : EIO;
+    return e;
+}
+
+int fo_gremlin_tombstone_remove(const char *path) {
+    const char *name = path ? strrchr(path, '/') : NULL;
+    if (!name || strncmp(name + 1, ".evict-", 7) || !fo_path_is_absolute(path))
+        return EINVAL;
+    return fo_c_rm_rf(path) == 0 ? 0 : (errno ? errno : EIO);
+}
+
+/* Drop the pin of a generation no lease holds and nobody used within the
+   grace period.  Under the guard, an owner can only pin after leasing, so a
+   pin taken after this check is never lost; pruning follows separately and
+   rechecks lease and pin (fo_gremlin_generation_prune_at). */
+int fo_gremlin_generation_unpin_stale(const char *root, long long grace) {
+    char dir[PATH_MAX], canonical[PATH_MAX], pin[PATH_MAX];
+    int e = generation_state_path(root, dir, sizeof(dir), canonical, sizeof(canonical));
+    if (e) return e;
+    if (snprintf(pin, sizeof(pin), "%s/pinned", dir) >= (int)sizeof(pin))
+        return ENAMETOOLONG;
+    int gfd = lock_in(dir, "guard.lock", LOCK_EX | LOCK_NB);
+    if (gfd < 0) return -gfd == EAGAIN || -gfd == EWOULDBLOCK ? EBUSY : -gfd;
+    int lfd = lock_in(dir, "lease.lock", LOCK_EX | LOCK_NB);
+    if (lfd < 0) {
+        fo_sys_unlock(gfd);
+        return -lfd == EAGAIN || -lfd == EWOULDBLOCK ? EBUSY : -lfd;
+    }
+    if ((long long)time(NULL) - generation_last_use(dir) < grace) e = EBUSY;
+    else if (unlink(pin) != 0 && errno != ENOENT) e = errno;
+    else e = fo_sys_sync_dir(dir);
+    fo_sys_unlock(lfd);
+    fo_sys_unlock(gfd);
+    return e;
 }

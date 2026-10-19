@@ -50,6 +50,7 @@ module fo_gremlin_owner
         gremlin_lease_release, gremlin_generation_lease_acquire_at, &
         gremlin_generation_pin_at, gremlin_generation_prune_inactive, &
         GREMLIN_STATE_TEXT_MAX
+    use fo_gremlin_storage, only: gremlin_storage_maintain
     use fo_gremlin_status_json, only: gremlin_status_json, gremlin_simple_response, &
         gremlin_error_response
     use fo_process, only: process_reap_adopted_scope_zombies, process_set_async_scope
@@ -214,6 +215,9 @@ contains
             write (error_unit, '(a,i0)') 'Gremlin cache maintenance: ', status
             o%cache_warned = .true.
         end if
+        call gremlin_storage_maintain(status, detail)
+        if (status /= 0) write (error_unit, '(a)') &
+            'Gremlin storage retention: '//trim(detail)
         o%maintained_ms = exec_clock_ms()
         call gremlin_recover_owner_journal(project_dir, o%session, ierr, o%message)
         if (ierr /= 0) then
@@ -431,6 +435,7 @@ contains
         type(owner_t), intent(inout) :: o
         integer(int64) :: now_ms
         integer :: status
+        character(len=PATH_LEN) :: detail
 
         if (o%build%job%pid > 0 .or. running_count(o) > 0) return
         now_ms = exec_clock_ms()
@@ -449,6 +454,9 @@ contains
                 write (error_unit, '(a,i0)') 'Gremlin cache maintenance: ', status
             o%cache_warned = status /= 0
             o%maintained_ms = now_ms
+            call gremlin_storage_maintain(status, detail)
+            if (status /= 0) write (error_unit, '(a)') &
+                'Gremlin storage retention: '//trim(detail)
         end if
     end subroutine maintain_idle
 
