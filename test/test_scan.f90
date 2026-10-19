@@ -1,14 +1,16 @@
 program test_scan
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
-    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
+    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char, &
+        c_long_long
     use fo_scan, only: scan_unit_t, scan_file, scan_file_regex, scan_dir, &
         scan_dir_regex, is_slow_test, scan_dir_cached
     use fo_test_harness, only: string_list_t, process_result_t, list_add
     use fo_test_harness, only: make_scratch, join_path, make_directory, make_symlink
     use fo_test_harness, only: write_text, remove_path, current_directory
-    use fo_test_harness, only: finish_assertions
+    use fo_test_harness, only: finish_assertions, set_mtime
     use fo_test_cli, only: resolve_driver, run_fo
-    use fo_fs, only: fs_make_dir, fs_remove_file, fs_remove_tree
+    use fo_fs, only: fs_make_dir, fs_remove_file, fs_remove_tree, &
+        fs_dir_trim_lru, fs_touch_if_older
     implicit none
 
     interface
@@ -16,6 +18,11 @@ program test_scan
             import :: c_char, c_int
             character(kind=c_char), intent(in) :: path(*)
         end function c_chdir
+
+        integer(c_long_long) function c_time(t) bind(C, name='time')
+            import :: c_long_long
+            integer(c_long_long), intent(in), optional :: t
+        end function c_time
     end interface
 
     integer :: n_pass, n_fail
@@ -48,6 +55,7 @@ program test_scan
     call test_scan_dir_skips_agent_worktrees()
     call test_scan_cache_invalidates()
     call test_scan_cache_keeps_mixed_units()
+    call test_cache_dir_trim()
     call test_scan_classifies_test_by_directory()
 
     write (output_unit, '(a,i0,a,i0,a)') 'scan: ', n_pass, ' pass, ', n_fail, ' fail'
@@ -855,6 +863,68 @@ contains
         call assert(n_units == 2, 'scan cache: added source invalidates file list')
         call remove_tree(dir)
     end subroutine test_scan_cache_invalidates
+
+    subroutine test_cache_dir_trim()
+        !! The scan cache directory is bounded least recently used first:
+        !! the oldest files go down to 80 % of the cap, old temporaries go,
+        !! young temporaries stay, a stamp limits the walk rate and a touched
+        !! (recently read) file outlives older ones.
+        character(len=512) :: dir
+        character(len=1000) :: payload(1)
+        character(len=1) :: names(6) = ['a', 'b', 'c', 'd', 'e', 'f']
+        integer(c_long_long) :: now
+        integer :: i, removed
+
+        call make_tmp_path('fo_test_cache_trim', dir, '')
+        call remove_tree(dir)
+        call make_dir(dir)
+        payload(1) = repeat('x', 999)
+        now = c_time()
+        do i = 1, 5
+            call write_file(trim(dir)//'/'//names(i), payload, 1)
+            call set_mtime(trim(dir)//'/'//names(i), &
+                (now - 6000_c_long_long + 1000_c_long_long*i)*1000000000_c_long_long)
+        end do
+        call write_file(trim(dir)//'/young.tmp-1-2-3', payload, 1)
+        call write_file(trim(dir)//'/old.tmp-1-2-3', payload, 1)
+        call set_mtime(trim(dir)//'/old.tmp-1-2-3', &
+            (now - 7200_c_long_long)*1000000000_c_long_long)
+        removed = fs_dir_trim_lru(dir, 3000_c_long_long, 300)
+        call assert(removed == 4, 'cache trim: three oldest and one old temp go')
+        call assert(.not. exists(trim(dir)//'/a') .and. &
+            .not. exists(trim(dir)//'/b') .and. .not. exists(trim(dir)//'/c'), &
+            'cache trim: least recently used files are removed')
+        call assert(exists(trim(dir)//'/d') .and. exists(trim(dir)//'/e'), &
+            'cache trim: recently used files stay within 80 % of the cap')
+        call assert(.not. exists(trim(dir)//'/old.tmp-1-2-3'), &
+            'cache trim: an old temporary is removed')
+        call assert(exists(trim(dir)//'/young.tmp-1-2-3'), &
+            'cache trim: a young temporary is kept')
+
+        call write_file(trim(dir)//'/f', payload, 1)
+        call set_mtime(trim(dir)//'/f', (now - 500_c_long_long)*1000000000_c_long_long)
+        removed = fs_dir_trim_lru(dir, 1500_c_long_long, 300)
+        call assert(removed == 0 .and. exists(trim(dir)//'/d'), &
+            'cache trim: the stamp limits trimming to once per period')
+        call fs_touch_if_older(trim(dir)//'/d', 60)
+        removed = fs_dir_trim_lru(dir, 1500_c_long_long, 0)
+        call assert(removed == 2, 'cache trim: over the cap again two files go')
+        call assert(exists(trim(dir)//'/d'), &
+            'cache trim: a touched (read) file outlives older ones')
+        call assert(.not. exists(trim(dir)//'/e') .and. &
+            .not. exists(trim(dir)//'/f'), &
+            'cache trim: untouched older files go first')
+        removed = fs_dir_trim_lru(dir, 0_c_long_long, 0)
+        call assert(removed == 0 .and. exists(trim(dir)//'/d'), &
+            'cache trim: a zero cap disables trimming')
+        call remove_tree(dir)
+    end subroutine test_cache_dir_trim
+
+    logical function exists(path)
+        character(len=*), intent(in) :: path
+
+        inquire (file=path, exist=exists)
+    end function exists
 
     subroutine test_scan_cache_keeps_mixed_units()
         !! A cache hit keeps the mixed-unit flag; the regex scanner, which

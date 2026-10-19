@@ -12,7 +12,7 @@ module fo_fs
     public :: fs_collect_files, fs_collect_mod_dirs
     public :: fs_mkdir_excl, fs_sleep_ms, fs_pid_alive
     public :: fs_copy_exec, fs_rename, fs_stat, fs_identity
-    public :: fs_tree_fingerprint
+    public :: fs_tree_fingerprint, fs_touch_if_older, fs_dir_trim_lru
     public :: fs_realpath, fs_find_executable, fs_canonical_path
     public :: fs_collect_git_checkouts
     public :: fs_is_windows, fs_native_path, fs_path_root_len
@@ -76,6 +76,21 @@ module fo_fs
             import :: c_char, c_int
             character(kind=c_char), intent(in) :: src(*), dst(*)
         end function fo_c_rename_path
+
+        subroutine fo_c_touch_if_older(path, min_age) &
+                bind(C, name='fo_c_touch_if_older')
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: path(*)
+            integer(c_int), value, intent(in) :: min_age
+        end subroutine fo_c_touch_if_older
+
+        integer(c_int) function fo_c_dir_trim_lru(dir, max_bytes, period) &
+                bind(C, name='fo_c_dir_trim_lru')
+            import :: c_char, c_int, c_long_long
+            character(kind=c_char), intent(in) :: dir(*)
+            integer(c_long_long), value, intent(in) :: max_bytes
+            integer(c_int), value, intent(in) :: period
+        end function fo_c_dir_trim_lru
 
         integer(c_int) function fo_c_collect_files(root, infix, suffix, &
                 path_needle, recursive, out, cap, reject_aliases) &
@@ -424,6 +439,27 @@ contains
         rc = fo_c_stat_fingerprint(trim(path)//c_null_char, mtime_ns, size)
         ok = (rc == 0)
     end subroutine fs_stat
+
+    subroutine fs_touch_if_older(path, min_age)
+        !! Set the mtime of a cache file to now when it is older than min_age
+        !! seconds, marking it as recently used for fs_dir_trim_lru.
+        character(len=*), intent(in) :: path
+        integer, intent(in) :: min_age
+
+        call fo_c_touch_if_older(trim(path)//c_null_char, int(min_age, c_int))
+    end subroutine fs_touch_if_older
+
+    integer function fs_dir_trim_lru(dir, max_bytes, period) result(removed)
+        !! Bound a flat cache directory to max_bytes (least recently used
+        !! files go first, down to 80 %), at most once per period seconds.
+        !! Returns the number of removed files or a negative errno.
+        character(len=*), intent(in) :: dir
+        integer(c_long_long), intent(in) :: max_bytes
+        integer, intent(in) :: period
+
+        removed = int(fo_c_dir_trim_lru(trim(dir)//c_null_char, max_bytes, &
+            int(period, c_int)))
+    end function fs_dir_trim_lru
 
     subroutine fs_identity(path, device, inode, ok)
         !! Return the filesystem device and inode for a path.

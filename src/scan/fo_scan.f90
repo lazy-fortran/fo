@@ -9,6 +9,7 @@ module fo_scan
         compiler_frontend_result_t, compile_frontend_from_file, &
         query_program_units, query_program_unit, query_use_statements, &
         program_unit_query_t, use_statement_query_t, INPUT_MODE_STANDARD
+    use fx_hash, only: sha256_file
     use fx_string, only: to_lower
     implicit none
     private
@@ -148,7 +149,7 @@ contains
             close (funit)
         end if
         if (.not. directives .or. n_args < 1) then
-            call scan_file(filename, unit_info, ierr, allow_regex_fallback)
+            call scan_content(filename, unit_info, ierr, allow_regex_fallback)
             return
         end if
         call make_tmpfile('fo_cpp', scratch)
@@ -166,10 +167,50 @@ contains
             ierr = 1
             return
         end if
-        call scan_file(scratch, unit_info, ierr, allow_regex_fallback)
+        call scan_content(scratch, unit_info, ierr, allow_regex_fallback)
         call delete_tmpfile(scratch)
         unit_info%filename = filename
     end subroutine scan_file_preprocessed
+
+    subroutine scan_content(filename, unit_info, ierr, allow_regex_fallback)
+        !! Cache the parser's dependency facts by exact compiler-visible bytes.
+        !! Preprocessing still runs first, so changed includes and definitions
+        !! invalidate the scan even in a relocated tree. Reuse the bounded scan
+        !! store and its full-key check; filenames/classification are local.
+        character(len=*), intent(in) :: filename
+        type(scan_unit_t), intent(out) :: unit_info
+        integer, intent(out) :: ierr
+        logical, intent(in), optional :: allow_regex_fallback
+        character(len=64) :: digest, after
+        character(len=:), allocatable :: key
+        type(scan_unit_t), allocatable :: cached(:)
+        logical :: hit
+        integer :: status, dot
+
+        call sha256_file(filename, digest, status)
+        key = ''
+        if (status == 0) then
+            key = '/content-v1/'//digest
+            dot = index(filename, '.', back=.true.)
+            if (dot > index(filename, '/', back=.true.)) &
+                key = key//filename(dot:)
+            if (regex_fallback_policy(allow_regex_fallback)) key = key//'/fallback'
+            call scan_cache_load_trusted(key, cached, hit)
+            if (hit .and. size(cached) == 1) then
+                unit_info = cached(1)
+                unit_info%filename = filename
+                unit_info%is_test = is_test_path(filename)
+                ierr = 0
+                return
+            end if
+        end if
+        call scan_file(filename, unit_info, ierr, allow_regex_fallback)
+        if (ierr == 0 .and. len(key) > 0) then
+            call sha256_file(filename, after, status)
+            if (status == 0 .and. after == digest) &
+                call scan_cache_save(key, [filename], [unit_info])
+        end if
+    end subroutine scan_content
 
     subroutine scan_file_ast(filename, unit_info, ierr, diagnostic)
         character(len=*), intent(in) :: filename

@@ -470,7 +470,7 @@ contains
         case ('exec', 'run')
             call print_exec_usage()
         case ('clean')
-            write (output_unit, '(a)') 'usage: fo clean [--cache|--all|--stale] [--keep N]'
+            write (output_unit, '(a)') 'usage: fo clean [--cache|--all|--stale|--gremlin] [--keep N]'
             write (output_unit, '(a)') '  --help, -h  show this help without deleting files'
         case ('check')
             write (output_unit, '(a)') &
@@ -1984,7 +1984,7 @@ contains
         character(len=512) :: arg
         integer :: i, n_removed, exitcode, keep
         integer(8) :: freed_bytes
-        logical :: purge_store, stale_only, stale_blocked
+        logical :: purge_store, stale_only, stale_blocked, gremlin_only
         character(len=:), allocatable :: text
         logical :: want_help
 
@@ -2014,6 +2014,8 @@ contains
                 '  --cache      also purge the shared content-addressed store'// &
                 ' (cold-starts every project)'
             write (output_unit, '(a)') &
+                '  --gremlin    evict old inactive views under the Gremlin budget'
+            write (output_unit, '(a)') &
                 '  --all        same as --cache'
             write (output_unit, '(a)') &
                 '  -h, --help   print this text and exit without deleting'// &
@@ -2027,12 +2029,14 @@ contains
         ! Purge it only when explicitly asked.
         purge_store = .false.
         stale_only = .false.
+        gremlin_only = .false.
         keep = CLEAN_STALE_DEFAULT_KEEP
         do i = 2, command_argument_count()
             call get_command_argument(i, arg)
             if (trim(arg) == '--cache' .or. trim(arg) == '--all') &
                 purge_store = .true.
             if (trim(arg) == '--stale') stale_only = .true.
+            if (trim(arg) == '--gremlin') gremlin_only = .true.
             if (trim(arg) == '--keep') then
                 call get_command_argument(i + 1, arg)
                 read (arg, *, iostat=n_removed) keep
@@ -2044,6 +2048,10 @@ contains
         ! last build still references, delete the generations a content-addressed
         ! tree can never revisit. ffc carried 6.5 GB of unreachable link archives
         ! and stale compiler profile dirs this way.
+        if (gremlin_only) then
+            call clean_gremlin()
+            return
+        end if
         if (stale_only) then
             b = detect_backend(fs_canonical_path('.'))
             call clean_stale_run(trim(b%project_dir), keep, n_removed, &
@@ -2063,6 +2071,26 @@ contains
         call command_clean('.', purge_store, text, exitcode)
         call emit_command(text, '', exitcode)
     end subroutine cmd_clean
+
+    subroutine clean_gremlin()
+        use fo_gremlin_retention, only: gremlin_trim_cache
+        use fo_gremlin_context, only: common_generation_cas_root
+        character(len=4096) :: root, message
+        integer :: ierr, removed
+
+        call common_generation_cas_root(root, ierr, message)
+        if (ierr == 0) then
+            ! The trim service derives the common state root from a lane path.
+            removed = gremlin_trim_cache('', trim(root)// &
+                '/gremlin/projects/_/_', period=0)
+            if (removed < 0) ierr = -removed
+        end if
+        if (ierr /= 0) then
+            write (error_unit, '(a,i0)') 'fo clean --gremlin: eviction error ', ierr
+            call process_exit(1)
+        end if
+        write (output_unit, '(a,i0)') 'inactive Gremlin views removed: ', removed
+    end subroutine clean_gremlin
 
     subroutine cmd_update()
         use fo_dep_update, only: dep_update_run

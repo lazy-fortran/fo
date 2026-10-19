@@ -226,15 +226,36 @@ contains
         character(len=*), intent(in) :: project_dir, output, log_file
         character(len=512), intent(in) :: objects(:)
         integer, intent(out) :: exitcode
-        character(len=512) :: archive
+        character(len=512) :: archive, member
+        character(len=HASH_LEN), allocatable :: parts(:)
+        character(len=HASH_LEN) :: content_key, action
+        character(len=512) :: archive_parts(3)
+        type(cache_t) :: cache
+        integer :: i, status
         logical :: valid
 
-        call archive_has_expected_members(project_dir, output, objects, &
-            size(objects), valid)
+        ! Include both member names and bytes, in order. The shared archive
+        ! producer records only its independently validated private stage.
+        allocate (parts(2 * size(objects)))
+        do i = 1, size(objects)
+            call archive_member_name(objects(i), member)
+            call text_digest(trim(member), parts(2*i - 1))
+            call cache_file_digest(objects(i), parts(2*i))
+        end do
+        content_key = cache_digest(parts, size(parts))
+        archive_parts(1) = 'fo-archive-2:ZERO_AR_DATE=1'
+        archive_parts(2) = content_key
+        archive_parts(3) = compiler_tool_key('ar')
+        action = cache_digest(archive_parts, 3)
+        call cache_init(cache, status)
+        valid = .false.
+        if (status == 0) call cache_binary_matches(cache, action, output, valid)
+        if (.not. valid .and. status == 0) &
+            call cache_restore_binary(cache, action, output, valid)
         exitcode = 0
         if (valid) return
         call archive_objects(project_dir, objects, size(objects), archive, &
-            log_file, exitcode)
+            log_file, exitcode, content_key)
         if (exitcode /= 0) return
         exitcode = fs_rename(trim(archive), output)
         call remove_ephemeral_link_artifact(archive)
@@ -467,12 +488,15 @@ contains
         end if
         call location_free_tokens(act%argv, normalized, debug_info)
         location = source(:n_source)
-        relocatable = .false.
-        if (n_source > len(cwd) + 1) then
-            if (source(1:len(cwd) + 1) == cwd//'/') relocatable = cache_relocatable()
-        end if
+        relocatable = cache_relocatable()
         if (relocatable) then
-            location = source(len(cwd) + 2:n_source)
+            if (n_source > len(cwd) + 1) then
+                if (source(1:len(cwd) + 1) == cwd//'/') &
+                    location = source(len(cwd) + 2:n_source)
+            end if
+            ! External dependencies retain their exact source argument, but
+            ! their debug compilation directory is also mapped. Otherwise a
+            ! shared external source misses solely because its consumer moved.
             ! The debug producer string would record absolute -J/-I options.
             if (debug_info) then
                 tokens = tokens//nl//'-fdebug-prefix-map='//cwd//'=.'//nl// &

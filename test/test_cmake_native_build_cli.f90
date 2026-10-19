@@ -37,7 +37,7 @@ program test_cmake_native_build_cli
     implicit none
 
     character(:), allocatable :: driver, scratch, cache, fortran, shim_dir
-    character(:), allocatable :: cmake_log, compile_log
+    character(:), allocatable :: cmake_log, compile_log, ar_read_log
     character(len=1), parameter :: nl = achar(10)
 
     call fake_tool_dispatch()
@@ -47,6 +47,7 @@ program test_cmake_native_build_cli
     shim_dir = join_path(scratch, 'shim')
     cmake_log = join_path(scratch, 'cmake-build.log')
     compile_log = join_path(scratch, 'compile.log')
+    ar_read_log = join_path(scratch, 'ar-read.log')
     fortran = find_tool('gfortran')
     call assert_true(len(fortran) > 0, 'a gfortran is on PATH')
     if (len(fortran) == 0) call finish_assertions()
@@ -58,6 +59,7 @@ program test_cmake_native_build_cli
     call duplicate_modules_are_delegated()
     call interface_cutoff()
     call relocated_tree_reuses_results()
+    call shared_dependency_relocation()
 
     call remove_tree(scratch)
     call finish_assertions()
@@ -84,6 +86,9 @@ contains
             'if $ARG1 = --build append $FO_TEST_CMAKE_LOG " $ARGS\n"' // nl // &
             'if $ARG1 = --build if ${FO_TEST_CMAKE_PASS:-} = "" exit 97' // nl // &
             'exec $FO_TEST_REAL_CMAKE $@')
+        call install_fake_tool(join_path(shim_dir, 'ar'), &
+            'if $ARG1 = p append $FO_TEST_AR_READ_LOG "read member\n"' // nl // &
+            'exec $FO_TEST_REAL_AR $@')
         call install_fake_tool(join_path(shim_dir, 'gfortran-count'), &
             'if " $ARGS " ~ " -c " if ${FO_TEST_FC_LOG:-} != "" append $FO_TEST_FC_LOG ' // &
             '"COMPILE $LAST\n"' // nl // 'exec $FO_TEST_REAL_FC $@')
@@ -100,6 +105,8 @@ contains
         call list_add(environment, 'PATH='//shim_dir//':'//environment_value('PATH'))
         call list_add(environment, 'FO_TEST_REAL_CMAKE='//find_tool('cmake'))
         call list_add(environment, 'FO_TEST_CMAKE_LOG='//cmake_log)
+        call list_add(environment, 'FO_TEST_REAL_AR='//find_tool('ar'))
+        call list_add(environment, 'FO_TEST_AR_READ_LOG='//ar_read_log)
     end function fo_environment
 
     function line_count(text, fragment) result(n)
@@ -323,10 +330,20 @@ contains
         call assert_process_ok(observed, 'rebuild after the Fortran include edit')
         call assert_equal_string(run_text(join_path(source, 'build/app')), &
             'mixed: 234 7'//nl, 'the include edit changed the Fortran object')
+        call remove_path(ar_read_log)
         call run_fo(driver, args, source, cache, observed, environment)
         call assert_process_ok(observed, 'warm rebuild')
+        call assert_true(.not. file_exists(ar_read_log), &
+            'a warm archive reuses validated bytes without spawning ar per member')
         call assert_equal_string(run_text(join_path(source, 'build/app')), &
             'mixed: 234 7'//nl, 'warm rebuild keeps the output')
+
+        ! A warm receipt must not accept corrupted archive bytes.
+        call write_text(join_path(source, 'build/libcore.a'), 'broken archive')
+        call run_fo(driver, args, source, cache, observed, environment)
+        call assert_process_ok(observed, 'rebuild repairs a corrupted native archive')
+        call assert_equal_string(run_text(join_path(source, 'build/app')), &
+            'mixed: 234 7'//nl, 'repaired archive preserves the compiled result')
 
         ! A fresh build tree has no dependency files: the C action is keyed
         ! by the headers a preprocessing scan lists, so it is restored too.
@@ -593,6 +610,51 @@ contains
         n = line_count(text, 'parts.f90') + line_count(text, 'low.f90') + &
             line_count(text, 'top.f90')
     end function project_compiles
+
+    subroutine shared_dependency_relocation()
+        character(:), allocatable :: first, second, shared
+        type(string_list_t) :: args, environment
+        type(process_result_t) :: observed
+        integer :: i
+        character(:), allocatable :: tree
+
+        first = join_path(scratch, 'external-consumer-a')
+        second = join_path(scratch, 'external-consumer-longer-b')
+        shared = join_path(scratch, 'external/parts.f90')
+        call write_lines(shared, [character(len=60) :: &
+            'module parts_mod', 'contains', 'integer function part()', &
+            'part = 1', 'end function', 'end module'])
+        do i = 1, 2
+            tree = first
+            if (i == 2) tree = second
+            call write_lines(tree//'/CMakeLists.txt', [character(len=1024) :: &
+                'cmake_minimum_required(VERSION 3.20)', 'project(external Fortran)', &
+                'set(CMAKE_Fortran_FLAGS "-O1 -g")', &
+                'add_executable(top top.f90 "'//shared//'")'])
+            call write_lines(tree//'/top.f90', [character(len=60) :: &
+                'program top', 'use parts_mod', 'print "(i0)", part()', 'end program'])
+        end do
+        environment = fo_environment(.false., .false.)
+        call list_add(environment, 'FO_CACHE_RELOCATABLE=1')
+        call list_add(environment, 'FO_CMAKE_ARGS=-DCMAKE_Fortran_COMPILER='// &
+            join_path(shim_dir, 'gfortran-count'))
+        call list_add(environment, 'FO_TEST_REAL_FC='//fortran)
+        call list_add(environment, 'FO_TEST_FC_LOG='//compile_log)
+        call list_add(args, 'build')
+        call remove_path(compile_log)
+        call run_fo(driver, args, first, cache, observed, environment)
+        call assert_process_ok(observed, 'build a consumer of a shared external source')
+        call assert_equal_integer(project_compiles(), 2, 'two cold external actions')
+        call remove_path(compile_log)
+        call run_fo(driver, args, second, cache, observed, environment)
+        call assert_process_ok(observed, 'build the relocated external consumer')
+        call assert_equal_integer(project_compiles(), 0, &
+            'a shared external source reuses debug objects after its consumer moves')
+        call assert_equal_string(run_text(second//'/build/top'), '1'//nl, &
+            'relocated external consumer keeps its result')
+        call assert_equal_string(read_text(first//'/build/top'), &
+            read_text(second//'/build/top'), 'external debug executables are identical')
+    end subroutine shared_dependency_relocation
 
     subroutine relocated_tree_reuses_results()
         !! A copy of a project at another path reuses every compile result

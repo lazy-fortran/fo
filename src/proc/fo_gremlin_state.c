@@ -61,9 +61,13 @@ static int cleanup_view_scratch(const char *state_dir) {
             strncmp(entry->d_name, ".building-execution-", 20) != 0) continue;
         if (snprintf(view, sizeof(view), "%s/%s", views, entry->d_name) >=
             (int)sizeof(view)) { e = ENAMETOOLONG; break; }
-        if (lstat(view, &st) != 0) { e = errno; break; }
+        if (lstat(view, &st) != 0) {
+            if (errno == ENOENT) continue; /* an inactive-view sweep won */
+            e = errno; break;
+        }
         if (!S_ISDIR(st.st_mode) || !fo_private_path(view)) { e = EPERM; break; }
         e = fo_c_execution_scratch_release(view);
+        if (e == ENOENT) { e = 0; continue; }
         if (e != 0) break;
     }
     if (closedir(directory) != 0 && e == 0) e = errno;
@@ -455,12 +459,26 @@ int fo_gremlin_session_request_stop(const char *project, const char *lane,
     return atomic_write_file(dir, "stop.request", session, strlen(session));
 }
 
-int fo_gremlin_session_stop_requested(const char *dir, const char *session) {
+int fo_gremlin_session_stop_requested(const char *dir, const char *session,
+                                      int lockfd) {
     char path[PATH_MAX], value[128];
-    struct stat gone;
+    struct stat gone, held;
     /* A lane whose state directory vanished has nothing left to own: its
        owner is asked to stop exactly as if a stop request had been written. */
     if (stat(dir, &gone) != 0 && errno == ENOENT) return 1;
+    /* So is a lane whose directory was deleted and recreated, e.g. by a
+       payload's mkdir -p into its execution view: the path no longer holds
+       the owner lock this owner took. */
+    if (lockfd >= 0) {
+        if (snprintf(path, sizeof(path), "%s/owner.lock", dir) >= (int)sizeof(path))
+            return -ENAMETOOLONG;
+        if (fstat(lockfd, &held) != 0) return -errno;
+        if (stat(path, &gone) != 0) {
+            if (errno == ENOENT || errno == ENOTDIR) return 1;
+            return -errno;
+        }
+        if (gone.st_dev != held.st_dev || gone.st_ino != held.st_ino) return 1;
+    }
     /* A task-owned lane stops when the client that created it is gone. */
     if (task_path(dir, path, sizeof(path)) == 0) {
         int tfd = open(path, O_RDONLY | O_CLOEXEC);
@@ -750,7 +768,8 @@ int fo_gremlin_admission_is_guardian(int pid, const char *start) {
 }
 
 #if !defined(_WIN32) || defined(__CYGWIN__)
-static int admission_guard_close_fds(const int *fds, int weight, int ack, int marker) {
+static int admission_guard_close_fds(const int *fds, int weight, int ack, int marker,
+                                     int state_fd) {
 #ifdef __linux__
     DIR *directory = opendir("/proc/self/fd");
 #else
@@ -762,7 +781,8 @@ static int admission_guard_close_fds(const int *fds, int weight, int ack, int ma
         char *end;
         long value = strtol(entry->d_name, &end, 10);
         if (*end || value < 0 || value > INT_MAX) continue;
-        int keep = value == dirfd(directory) || value == ack || value == marker;
+        int keep = value == dirfd(directory) || value == ack || value == marker ||
+                   value == state_fd;
         for (int i = 0; i < weight; ++i) if (value == fds[i]) keep = 1;
         if (!keep) close((int)value);
     }
@@ -792,9 +812,22 @@ static int admission_guard_start(const char *scope, const int *fds, int weight,
         strcpy(state, state_hint);
     if (snprintf(authority, sizeof(authority), "%s/authority", scope)
         >= (int)sizeof(authority)) return ENAMETOOLONG;
-    if (pipe(handshake) != 0) return errno;
+    /* The held directory pins the lane state's identity: a state directory
+       deleted and recreated at the same path (e.g. by a payload's mkdir -p)
+       is not the state the owner left behind. */
+    int state_fd = *state ? open(state, O_RDONLY | O_DIRECTORY | O_CLOEXEC) : -1;
+    if (pipe(handshake) != 0) {
+        e = errno;
+        if (state_fd >= 0) close(state_fd);
+        return e;
+    }
     pid_t pid = fork();
-    if (pid < 0) { e = errno; close(handshake[0]); close(handshake[1]); return e; }
+    if (pid < 0) {
+        e = errno;
+        close(handshake[0]); close(handshake[1]);
+        if (state_fd >= 0) close(state_fd);
+        return e;
+    }
     if (pid == 0) {
         /* Ordinary owner cancellation must drain payloads before dropping their
            reservation. The guardian is capacity bookkeeping, not payload. */
@@ -812,7 +845,8 @@ static int admission_guard_start(const char *scope, const int *fds, int weight,
             if (marker < 0) e = errno;
             else if (flock(marker, LOCK_EX | LOCK_NB) != 0) e = errno;
         }
-        if (e == 0) e = admission_guard_close_fds(fds, weight, handshake[1], marker);
+        if (e == 0) e = admission_guard_close_fds(fds, weight, handshake[1], marker,
+                                                  state_fd);
         (void)write(handshake[1], &e, sizeof(e)); close(handshake[1]);
         if (e) {
             if (marker >= 0) { close(marker); unlink(marker_path); }
@@ -830,9 +864,12 @@ static int admission_guard_start(const char *scope, const int *fds, int weight,
             }
             int active = alive && observed == 0;
             /* A deleted lane state directory holds no payload to drain. */
-            struct stat state_stat;
-            int state_gone = *state && lstat(state, &state_stat) != 0 &&
-                             errno == ENOENT;
+            struct stat state_stat, held_stat;
+            int state_gone = 0;
+            if (*state && lstat(state, &state_stat) != 0) state_gone = errno == ENOENT;
+            else if (*state && state_fd >= 0 && fstat(state_fd, &held_stat) == 0)
+                state_gone = state_stat.st_dev != held_stat.st_dev ||
+                             state_stat.st_ino != held_stat.st_ino;
             int payload_drained = alive || !*state || state_gone ||
                 fo_c_recover_async_scope(state, (int)owner, owner_start) == 0;
             if (!active && payload_drained) {
@@ -861,6 +898,7 @@ static int admission_guard_start(const char *scope, const int *fds, int weight,
         _exit(0);
     }
     close(handshake[1]);
+    if (state_fd >= 0) close(state_fd);
     ssize_t n;
     do { n = read(handshake[0], &e, sizeof(e)); } while (n < 0 && errno == EINTR);
     close(handshake[0]);

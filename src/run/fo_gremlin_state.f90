@@ -128,10 +128,11 @@ module fo_gremlin_state
             integer(c_int) :: ierr
         end function c_session_request_stop
 
-        function c_session_stop_requested(dir, session) &
+        function c_session_stop_requested(dir, session, lockfd) &
                 bind(C, name='fo_gremlin_session_stop_requested') result(requested)
             import :: c_char, c_int
             character(kind=c_char), intent(in) :: dir(*), session(*)
+            integer(c_int), value :: lockfd
             integer(c_int) :: requested
         end function c_session_stop_requested
 
@@ -465,7 +466,7 @@ contains
             return
         end if
         result = c_session_stop_requested(session%state_dir//c_null_char, &
-            session%session_id//c_null_char)
+            session%session_id//c_null_char, int(session%lock_fd, c_int))
         if (result < 0) then
             ierr = -int(result)
         else

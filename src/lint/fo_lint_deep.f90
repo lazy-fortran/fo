@@ -203,6 +203,14 @@ contains
             return
         end if
         call action_result_read_lookup(store, read, entries, result_id, status)
+        ! Lock-free acquisition creates a read handle without looking up the
+        ! record. A missing/evicted action is observed by lookup, not acquire.
+        if (status == ACTION_RESULT_MISSING) then
+            call action_result_read_release(store, read, release_status)
+            if (release_status /= ACTION_RESULT_OK) &
+                error = 'fo lint --deep: cannot release missing diagnostics'
+            return
+        end if
         if (status == ACTION_RESULT_OK) then
             if (size(entries) /= 1) status = -1
         end if

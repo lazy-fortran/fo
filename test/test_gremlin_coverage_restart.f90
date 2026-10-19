@@ -7,7 +7,8 @@ program test_gremlin_coverage_restart
     use fo_test_gremlin_oracle, only: gremlin_setup, gremlin_json, gremlin_wait_ms
     use fo_test_gremlin_oracle, only: gremlin_gate_create, gremlin_gate_release
     use fo_test_gremlin_oracle, only: gremlin_stop_lane
-    use fo_test_gremlin_oracle, only: gremlin_field
+    use fo_test_gremlin_oracle, only: gremlin_field, gremlin_owner_pid
+    use fo_test_gremlin_oracle, only: gremlin_process_running
     use fo_test_gremlin_oracle, only: gremlin_write_case
     use fo_test_process_identity, only: mcp_process_start_time, mcp_kill_owned_tree
     use fo_test_process_identity, only: mcp_process_identity_running
@@ -442,44 +443,63 @@ contains
         call assert_true(process%exit_code == 0, 'status reads the selected owner session')
     end subroutine query_status
 
-    subroutine wait_for_progress(markers, pid_path, timeout_ms, reached, owner_id)
-        integer, intent(in) :: markers, timeout_ms
+    subroutine wait_for_progress(markers, pid_path, stall_ms, reached, owner_id)
+        !! Wait until `markers` cases have run and the blocked child published
+        !! pid_path (or, without one, the epoch reports full coverage). The
+        !! wait follows the lane rather than a wall-clock guess: it fails once
+        !! the owner exits, or when neither the marker count nor the published
+        !! lane state changes for stall_ms. A starting or building lane is
+        !! progressing: its cold build of every case scales with host load and
+        !! is bounded by the test's wall timeout instead.
+        integer, intent(in) :: markers, stall_ms
         character(len=*), intent(in) :: pid_path
         logical, intent(out) :: reached
         character(len=*), intent(in) :: owner_id
-        integer :: elapsed
+        integer :: owner_pid, count, seen_count
+        integer(c_int64_t) :: now, rate, last_progress, last_status
         type(json_value_t) :: snapshot, current_coverage, current_completed
-        logical :: full_coverage
+        character(:), allocatable :: lane_state, seen_state
 
         reached = .false.
-        elapsed = 0
-        do while (elapsed < timeout_ms)
-            if (file_exists(marker)) then
-                if (line_count(read_text(marker)) >= markers) then
-                    if (len_trim(pid_path) == 0) then
-                        if (markers < n_cases) then
-                            reached = .true.
-                            return
-                        end if
-                        if (mod(elapsed, 2000) == 0) then
-                            call query_status(owner_id, snapshot)
-                            current_coverage = json_member(snapshot, 'coverage')
-                            current_completed = json_member(current_coverage, 'full_coverage')
-                            full_coverage = json_boolean_value(current_completed)
-                            if (full_coverage) then
-                                reached = .true.
-                                return
-                            end if
-                        end if
-                    end if
-                    if (file_exists(pid_path)) then
-                        reached = .true.
-                        return
-                    end if
+        owner_pid = gremlin_owner_pid(owner_id)
+        seen_count = -1
+        seen_state = ''
+        call system_clock(last_progress, rate)
+        last_status = last_progress - 2_c_int64_t*rate
+        do
+            count = 0
+            if (file_exists(marker)) count = line_count(read_text(marker))
+            if (count >= markers) then
+                if (len_trim(pid_path) > 0) then
+                    if (file_exists(pid_path)) reached = .true.
+                else if (markers < n_cases) then
+                    reached = .true.
                 end if
+                if (reached) return
             end if
+            call system_clock(now)
+            if (count /= seen_count) then
+                seen_count = count
+                last_progress = now
+            end if
+            if (now - last_status >= 2_c_int64_t*rate) then
+                last_status = now
+                call query_status(owner_id, snapshot)
+                if (count >= markers .and. len_trim(pid_path) == 0) then
+                    current_coverage = json_member(snapshot, 'coverage')
+                    current_completed = json_member(current_coverage, 'full_coverage')
+                    reached = json_boolean_value(current_completed)
+                    if (reached) return
+                end if
+                lane_state = gremlin_field(snapshot, 'state')
+                if (lane_state /= seen_state .or. lane_state == 'starting' .or. &
+                    lane_state == 'building') last_progress = now
+                seen_state = lane_state
+            end if
+            if (.not. gremlin_process_running(owner_pid)) return
+            if ((now - last_progress)*1000_c_int64_t > int(stall_ms, c_int64_t)*rate) &
+                return
             call gremlin_wait_ms(50)
-            elapsed = elapsed + 50
         end do
     end subroutine wait_for_progress
 

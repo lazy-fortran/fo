@@ -11,6 +11,8 @@
 #include <dirent.h>
 #include <errno.h>
 #include <limits.h>
+#include <fcntl.h>
+#include <time.h>
 
 #include "fo_sys.h"
 
@@ -734,4 +736,110 @@ int fo_c_append_file(const char *src, const char *dst) {
     fclose(in);
     fclose(out);
     return 0;
+}
+
+/* Mark a cache file as used: set its mtime to now when it is older than
+   min_age seconds, so trimming keeps recently read entries. Failure is
+   harmless (the entry only ages). */
+void fo_c_touch_if_older(const char *path, int min_age) {
+#if !defined(_WIN32) || defined(__CYGWIN__)
+    struct stat st;
+    time_t now = time(NULL);
+    if (!fo_has(path) || stat(path, &st) != 0) return;
+    if (st.st_mtime <= now && now - st.st_mtime < min_age) return;
+    (void)utimensat(AT_FDCWD, path, NULL, 0);
+#else
+    (void)path; (void)min_age;
+#endif
+}
+
+struct fo_trim_entry {
+    time_t mtime;
+    long long bytes;
+    char name[256];
+};
+
+static int fo_trim_older(const void *left, const void *right) {
+    const struct fo_trim_entry *a = left, *b = right;
+    if (a->mtime != b->mtime) return a->mtime < b->mtime ? -1 : 1;
+    return strcmp(a->name, b->name);
+}
+
+/* Bound a flat cache directory of regular files. Temporaries ("*.tmp-*")
+   older than an hour are removed; when the remaining files exceed max_bytes,
+   the least recently used (oldest mtime) go until at most 80 % remain. Runs
+   at most once per period seconds, gated by the mtime of <dir>/.trim-stamp.
+   No lock: concurrent trimmers and writers only lose cache entries, and a
+   reader of a removed file keeps its open descriptor or sees a read error,
+   which every caller treats as a miss. Returns the number of removed files,
+   or -errno. */
+int fo_c_dir_trim_lru(const char *dir, long long max_bytes, int period) {
+    char path[PATH_MAX];
+    struct stat st;
+    struct fo_trim_entry *entries = NULL;
+    size_t count = 0, capacity = 0, i;
+    long long total = 0, target;
+    int removed = 0;
+    time_t now = time(NULL);
+    FILE *stamp;
+    DIR *stream;
+    struct dirent *entry;
+
+    if (!fo_has(dir) || max_bytes <= 0) return 0;
+    if (snprintf(path, sizeof(path), "%s/.trim-stamp", dir) >= (int)sizeof(path))
+        return -ENAMETOOLONG;
+    if (stat(path, &st) == 0 && st.st_mtime <= now &&
+        now - st.st_mtime < period) return 0;
+    stamp = fopen(path, "ab");
+    if (!stamp) return -errno;
+    fclose(stamp);
+#if !defined(_WIN32) || defined(__CYGWIN__)
+    (void)utimensat(AT_FDCWD, path, NULL, 0);
+#endif
+    stream = opendir(dir);
+    if (!stream) return -errno;
+    while ((entry = readdir(stream)) != NULL) {
+        size_t n = strlen(entry->d_name);
+        if (entry->d_name[0] == '.' || n >= sizeof(entries->name)) continue;
+        if (snprintf(path, sizeof(path), "%s/%s", dir, entry->d_name) >=
+            (int)sizeof(path)) continue;
+        if (lstat(path, &st) != 0 || !S_ISREG(st.st_mode)) continue;
+        if (strstr(entry->d_name, ".tmp-") != NULL) {
+            if (st.st_mtime <= now - 3600 && unlink(path) == 0) ++removed;
+            continue;
+        }
+        if (count == capacity) {
+            size_t grown = capacity ? 2 * capacity : 256;
+            struct fo_trim_entry *more = realloc(entries, grown * sizeof(*more));
+            if (!more) { closedir(stream); free(entries); return -ENOMEM; }
+            entries = more;
+            capacity = grown;
+        }
+        entries[count].mtime = st.st_mtime;
+        entries[count].bytes = (long long)st.st_size;
+        memcpy(entries[count].name, entry->d_name, n + 1);
+        total += entries[count].bytes;
+        ++count;
+    }
+    closedir(stream);
+    if (total > max_bytes) {
+        qsort(entries, count, sizeof(*entries), fo_trim_older);
+        target = max_bytes / 5 * 4;
+        for (i = 0; i < count && total > target; ++i) {
+            if (snprintf(path, sizeof(path), "%s/%s", dir, entries[i].name) >=
+                (int)sizeof(path)) continue;
+            if (unlink(path) == 0) {
+                ++removed;
+                total -= entries[i].bytes;
+            } else if (errno == ENOENT) {
+                total -= entries[i].bytes;
+            } else {
+                int e = errno;
+                free(entries);
+                return -e;
+            }
+        }
+    }
+    free(entries);
+    return removed;
 }

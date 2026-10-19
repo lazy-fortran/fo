@@ -2,9 +2,11 @@ program test_gremlin_state_loss
     !! A lane never outlives its state: deleting the state directory of a
     !! running owner, queued behind a full admission domain or admitted, makes
     !! that owner exit within a bound and its admission guardian release the
-    !! host work slots.
+    !! host work slots. A directory recreated at the same path (as a payload's
+    !! mkdir -p into its execution view does) is not the deleted state.
     use fo_test_harness, only: string_list_t, process_result_t, list_add
     use fo_test_harness, only: write_text, assert_true, finish_assertions, remove_tree
+    use fo_test_harness, only: move_path, make_directory
     use fo_test_gremlin_oracle, only: gremlin_setup, gremlin_run
     use fo_test_gremlin_oracle, only: gremlin_wait_ms
     use fo_test_gremlin_oracle, only: gremlin_start_args, gremlin_write_case
@@ -32,13 +34,16 @@ program test_gremlin_state_loss
         held_slots, busy, status, message)
     call assert_true(status == 0 .and. .not. busy, 'oracle holds both work slots')
     if (status /= 0 .or. busy) call finish_assertions(retain_failed_scratch=.true.)
-    call lose_state('queued-loss', .true.)
+    call lose_state('queued-loss', .true., .false.)
     call gremlin_host_lease_release(held_slots, status, message)
 
     ! An owner admitted and building (payload children in flight).
-    call lose_state('build-loss', .false.)
+    call lose_state('build-loss', .false., .false.)
 
-    ! Both admission guardians release their slots although the lane state
+    ! An admitted owner whose deleted state directory reappears empty.
+    call lose_state('recreated-loss', .false., .true.)
+
+    ! All admission guardians release their slots although the lane state
     ! they watched is gone.
     do attempt = 1, 200
         call gremlin_host_lease_acquire_weighted('gremlin-heavy-work', 2, 2, &
@@ -54,9 +59,9 @@ program test_gremlin_state_loss
 
 contains
 
-    subroutine lose_state(lane, queued)
+    subroutine lose_state(lane, queued, recreate)
         character(len=*), intent(in) :: lane
-        logical, intent(in) :: queued
+        logical, intent(in) :: queued, recreate
         character(:), allocatable :: session
         integer :: owner, i
 
@@ -86,9 +91,15 @@ contains
         call assert_true(owner > 0, lane//' owner is identified')
         call gremlin_session_state_dir(project, lane, lane_dir, status, message)
         call assert_true(status == 0, lane//' state directory resolves')
-        call remove_tree(trim(lane_dir))
+        ! The live owner keeps writing into its state directory, so an in-place
+        ! recursive delete races those writes; renaming it away deletes the
+        ! state path atomically.
+        call move_path(trim(lane_dir), trim(lane_dir)//'.deleted')
+        if (recreate) call make_directory(trim(lane_dir))
         call assert_true(gremlin_wait_exit(owner, 15000), &
             lane//' owner exits after its state directory is deleted')
+        call remove_tree(trim(lane_dir)//'.deleted')
+        if (recreate) call remove_tree(trim(lane_dir))
     end subroutine lose_state
 
     subroutine json_session(text, session)

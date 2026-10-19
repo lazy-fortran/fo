@@ -1,13 +1,20 @@
 module fo_scan_cache
     use fo_scan_types, only: scan_unit_t, MAX_PATH, MAX_UNITS
-    use fo_fs, only: fs_make_dir, fs_rename, fs_stat
+    use fo_fs, only: fs_make_dir, fs_rename, fs_stat, fs_touch_if_older, &
+        fs_dir_trim_lru
+    use fo_cache, only: cache_env_size
     use fo_util, only: make_sibling_tmpfile, delete_tmpfile
     use fx_hash, only: fnv1a_string
     use, intrinsic :: iso_c_binding, only: c_long_long
+    use, intrinsic :: iso_fortran_env, only: int64
     implicit none
     private
 
     character(len=16), parameter :: CACHE_MAGIC = 'fo-scan-v7'
+    !! FO_SCAN_CACHE_MAX_SIZE bounds scan/v1 (default 1G, 0 = no bound);
+    !! saves trim it at most every TRIM_PERIOD seconds, and loads that hit
+    !! refresh the file mtime at most every TOUCH_AGE seconds.
+    integer, parameter :: TRIM_PERIOD = 300, TOUCH_AGE = 3600
 
     public :: scan_cache_load, scan_cache_load_trusted, scan_cache_save
 
@@ -56,6 +63,8 @@ contains
         end do
         close (u)
         hit = .true.
+        call fs_touch_if_older(file, TOUCH_AGE)
+        call trim_cache(file)
     end subroutine scan_cache_load
 
     subroutine scan_cache_load_trusted(root, units, hit)
@@ -99,6 +108,8 @@ contains
         end do
         close (u)
         hit = .true.
+        call fs_touch_if_older(file, TOUCH_AGE)
+        call trim_cache(file)
     end subroutine scan_cache_load_trusted
 
     subroutine scan_cache_save(root, paths, units)
@@ -144,7 +155,26 @@ contains
         close (u)
         rc = fs_rename(tmpfile, file)
         if (rc /= 0) call delete_tmpfile(tmpfile)
+        call trim_cache(file)
     end subroutine scan_cache_save
+
+    subroutine trim_cache(file)
+        !! Keep scan/v1 under FO_SCAN_CACHE_MAX_SIZE. Removing another root's
+        !! scan only costs that root a rescan.
+        character(len=*), intent(in) :: file
+        integer(c_long_long) :: max_bytes
+        integer(int64) :: limit
+        integer :: slash, removed
+        logical :: ok
+
+        limit = 1024_int64**3
+        call cache_env_size('FO_SCAN_CACHE_MAX_SIZE', limit, ok)
+        if (limit <= 0_int64) return
+        slash = index(file, '/', back=.true.)
+        if (slash <= 1) return
+        max_bytes = int(limit, c_long_long)
+        removed = fs_dir_trim_lru(file(:slash - 1), max_bytes, TRIM_PERIOD)
+    end subroutine trim_cache
 
     subroutine write_scan_unit(unit, record, ios)
         integer, intent(in) :: unit

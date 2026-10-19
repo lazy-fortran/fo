@@ -9,7 +9,7 @@ program test_gremlin_state
     use fo_input_inventory, only: input_declaration_t, input_inventory_discover
     use fo_process, only: process_getpid, process_set_async_scope, argv_push, &
         process_start_argv_logged, process_poll_pid
-    use fo_fs, only: fs_sleep_ms, fs_remove_tree, fs_make_dir, fs_write_text
+    use fo_fs, only: fs_sleep_ms, fs_remove_tree, fs_make_dir, fs_write_text, fs_rename
     use fo_fake_tool, only: fake_tool_dispatch, install_fake_tool
     use fo_test_harness, only: run_list, argv, spawn_list, argv, set_mode
     use fo_fs, only: fs_collect_files
@@ -239,6 +239,15 @@ contains
         call gremlin_session_stop_requested(other, stopped, ierr, message)
         call assert(ierr == 0 .and. .not. stopped, &
             'stop request does not target another lane session')
+        ierr = fs_rename(other%state_dir, other%state_dir//'.removed')
+        call assert(ierr == 0, 'detach the exact owned state directory')
+        call fs_make_dir(other%state_dir)
+        call gremlin_session_stop_requested(other, stopped, ierr, message)
+        call assert(ierr == 0 .and. stopped, &
+            'a recreated empty directory cannot keep the deleted owner alive')
+        call fs_remove_tree(other%state_dir, ierr)
+        ierr = fs_rename(other%state_dir//'.removed', other%state_dir)
+        call assert(ierr == 0, 'restore the fixture ownership for orderly release')
         call gremlin_session_release(other, ierr, message)
         call assert(ierr == 0, 'independent lane releases its owner lock')
 

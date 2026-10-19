@@ -40,7 +40,7 @@ module fo_gremlin_owner
         case_reuse_source, prior_generation_case_passed, compute_readiness, &
         lifecycle_path_for_session, coverage_state_path, runner_case_outcome
     use fo_gremlin_request, only: gremlin_request_t
-    use fo_gremlin_retention, only: gremlin_retention_json
+    use fo_gremlin_retention, only: gremlin_retention_json, gremlin_trim_cache
     use fo_gremlin_session, only: gremlin_recover_owner_journal, &
         gremlin_publish_terminal_snapshot, gremlin_release_stopped_session
     use fo_gremlin_state, only: gremlin_session_t, gremlin_lease_t, &
@@ -1327,7 +1327,7 @@ contains
         type(gremlin_readiness_t) :: readiness
         character(len=PATH_LEN) :: local_message, lifecycle_path, event_message
         character(len=PATH_LEN) :: diagnostic_text, retention_root
-        integer :: status, n_running, i, published_seed
+        integer :: status, n_running, i, published_seed, trimmed
         logical :: have_coverage
 
         diagnostic_text = ''
@@ -1382,6 +1382,11 @@ contains
         if (present(ierr)) ierr = status
         if (present(message)) message = local_message
         if (present(status_text_out)) status_text_out = status_text
+        if (status == 0 .and. state == 'quiescent') then
+            trimmed = gremlin_trim_cache(retention_root, o%session%state_dir)
+            if (trimmed < 0) write(error_unit, '(a,i0)') &
+                'Gremlin retained-view eviction: ', trimmed
+        end if
     end subroutine publish_state
 
     subroutine maintain_fo_cache(scan_cursor, ierr)

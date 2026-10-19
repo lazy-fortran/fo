@@ -203,6 +203,10 @@ contains
             call assert_process_ok(result, 'LLVM cross compiler produces Mach-O object')
             if (result%exit_code /= 0) return
             args = string_list_t()
+            ! Executable discovery resolves the ld64.lld symlink to lld.
+            ! Select its Darwin flavour explicitly, preserving the same oracle.
+            call list_add(args, '-flavor')
+            call list_add(args, 'darwin')
             call list_add(args, '-dylib')
             call list_add(args, '-arch')
             call list_add(args, trim(architectures(i)))
