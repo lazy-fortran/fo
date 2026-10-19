@@ -571,7 +571,7 @@ contains
             'set(CMAKE_Fortran_FLAGS "-O1 -g -mtune=native")', &
             'add_subdirectory(sub)', &
             'add_executable(top top.f90)', &
-            'target_link_libraries(top low)']
+            'target_link_libraries(top low parts)']
         call write_lines(join_path(root, 'CMakeLists.txt'), lines)
         lines = [character(len=100) :: &
             'add_library(parts OBJECT parts.f90)', &

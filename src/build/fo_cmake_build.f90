@@ -979,7 +979,8 @@ contains
         character(len=512), allocatable :: objects(:)
         character(len=:), allocatable :: argv, inputs, candidate
         type(string_t), allocatable :: words(:)
-        integer :: i, j, n_words
+        integer :: i, j, n_words, provider, source
+        character(len=512) :: native_object
         logical :: exists
 
         call target_objects(route, t, root, obj_dir, objects)
@@ -1004,6 +1005,19 @@ contains
                     candidate = words(j)%s
                     if (candidate(1:1) /= '-') then
                         candidate = absolute(candidate, route%plan%build_root)
+                        ! Object-library inputs can occur in link fragments,
+                        ! not only as generated sources. Use the same native
+                        ! object vector as archives and source-list consumers.
+                        call object_library_source(route%plan, candidate, &
+                            provider, source)
+                        if (provider > 0) then
+                            if (route%mode(provider) == MODE_NATIVE) then
+                                call make_obj_path(route%plan%targets(provider)% &
+                                    sources(source)%s, root, obj_dir, native_object)
+                                candidate = trim(native_object)
+                                if (any(objects == candidate)) cycle
+                            end if
+                        end if
                         inquire (file=candidate, exist=exists)
                         if (exists) then
                             call add_token(inputs, candidate)
