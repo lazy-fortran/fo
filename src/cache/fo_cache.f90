@@ -9,11 +9,14 @@ module fo_cache
         cache_store_action, cache_action_mod_key, cache_store_binary, &
         cache_restore_binary, cache_binary_matches, cache_digest, &
         cache_file_digest, hash_mod_file
+    use fx_action_result_store, only: action_result_store_policy
+    use, intrinsic :: iso_fortran_env, only: int64
     implicit none
     private
 
     character(len=*), parameter :: FO_CACHE_ENV = 'FO_CACHE_DIR'
     character(len=*), parameter :: FO_CACHE_SUBDIR = 'fo'
+    logical, save :: policy_set = .false.
 
     public :: cache_t, HASH_LEN
     public :: cache_init, cache_root, cache_store_root, cache_schema
@@ -46,10 +49,62 @@ contains
     end subroutine cache_schema
 
     subroutine cache_init(c, ierr)
+        !! FO_CACHE_MAX_SIZE caps the shared store (default 10G; K/M/G/T
+        !! suffixes, 0 disables). FO_CACHE_GRACE (seconds, default 3600)
+        !! protects entries used or published that recently from eviction.
         type(cache_t), intent(out) :: c
         integer, intent(out) :: ierr
+        integer(int64) :: max_bytes, grace
+        logical :: ok
 
         call action_cache_init(c, FO_CACHE_ENV, FO_CACHE_SUBDIR, ierr)
+        !$omp critical (fo_cache_policy)
+        if (.not. policy_set) then
+            max_bytes = 10_int64 * 1024_int64**3
+            grace = 3600_int64
+            call env_size('FO_CACHE_MAX_SIZE', max_bytes, ok)
+            call env_size('FO_CACHE_GRACE', grace, ok)
+            call action_result_store_policy(max_bytes=max_bytes, &
+                grace_seconds=grace)
+            policy_set = .true.
+        end if
+        !$omp end critical (fo_cache_policy)
     end subroutine cache_init
+
+    subroutine env_size(name, value, ok)
+        !! Read a non-negative integer with an optional K/M/G/T (1024-based)
+        !! suffix; an unset or malformed variable keeps the default.
+        character(len=*), intent(in) :: name
+        integer(int64), intent(inout) :: value
+        logical, intent(out) :: ok
+        character(len=64) :: text
+        integer(int64) :: number, scale
+        integer :: n, ios
+
+        ok = .false.
+        call get_environment_variable(name, text)
+        text = adjustl(text)
+        n = len_trim(text)
+        if (n == 0) return
+        scale = 1_int64
+        select case (text(n:n))
+        case ('K', 'k')
+            scale = 1024_int64
+        case ('M', 'm')
+            scale = 1024_int64**2
+        case ('G', 'g')
+            scale = 1024_int64**3
+        case ('T', 't')
+            scale = 1024_int64**4
+        end select
+        if (scale > 1_int64) n = n - 1
+        if (n == 0) return
+        if (verify(text(1:n), '0123456789') /= 0) return
+        read (text(1:n), *, iostat=ios) number
+        if (ios /= 0 .or. number < 0_int64) return
+        if (number > huge(number) / scale) return
+        value = number * scale
+        ok = .true.
+    end subroutine env_size
 
 end module fo_cache

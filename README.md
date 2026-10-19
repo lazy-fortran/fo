@@ -54,7 +54,7 @@ fo graph [--dot]           module dependency graph
 fo lint                    native source checks and compiler warnings
 fo fmt [--check]           format or check formatting
 fo clean                   remove the project build tree
-fo clean --cache           also remove the shared content store
+fo clean --cache           also remove the shared content store (no build may run)
 fo install [--prefix DIR]  install a release build
 fo info                    backend, source, compiler, and cache information
 fo mcp-server              MCP JSON-RPC server on standard input/output
@@ -230,6 +230,25 @@ byte-identical objects; a renamed file is still a different action.
 Compiler/system modules outside the include directories (intrinsic modules,
 system `.mod` files) are part of the toolchain identity, not keyed by content. Store schema and migration
 contracts are recorded in [PLAN.md](PLAN.md).
+
+The store is bounded. `FO_CACHE_MAX_SIZE` sets its cap (default `10G`;
+`K`/`M`/`G`/`T` suffixes, `0` disables the cap). At most every five minutes a
+publishing build checks the store size; above the cap it retires the least
+recently used actions and deletes unreachable objects until the store is at
+80 % of the cap. Entries used or published within the grace period
+(`FO_CACHE_GRACE`, default 3600 seconds) are never evicted, so the cap is soft
+while more than that is in active use. Leftover staging files of killed
+builds are removed after a day.
+
+The store is safe to share between hosts, including filesystems whose locks
+are host-local (BeeGFS) and NFS. It takes no lock for correctness: objects
+are published by exclusive link and verified by hash on every read, action
+records are replaced by rename and read with a retry on `ESTALE`, a reused
+object's mtime is refreshed on publication and a record's on use, and
+eviction spares everything inside the grace period. A concurrent eviction or
+a reader racing a replacement therefore yields a cache miss and a rebuild,
+never another action's output. Keep the grace period longer than any single
+build step and the clocks of sharing hosts within a few seconds.
 
 The module DAG and selected tests run through native OpenMP loops. Each worker
 has private command, log, and temporary-path state. Cache publication is
