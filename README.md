@@ -243,6 +243,26 @@ recently used actions and deletes unreachable objects until the store is at
 while more than that is in active use. Leftover staging files of killed
 builds are removed after a day.
 
+The source scan cache has a separate cap, `FO_SCAN_CACHE_MAX_SIZE` (default
+`1G`, the same suffixes, `0` disables eviction). On cache loads and saves,
+at most once every five minutes, files in `scan/v1` are evicted by last use
+down to 80 % of the cap. Successful reads refresh their last-use stamp at
+most once an hour. Temporary files older than an hour are reaped. This cap
+is approximate between sweeps and while writers are publishing; concurrent
+readers and evictors need no lock and a lost entry causes a rescan.
+
+Gremlin uses a separate soft budget, `FO_GREMLIN_CACHE_MAX_SIZE` (default
+`5G`, `0` disables eviction). After a finite campaign reaches quiescence,
+at most once every five minutes, it counts its generation and host-local
+state trees and removes the oldest inactive execution views down to 80 %
+of the budget. Views younger than an hour, every view of a live lane, and
+lanes with active or unverifiable scratch are protected. View eviction takes
+no lock. Each new owner creates fresh views; it never acquires a retired
+one. Generation pins/leases and durable journals retain their existing
+retirement rules and may keep usage above the budget. Shared action objects
+remain governed by `FO_CACHE_MAX_SIZE`; Gremlin session state uses local
+process identities and must remain host-local.
+
 The store is safe to share between hosts, including filesystems whose locks
 are host-local (BeeGFS) and NFS. It takes no lock for correctness: objects
 are published by exclusive link and verified by hash on every read, action

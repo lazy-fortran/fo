@@ -61,9 +61,13 @@ static int cleanup_view_scratch(const char *state_dir) {
             strncmp(entry->d_name, ".building-execution-", 20) != 0) continue;
         if (snprintf(view, sizeof(view), "%s/%s", views, entry->d_name) >=
             (int)sizeof(view)) { e = ENAMETOOLONG; break; }
-        if (lstat(view, &st) != 0) { e = errno; break; }
+        if (lstat(view, &st) != 0) {
+            if (errno == ENOENT) continue; /* an inactive-view sweep won */
+            e = errno; break;
+        }
         if (!S_ISDIR(st.st_mode) || !fo_private_path(view)) { e = EPERM; break; }
         e = fo_c_execution_scratch_release(view);
+        if (e == ENOENT) { e = 0; continue; }
         if (e != 0) break;
     }
     if (closedir(directory) != 0 && e == 0) e = errno;
@@ -461,6 +465,15 @@ int fo_gremlin_session_stop_requested(const char *dir, const char *session) {
     /* A lane whose state directory vanished has nothing left to own: its
        owner is asked to stop exactly as if a stop request had been written. */
     if (stat(dir, &gone) != 0 && errno == ENOENT) return 1;
+    /* Writers may recreate a removed directory before this poll. Existence
+       alone does not restore this session's ownership. */
+    char owner_id[128], owner_start[64];
+    int owner_pid = 0;
+    int owner_error = read_owner(dir, owner_id, sizeof(owner_id), &owner_pid,
+                                owner_start, sizeof(owner_start));
+    if (owner_error == ENOENT) return 1;
+    if (owner_error != 0) return -owner_error;
+    if (strcmp(owner_id, session) != 0) return 1;
     /* A task-owned lane stops when the client that created it is gone. */
     if (task_path(dir, path, sizeof(path)) == 0) {
         int tfd = open(path, O_RDONLY | O_CLOEXEC);
