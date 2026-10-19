@@ -1,7 +1,7 @@
 # Fo delivery goals
 
-Updated 2026-10-17; latest upstream main `fe9501e`, consolidation qualification
-`d1b4a69` (earlier audit of 2026-10-15 at `342da71`).
+Updated 2026-10-20; compile-cache qualification `291862c`, Fx `c8d892e`
+(earlier consolidation qualification `d1b4a69`).
 Issues define observable success and this plan orders delivery. Apply
 [goals and architectural freedom](doc/GOAL_DRIVEN_DEVELOPMENT.md), choose the
 smallest complete change, and preserve supported behaviour and independent
@@ -39,6 +39,37 @@ for people and AI agents. Gremlin is its centre.
 
 The product boundary in `CLAUDE.md` still holds: no hermetic environments,
 Nix/Spack replacement, CI/promotion engine or agent orchestrator.
+
+## Compile-cache qualification (2026-10-20)
+
+- Verified source `291862c` with immutable driver SHA256
+  `16c66d34b6ba06cc42fd0548904e1276f2c1615157623a39c1d10e59b1f04fb0`:
+  all 184 registered tests, including slow cases, pass with retries disabled.
+  A bounded resident lane also reaches green quiescence and stops cleanly.
+- Scan entries have a documented 1 GiB LRU budget; Gremlin has an 8 GiB soft
+  budget for inactive execution views, with conservative ownership checks and
+  no eviction locks. Protected generations/journals can leave budget debt.
+  Fo-owned eviction reduced scan disk usage 3.6G to 830M and Gremlin 19G to
+  8.9G; filesystem overhead is additional to regular-file content accounting.
+  Fx `c8d892e` retires obsolete action lease rows on snapshot mutation.
+- Native CMake reuses content-keyed compiler-visible scans and validated
+  immutable archives. External-source debug cwd mapping and object-library
+  link fragments preserve relocation equivalence. SIMPLE `fffedba`, Release,
+  Python tools/interface off: 889 Fo artifacts match byte for byte between
+  cold and relocated builds; both trees pass the same 126 fast CTest cases.
+  Local samples: cold 238.56s, warm 21.35s, relocated warm 61.45s (zero
+  compilations), one-file edit 9.26s (one compilation). Independent CMake
+  build samples are 29.69s cold and 0.08s warm; these are advisory timings.
+- The edit/reference measurements require the assertion-preserving Ninja
+  dirty-rescan repair in [draft upstream PR #2859](https://github.com/ninja-build/ninja/pull/2859).
+  Its 437 native tests and the original consumer command pass. No global
+  Ninja installation changed. An earlier single Slurm audit measured warm
+  21.34s to 13.95s, then exposed the external-source relocation defect fixed
+  above; it is not evidence for the final relocation gate.
+- State-loss detection compares held inode identities; coverage restart waits
+  on observable progress within its existing parent deadline. Both formerly
+  flaky cases pass the full gate. Retention finishes before quiescence is
+  published, retaining the write-free quiescence contract.
 
 ## Focused infrastructure repairs (2026-10-17)
 
