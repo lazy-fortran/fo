@@ -65,33 +65,38 @@ fo processes, while separate projects can share the CAS concurrently.
 
 The shared store (`FO_CACHE_DIR`) uses no lock for correctness; README
 "Cache and concurrency" states the protocol. It relies only on the
-properties below that held everywhere: exclusive `O_EXCL` create and
-`link(2)`, and reads through an open descriptor. Readers treat a vanished or
-stale record as a miss, and every object is hash-verified before use.
-Measured with `test-support/fs_probe` (two hosts or clients at once):
+property below that held everywhere, an exclusive `link(2)`. Readers treat
+a vanished, stale or unreadable record or object as a miss, and every object
+is hash-verified before use.
+Measured with `test-support/fs_probe`:
 
-| Property | BeeGFS, sCluster home, 2 nodes | NFSv3 `noac` | NFSv4.2 `noac,lookupcache=none` | MooseFS (1 host) | local btrfs |
-|---|---|---|---|---|---|
-| Reader during rename-over | ENOENT (377 of 4320 reads) | ESTALE (74 of 4192) | atomic | atomic | atomic |
-| `renameat2(RENAME_NOREPLACE)` | EINVAL | EINVAL | EINVAL | yes | yes |
-| `flock`/`fcntl` seen by the peer | no (host-local) | yes | yes | not tested | yes |
-| `O_EXCL` and `link(2)` races | exclusive | exclusive | exclusive | exclusive | exclusive |
-| mtime granularity | 1 s | 1 ns | 1 ns | 1 s | 1 ns |
-| atime on read | strictatime | not updated | not updated | strictatime | noatime |
-| Read via fd after peer unlink | full | full | full | full | full |
+| Property | BeeGFS (sCluster home) | NFSv3 `noac` | NFSv4.2 `noac,lookupcache=none` | MooseFS (`/temp`) | AFS (OpenAFS home) | local btrfs |
+|---|---|---|---|---|---|---|
+| Reader during rename-over | ENOENT (377 of 4320 reads) | ESTALE (74 of 4192) | atomic | atomic | EIO (61 of 20544) | atomic |
+| `renameat2(RENAME_NOREPLACE)` | EINVAL | EINVAL | EINVAL | yes | EINVAL | yes |
+| `flock`/`fcntl` seen by the peer | no (host-local) | yes | yes | yes | yes | yes |
+| `O_EXCL` create race | exclusive | exclusive | exclusive | exclusive | NOT exclusive (1 of 200 claimed by both) | exclusive |
+| `link(2)` race | exclusive | exclusive | exclusive | exclusive | exclusive (same directory only; cross-directory EXDEV) | exclusive |
+| mtime granularity | 1 s | 1 ns | 1 ns | 1 s | coarse (one value over 28 ms) | 1 ns |
+| atime on read | strictatime | not updated | not updated | strictatime | strictatime | noatime |
+| Read via fd after peer unlink | full | full | full | full | EIO after 292 KiB | full |
 
-Sources: sCluster job 3275607 (2026-10-19, also job 3275343); NFS between two
-privileged containers against kernel nfsd on one host (2026-10-19; an earlier
-run saw ESTALE after 64 KiB for a read after peer unlink on NFSv3); MooseFS
-measured on one host only (2026-10-19). With default attribute caching an
-NFS client did not see a peer's new file for more than 20 s, so mount
-shared caches with `noac` or `actimeo=0`. AFS is not characterised yet.
+Sources, all 2026-10-19 with two hosts or clients: sCluster job 3275607
+(nodes 16 and 17; also job 3275343); NFS between two privileged containers
+against kernel nfsd on one host (an earlier run saw ESTALE after 64 KiB for
+a read after peer unlink on NFSv3); MooseFS and AFS between faepop35 and
+faepop36. With default attribute caching an NFS client did not see a peer's
+new file for more than 20 s, so mount shared caches with `noac` or
+`actimeo=0`. The store never depends on `O_EXCL` for exclusivity: objects
+are published by `link(2)` (by copy plus a same-directory link where
+cross-directory links fail, as on AFS), temporary names carry the pid, and
+every read verifies the hash.
 
 The store stress driver in fx (`test-support/store_stress`) runs concurrent
 publishers, readers and evictors, kills writers with SIGKILL, and then checks
 that no restored byte differs from its key's content, that every object
 hashes to its name, and that a full eviction leaves no file behind. It
-passed on BeeGFS across two nodes and on NFSv3 and NFSv4.2.
+passed on all six filesystems above (local btrfs on one host).
 
 No Fortran formatted I/O occurs in the compiler child after a threaded fork.
 The process shim launches prebuilt argv vectors with `posix_spawn` or the
