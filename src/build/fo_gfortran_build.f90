@@ -371,21 +371,24 @@ contains
 
     subroutine text_digest(text, key)
         !! Content digest of text of any length (newlines and blanks kept).
+        !! The length is a part of its own: chunk padding cannot stand in
+        !! for trailing blanks.
         character(len=*), intent(in) :: text
         character(len=HASH_LEN), intent(out) :: key
         character(len=256), allocatable :: parts(:)
         integer :: n, i, j
 
         n = max(1, (len(text) + 255)/256)
-        allocate (parts(n))
+        allocate (parts(n + 1))
         parts = ''
+        write (parts(n + 1), '(a,i0)') 'length ', len(text)
         do i = 1, n
             parts(i) = text((i - 1)*256 + 1:min(len(text), i*256))
             do j = 1, len(parts(i))
                 if (parts(i)(j:j) == ' ') parts(i)(j:j) = achar(1)
             end do
         end do
-        key = cache_digest(parts, n)
+        key = cache_digest(parts, n + 1)
     end subroutine text_digest
 
     function memo_tool_key(command) result(key)
@@ -434,7 +437,7 @@ contains
         character(len=1), parameter :: nl = achar(10)
         character(len=HASH_LEN) :: digest
         character(len=:), allocatable :: extension, normalized
-        integer :: dot, n, start, i
+        integer :: dot, n, start, i, n_source
         logical :: preprocessed, debug_info, relocatable
 
         ierr = 1
@@ -446,8 +449,11 @@ contains
         tokens = act%argv
         depfile = ''
         extension = ''
-        dot = index(source, '.', back=.true.)
-        if (dot > 0) extension = source(dot + 1:)
+        ! Callers pass fixed-length names: trailing blanks are not part of
+        ! the source argument, and their number would key the location.
+        n_source = len_trim(source)
+        dot = index(source(:n_source), '.', back=.true.)
+        if (dot > 0) extension = source(dot + 1:n_source)
         preprocessed = .false.
         if (is_fortran) then
             preprocessed = index(nl//act%argv//nl, nl//'-cpp'//nl) > 0
@@ -460,13 +466,13 @@ contains
                 trim(obj_path)
         end if
         call location_free_tokens(act%argv, normalized, debug_info)
-        location = source
+        location = source(:n_source)
         relocatable = .false.
-        if (len(source) > len(cwd) + 1) then
+        if (n_source > len(cwd) + 1) then
             if (source(1:len(cwd) + 1) == cwd//'/') relocatable = cache_relocatable()
         end if
         if (relocatable) then
-            location = source(len(cwd) + 2:)
+            location = source(len(cwd) + 2:n_source)
             ! The debug producer string would record absolute -J/-I options.
             if (debug_info) then
                 tokens = tokens//nl//'-fdebug-prefix-map='//cwd//'=.'//nl// &
@@ -675,6 +681,36 @@ contains
         end do
         digest = cache_digest(hashes, max(n, 0))
     end subroutine depfile_digest
+
+    subroutine scan_header_dependencies(project_dir, compiler, tokens, source, &
+            depfile)
+        !! Write the dependency file of a C/C++ action without compiling it:
+        !! the action's own command (whose tokens request the dependency
+        !! file) stopped after preprocessing. It lists exactly the headers
+        !! the compile would read from this tree, so a fresh build tree keys
+        !! the action by their content like a rebuilt one. On failure no
+        !! dependency file is left and the action stays a miss.
+        character(len=*), intent(in) :: project_dir, compiler, tokens, source
+        character(len=*), intent(in) :: depfile
+        character(len=:), allocatable :: packed
+        character(len=MAX_PATH) :: log_file
+        integer :: n_args, exitcode
+
+        !$omp critical (fo_compile_command)
+        n_args = 0
+        call argv_push(packed, n_args, compiler)
+        call argv_push_split_nl(packed, n_args, tokens)
+        call argv_push(packed, n_args, '-E')
+        call argv_push(packed, n_args, '-o')
+        call argv_push(packed, n_args, '/dev/null')
+        call argv_push(packed, n_args, source)
+        !$omp end critical (fo_compile_command)
+        call make_tmpfile('fo_depscan', log_file)
+        call process_run_argv_logged(project_dir, packed, n_args, log_file, &
+            .false., build_timeout_seconds(), exitcode)
+        call delete_tmpfile(log_file)
+        if (exitcode /= 0) call fs_remove_file(depfile)
+    end subroutine scan_header_dependencies
 
     subroutine unit_cache_key(units, n_units, dag, filename, mod_keys, dirs, &
             compiler, key_text, depfile, key, complete)
@@ -2118,6 +2154,8 @@ contains
         character(len=MAX_PATH) :: fname_local
         character(len=512) :: per_log_local
         character(len=512) :: level_obj_path
+        character(len=MAX_PATH) :: level_location
+        logical :: level_depfile_exists
         character(len=HASH_LEN), allocatable :: level_dep_keys(:)
         character(len=HASH_LEN) :: level_source_key
         integer :: level_dep_count
@@ -2318,13 +2356,27 @@ contains
                 !$omp parallel do if(n_level > 1) num_threads(team_size) &
                 !$omp schedule(static) private(node_id, level_dep_keys, &
                 !$omp level_dep_count, level_complete, level_source_key, &
-                !$omp level_obj_path, level_hit)
+                !$omp level_obj_path, level_hit, level_depfile_exists, &
+                !$omp level_location)
                 do i = 1, n_level
                     node_id = level_nodes(i)
                     level_keys(i) = ''
                     level_hit = .false.
 
                     if (allocated(node_dirs(node_id)%d)) then
+                        if (len(node_depfile(node_id)%s) > 0) then
+                            inquire (file=node_depfile(node_id)%s, &
+                                exist=level_depfile_exists)
+                            if (.not. level_depfile_exists) then
+                                level_location = filenames(node_id)
+                                if (len(node_location(node_id)%s) > 0) &
+                                    level_location = node_location(node_id)%s
+                                call scan_header_dependencies(project_dir, &
+                                    node_compiler(node_id)%s, &
+                                    node_tokens(node_id)%s, trim(level_location), &
+                                    node_depfile(node_id)%s)
+                            end if
+                        end if
                         call unit_cache_key(all_units, n_all, dag, &
                             filenames(node_id), new_mod_keys, &
                             node_dirs(node_id)%d, compiler, &

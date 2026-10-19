@@ -10,13 +10,14 @@ program test_cmake_native_build_cli
     !!    output of the cmake-built reference, without `cmake --build` (a
     !!    compiled Fortran `cmake` shim on PATH records and refuses it), and a
     !!    declared header-only inputs are not compiled and header/include edits
-    !!    reach their C and Fortran objects;
+    !!    reach their C and Fortran objects; a fresh build tree restores the C
+    !!    object and still compiles it after a header edit;
     !!  - a target with a generated source is delegated, built before its
     !!    dependents, and only that target reaches `cmake --build`;
     !!  - interface cutoff, observed with a compiler shim that records every
     !!    compile: a body-only edit of a low-level module compiles exactly that
     !!    file and relinks, an interface edit compiles its dependents;
-    !!  - a copy of a project at another path reuses every compile result
+    !!  - a copy of a project at a path of another length reuses every compile result
     !!    with FO_CACHE_RELOCATABLE=1 (debug objects compiled at two paths are
     !!    byte-identical), stays
     !!    location-keyed without it, and a body edit compiles one file.
@@ -327,6 +328,26 @@ contains
         call assert_equal_string(run_text(join_path(source, 'build/app')), &
             'mixed: 234 7'//nl, 'warm rebuild keeps the output')
 
+        ! A fresh build tree has no dependency files: the C action is keyed
+        ! by the headers a preprocessing scan lists, so it is restored too.
+        call remove_tree(join_path(source, 'build'))
+        call run_fo(driver, args, source, cache, observed, environment)
+        call assert_process_ok(observed, 'build in a fresh build tree')
+        call assert_contains(route_record(source), 'compiled 0 source file(s)', &
+            'a fresh build tree restores every action, the C one included')
+        call assert_equal_string(run_text(join_path(source, 'build/app')), &
+            'mixed: 234 7'//nl, 'restored objects give the same output')
+        ! A header edit seen first by a fresh build tree still misses.
+        call remove_tree(join_path(source, 'build'))
+        call write_lines(join_path(source, 'core/include/scale.h'), &
+            [character(len=40) :: '#define SCALE_BASE 7'])
+        call run_fo(driver, args, source, cache, observed, environment)
+        call assert_process_ok(observed, 'fresh build tree after a header edit')
+        call assert_contains(route_record(source), 'compiled 1 source file(s)', &
+            'the header edit compiles exactly the C source')
+        call assert_equal_string(run_text(join_path(source, 'build/app')), &
+            'mixed: 230 7'//nl, 'the header edit reached the C object')
+
         ! Positive control: the trap sees the delegated route.
         environment = fo_environment(.true., .true.)
         call list_add(environment, 'FO_CMAKE_ARGS=-DCMAKE_Fortran_COMPILER='//fortran)
@@ -520,7 +541,8 @@ contains
     subroutine write_relocation_project(root, low_body)
         !! A subdirectory with an OBJECT library consumed by a static library,
         !! a generic interface (`module procedure`, no .smod) and a source
-        !! that defines a module and the program using it; debug information.
+        !! that defines a module and the program using it; debug information
+        !! and `-mtune=native`, which keys the host CPU after the source.
         character(len=*), intent(in) :: root, low_body
         character(len=100), allocatable :: lines(:)
         character(len=100) :: value_line
@@ -529,7 +551,7 @@ contains
         lines = [character(len=100) :: &
             'cmake_minimum_required(VERSION 3.20)', &
             'project(relocate Fortran)', &
-            'set(CMAKE_Fortran_FLAGS "-O1 -g")', &
+            'set(CMAKE_Fortran_FLAGS "-O1 -g -mtune=native")', &
             'add_subdirectory(sub)', &
             'add_executable(top top.f90)', &
             'target_link_libraries(top low)']
@@ -582,7 +604,8 @@ contains
         type(process_result_t) :: observed
 
         first = join_path(scratch, 'relocate-a')
-        second = join_path(scratch, 'relocate-b')
+        ! A path of another length: the key must not depend on it.
+        second = join_path(scratch, 'relocate-copy-b')
         third = join_path(scratch, 'relocate-c')
         fresh = join_path(scratch, 'relocate-d')
         call write_relocation_project(first, '1')

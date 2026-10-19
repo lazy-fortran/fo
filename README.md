@@ -217,7 +217,10 @@ resolve to (an include through a macro makes the action uncacheable); the
 compiler identity; the compile options in order, with output and module
 directories dropped and include directories replaced by their position
 (what they resolve to is keyed by content); the interface keys of the
-modules it uses; and the source argument passed to the compiler, because
+modules it uses; for C and C++, the content of every header the compiler's
+dependency file lists (a build tree without that file, such as a fresh one,
+first runs the action's preprocessor to write it, so the action is keyed
+before it is compiled); and the source argument passed to the compiler, because
 compilers embed it in the object (gfortran in runtime error messages even
 without `-g`). With debug information the compile directory is keyed too,
 and `-march=native`-style options add the host CPU identity. Every part is
