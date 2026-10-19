@@ -1369,6 +1369,12 @@ contains
         end if
         if (status == 0) call compute_readiness(read_session, status_text, &
             coverage_view, have_coverage, readiness, status, event_message)
+        ! Quiescence is write-free once its lifecycle/state becomes visible.
+        if (status == 0 .and. state == 'quiescent') then
+            trimmed = gremlin_trim_cache(retention_root, o%session%state_dir)
+            if (trimmed < 0) write(error_unit, '(a,i0)') &
+                'Gremlin retained-view eviction: ', trimmed
+        end if
         if (status == 0) call publish_lifecycle_transition(read_session, &
             trim(lifecycle_path), state, o%active, candidate, case_name, last_outcome, &
             readiness, coverage_view, have_coverage, trim(diagnostic_text), status, &
@@ -1382,11 +1388,6 @@ contains
         if (present(ierr)) ierr = status
         if (present(message)) message = local_message
         if (present(status_text_out)) status_text_out = status_text
-        if (status == 0 .and. state == 'quiescent') then
-            trimmed = gremlin_trim_cache(retention_root, o%session%state_dir)
-            if (trimmed < 0) write(error_unit, '(a,i0)') &
-                'Gremlin retained-view eviction: ', trimmed
-        end if
     end subroutine publish_state
 
     subroutine maintain_fo_cache(scan_cursor, ierr)

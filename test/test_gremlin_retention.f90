@@ -34,7 +34,7 @@ program test_gremlin_retention
             import :: c_char, c_int
             character(kind=c_char), intent(in) :: view(*), parent(*)
             character(kind=c_char), intent(out) :: output(*)
-            integer(c_int), value :: capacity
+            integer(c_int), value, intent(in) :: capacity
         end function scratch_create
     end interface
 
