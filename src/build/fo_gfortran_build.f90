@@ -408,23 +408,34 @@ contains
         keys(n_known) = key
     end function memo_tool_key
 
-    subroutine prepare_action_node(act, source, obj_path, obj_dir, tokens, &
-            compiler, key_text, depfile, dirs, mod_dir, is_fortran, ierr)
+    subroutine prepare_action_node(act, source, obj_path, obj_dir, cwd, tokens, &
+            compiler, key_text, location, depfile, dirs, mod_dir, is_fortran, ierr)
         !! Command tokens, cache identity and module directories of one
-        !! declared action. C, C++ and preprocessed Fortran also write a
-        !! dependency file whose headers are part of the cache key.
+        !! declared action. Output and module directories are not part of the
+        !! identity and include directories become ordinals: what they
+        !! resolve to (included files, used module interfaces) is keyed by
+        !! content. The source argument is part of it because compilers embed
+        !! it in the object (gfortran in runtime error messages even without
+        !! -g), and so is the compile directory with debug information. With
+        !! FO_CACHE_RELOCATABLE=1 a source below cwd is passed relative to it
+        !! (`location` returns that argument), debug paths are mapped by
+        !! -fdebug-prefix-map=cwd=. and -gno-record-gcc-switches keeps option
+        !! paths out of the debug producer, so a copied tree reuses results.
+        !! `-march=native` style options add the host CPU identity. C and C++
+        !! write a dependency file whose headers are keyed by content.
         type(native_action_t), intent(in) :: act
-        character(len=*), intent(in) :: source, obj_path, obj_dir
+        character(len=*), intent(in) :: source, obj_path, obj_dir, cwd
         character(len=:), allocatable, intent(inout) :: tokens, compiler
-        character(len=:), allocatable, intent(inout) :: key_text, depfile, mod_dir
+        character(len=:), allocatable, intent(inout) :: key_text, location
+        character(len=:), allocatable, intent(inout) :: depfile, mod_dir
         character(len=512), allocatable, intent(inout) :: dirs(:)
         logical, intent(out) :: is_fortran
         integer, intent(out) :: ierr
         character(len=1), parameter :: nl = achar(10)
         character(len=HASH_LEN) :: digest
-        character(len=:), allocatable :: extension
+        character(len=:), allocatable :: extension, normalized
         integer :: dot, n, start, i
-        logical :: preprocessed
+        logical :: preprocessed, debug_info, relocatable
 
         ierr = 1
         is_fortran = act%language == 'Fortran'
@@ -443,14 +454,35 @@ contains
             if (len(extension) > 0) preprocessed = preprocessed .or. &
                 extension(1:1) == 'F'
         end if
-        if (.not. is_fortran .or. preprocessed) then
+        if (.not. is_fortran) then
             depfile = trim(obj_path)//'.d'
             tokens = tokens//nl//'-MD'//nl//'-MF'//nl//depfile//nl//'-MT'//nl// &
                 trim(obj_path)
         end if
-        call text_digest(act%language//nl//memo_tool_key(compiler)//nl//act%argv, &
-            digest)
-        key_text = 'native-cmake-v1 '//digest
+        call location_free_tokens(act%argv, normalized, debug_info)
+        location = source
+        relocatable = .false.
+        if (len(source) > len(cwd) + 1) then
+            if (source(1:len(cwd) + 1) == cwd//'/') relocatable = cache_relocatable()
+        end if
+        if (relocatable) then
+            location = source(len(cwd) + 2:)
+            ! The debug producer string would record absolute -J/-I options.
+            if (debug_info) then
+                tokens = tokens//nl//'-fdebug-prefix-map='//cwd//'=.'//nl// &
+                    '-gno-record-gcc-switches'
+                normalized = normalized//nl//'-fdebug-prefix-map=<cwd>=.'//nl// &
+                    '-gno-record-gcc-switches'
+            end if
+        else if (debug_info) then
+            normalized = normalized//nl//'debug-cwd'//nl//cwd
+        end if
+        normalized = normalized//nl//'source-argument'//nl//location
+        if (index(act%argv, '=native') > 0) normalized = normalized//nl// &
+            'host-cpu'//nl//host_cpu_identity()
+        call text_digest(act%language//nl//memo_tool_key(compiler)//nl// &
+            normalized, digest)
+        key_text = 'native-cmake-v2 '//digest
         n = 0
         if (len(act%search) > 0) n = count_char(act%search, nl) + 1
         if (allocated(dirs)) deallocate (dirs)
@@ -471,6 +503,119 @@ contains
         if (n < size(dirs)) dirs = dirs(1:n)
         ierr = 0
     end subroutine prepare_action_node
+
+    logical function cache_relocatable() result(enabled)
+        character(len=8) :: value
+        integer :: status
+
+        call get_environment_variable('FO_CACHE_RELOCATABLE', value, status=status)
+        enabled = status == 0 .and. trim(value) == '1'
+    end function cache_relocatable
+
+    function host_cpu_identity() result(identity)
+        !! What `-march=native`/`-mtune=native` resolve from: the CPU vendor,
+        !! family, model and feature flags of the first CPU in /proc/cpuinfo.
+        !! Without them the identity is unique to this process, so such an
+        !! action is never shared. Called only from serial code; memoized.
+        character(len=:), allocatable :: identity
+        character(len=:), allocatable, save :: known
+        character(len=8192) :: line
+        integer :: unit, ios, stamp(8)
+        integer(int64) :: clock
+
+        if (allocated(known)) then
+            identity = known
+            return
+        end if
+        identity = ''
+        open (newunit=unit, file='/proc/cpuinfo', status='old', action='read', &
+            iostat=ios)
+        if (ios == 0) then
+            do
+                read (unit, '(a)', iostat=ios) line
+                if (ios /= 0) exit
+                if (len_trim(line) == 0 .and. len(identity) > 0) exit
+                if (index(line, 'vendor_id') == 1 .or. index(line, 'cpu family') == 1 &
+                    .or. index(line, 'model') == 1 .or. index(line, 'flags') == 1 &
+                    .or. index(line, 'Features') == 1 .or. &
+                    index(line, 'CPU part') == 1) identity = identity//trim(line)//';'
+            end do
+            close (unit)
+        end if
+        if (len(identity) == 0) then
+            call date_and_time(values=stamp)
+            call system_clock(clock)
+            write (line, '(8i0,a,i0)') stamp, ':', clock
+            identity = 'unknown:'//trim(line)
+        end if
+        known = identity
+    end function host_cpu_identity
+
+    subroutine location_free_tokens(argv, normalized, debug_info)
+        !! Newline-separated compile tokens without location: module output
+        !! directory options lose their directory, include directory options
+        !! become `-I#k` in their order. Every other token is kept verbatim,
+        !! so a location it carries (a define, a prefix map) stays keyed.
+        !! debug_info: a `-g` option other than `-g0` is present.
+        character(len=*), intent(in) :: argv
+        character(len=:), allocatable, intent(out) :: normalized
+        logical, intent(out) :: debug_info
+        character(len=1), parameter :: nl = achar(10)
+        character(len=:), allocatable :: word
+        character(len=16) :: ordinal
+        integer :: i, start, n_include
+        logical :: drop_next, ordinal_next
+
+        normalized = ''
+        debug_info = .false.
+        drop_next = .false.
+        ordinal_next = .false.
+        n_include = 0
+        start = 1
+        do i = 1, len(argv) + 1
+            if (i <= len(argv)) then
+                if (argv(i:i) /= nl) cycle
+            end if
+            word = argv(start:i - 1)
+            start = i + 1
+            if (len(word) == 0) cycle
+            if (drop_next) then
+                drop_next = .false.
+                cycle
+            end if
+            if (ordinal_next) then
+                ordinal_next = .false.
+                cycle
+            end if
+            select case (word)
+            case ('-J', '-module', '-module-dir', '-mdir')
+                normalized = normalized//nl//word
+                drop_next = .true.
+                cycle
+            case ('-I', '-isystem', '-iquote', '-idirafter')
+                n_include = n_include + 1
+                write (ordinal, '(i0)') n_include
+                normalized = normalized//nl//word//'#'//trim(ordinal)
+                ordinal_next = .true.
+                cycle
+            end select
+            if (len(word) > 2) then
+                if (word(1:2) == '-J') then
+                    normalized = normalized//nl//'-J'
+                    cycle
+                end if
+                if (word(1:2) == '-I') then
+                    n_include = n_include + 1
+                    write (ordinal, '(i0)') n_include
+                    normalized = normalized//nl//'-I#'//trim(ordinal)
+                    cycle
+                end if
+            end if
+            if (word(1:min(2, len(word))) == '-g' .and. word /= '-g0') &
+                debug_info = .true.
+            normalized = normalized//nl//word
+        end do
+    end subroutine location_free_tokens
 
     subroutine depfile_digest(depfile, digest)
         !! Digest over the content of the files a compiler dependency file
@@ -556,6 +701,7 @@ contains
         if (len(depfile) > 0) call depfile_digest(depfile, headers)
         key = cache_key_for(filename, compiler, trim(key_text)//headers, &
             dep_keys, n_dep, include_dirs=dirs)
+        if (len_trim(key) == 0) complete = .false.
     end subroutine unit_cache_key
 
     logical function gremlin_execution_view_requested() result(requested)
@@ -1923,6 +2069,7 @@ contains
 
         type(node_text_t), allocatable :: node_tokens(:), node_compiler(:)
         type(node_text_t), allocatable :: node_key_text(:), node_depfile(:)
+        type(node_text_t), allocatable :: node_location(:)
         type(node_text_t), allocatable :: node_mod_dir(:)
         type(node_dirs_t), allocatable :: node_dirs(:)
         logical, allocatable :: node_fortran(:)
@@ -2043,7 +2190,7 @@ contains
         if (exitcode /= 0) return
         with_actions = present(declared_actions)
         allocate (node_tokens(MAX_NODES), node_compiler(MAX_NODES))
-        allocate (node_key_text(MAX_NODES))
+        allocate (node_key_text(MAX_NODES), node_location(MAX_NODES))
         allocate (node_mod_dir(MAX_NODES), node_depfile(MAX_NODES))
         allocate (node_dirs(MAX_NODES), node_fortran(MAX_NODES), node_decl(MAX_NODES))
         node_fortran = .true.
@@ -2096,11 +2243,14 @@ contains
             node_compiler(node_id)%s = ''
             node_mod_dir(node_id)%s = mod_dir
             node_depfile(node_id)%s = ''
+            node_location(node_id)%s = ''
             if (with_actions .and. node_decl(node_id) > 0) then
                 action_index = node_decl(node_id)
                 call prepare_action_node(declared_actions(action_index), &
-                    filenames(node_id), obj_path, obj_dir, node_tokens(node_id)%s, &
+                    filenames(node_id), obj_path, obj_dir, project_dir, &
+                    node_tokens(node_id)%s, &
                     node_compiler(node_id)%s, node_key_text(node_id)%s, &
+                    node_location(node_id)%s, &
                     node_depfile(node_id)%s, node_dirs(node_id)%d, &
                     node_mod_dir(node_id)%s, node_fortran(node_id), exitcode)
                 if (exitcode /= 0) then
@@ -2229,6 +2379,9 @@ contains
                     fname_local = filenames(node_id)
                     per_log_local = per_logs(ii)
                     call make_obj_path(fname_local, project_dir, obj_dir, obj_path)
+                    ! The source argument is part of the action key.
+                    if (len(node_location(node_id)%s) > 0) &
+                        fname_local = node_location(node_id)%s
                     do smod_index = 1, size(interfaces(node_id)%submodules)
                         call fs_remove_file(trim(node_mod_dir(node_id)%s)//'/'// &
                             trim(interfaces(node_id)%submodules(smod_index))//'.smod')
@@ -2252,7 +2405,10 @@ contains
                     node_id = compile_nodes(ii)
                     call make_obj_path(filenames(node_id), project_dir, obj_dir, &
                         obj_path)
-                    call compile_f90(project_dir, filenames(node_id), obj_path, &
+                    fname_local = filenames(node_id)
+                    if (len(node_location(node_id)%s) > 0) &
+                        fname_local = node_location(node_id)%s
+                    call compile_f90(project_dir, fname_local, obj_path, &
                         node_tokens(node_id)%s, per_logs(ii), compile_exits(ii), &
                         exact_flags=present(declared_flags), &
                         compiler=node_compiler(node_id)%s)
@@ -2320,7 +2476,10 @@ contains
                 if (is_prog(node_id) .and. .not. app_program_selected( &
                     filenames(node_id), project_dir, app_dir, config)) cycle
                 call make_obj_path(filenames(node_id), project_dir, obj_dir, obj_path)
-                call compile_f90(project_dir, filenames(node_id), obj_path, &
+                fname_local = filenames(node_id)
+                if (len(node_location(node_id)%s) > 0) &
+                    fname_local = node_location(node_id)%s
+                call compile_f90(project_dir, fname_local, obj_path, &
                     node_tokens(node_id)%s, log_file, exitcode, &
                     exact_flags=present(declared_flags), &
                     compiler=node_compiler(node_id)%s)
@@ -2476,11 +2635,13 @@ contains
                 n_modules = n_modules + 1
                 cycle
             end if
+            ! A separate module procedure interface (`module subroutine`,
+            ! `module function`) makes the compiler write the module's .smod;
+            ! `module procedure` in a module is a generic interface entry.
             if (index(' '//trim(lower), ' module ') > 0 .and. &
                     index(lower, 'end ') /= 1 .and. &
                     (index(lower, ' subroutine ') > 0 .or. &
-                    index(lower, ' function ') > 0 .or. &
-                    index(lower, ' procedure ') > 0)) then
+                    index(lower, ' function ') > 0)) then
                 if (len_trim(current_module) > 0) &
                     call append_smod_name(names, current_module)
             end if

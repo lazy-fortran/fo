@@ -17,7 +17,7 @@ module fo_cmake_build
     !! twice across targets, other generators) is delegated to
     !! `cmake --build --target`, which runs first so that generated inputs
     !! exist. The decision is written to the build log.
-    use fx_string, only: string_t
+    use fx_string, only: string_t, ends_with
     use fx_hash, only: fnv1a_string
     use fo_cmake_context, only: cmake_context_t, cmake_context_read_file, &
         cmake_context_build_path
@@ -44,6 +44,9 @@ module fo_cmake_build
     type :: target_actions_t
         type(native_action_t), allocatable :: a(:)
         integer, allocatable :: source(:)
+        !! Objects of OBJECT_LIBRARY sources this target consumes
+        !! ($<TARGET_OBJECTS>): providing target and its source index.
+        integer, allocatable :: obj_target(:), obj_source(:)
     end type target_actions_t
 
     type, public :: cmake_route_t
@@ -121,6 +124,7 @@ contains
             if (wanted(i)) call classify(route, i, log_file)
         end do
         call demote_conflicts(route, log_file)
+        call demote_object_consumers(route, log_file)
         route%usable = .true.
         do i = 1, n
             if (route%mode(i) == MODE_NATIVE) then
@@ -153,7 +157,7 @@ contains
         select case (route%plan%targets(t)%type)
         case ('INTERFACE_LIBRARY')
             return
-        case ('EXECUTABLE', 'STATIC_LIBRARY')
+        case ('EXECUTABLE', 'STATIC_LIBRARY', 'OBJECT_LIBRARY')
             call native_eligible(route%plan, route%ninja, t, route%actions(t), reason)
         case ('UTILITY')
             reason = 'custom or utility target'
@@ -183,10 +187,11 @@ contains
         integer, intent(in) :: t
         type(target_actions_t), intent(out) :: built
         character(len=:), allocatable, intent(out) :: reason
-        integer :: s, n, group
+        integer :: s, n, group, provider, provider_source
         logical :: exists
 
         reason = ''
+        allocate (built%obj_target(0), built%obj_source(0))
         if (has_custom_commands(plan, ninja, t)) then
             reason = 'custom command attached to the target'
             return
@@ -201,8 +206,15 @@ contains
             do s = 1, tgt%n_sources
                 group = tgt%src_group(s)
                 if (tgt%src_generated(s)) then
-                    reason = 'generated source '//tgt%sources(s)%s
-                    return
+                    call object_library_source(plan, tgt%sources(s)%s, &
+                        provider, provider_source)
+                    if (provider == 0) then
+                        reason = 'generated source '//tgt%sources(s)%s
+                        return
+                    end if
+                    built%obj_target = [built%obj_target, provider]
+                    built%obj_source = [built%obj_source, provider_source]
+                    cycle
                 end if
                 if (group == 0) cycle
                 inquire (file=tgt%sources(s)%s, exist=exists)
@@ -216,7 +228,7 @@ contains
                 if (len(reason) > 0) return
                 built%source(n) = s
             end do
-            if (n == 0) then
+            if (n == 0 .and. size(built%obj_target) == 0) then
                 reason = 'no compiled sources'
                 return
             end if
@@ -232,7 +244,8 @@ contains
 
     logical function has_custom_commands(plan, ninja, t) result(has)
         !! True when the target's link statement in build.ninja carries
-        !! PRE_LINK, PRE_BUILD or POST_BUILD commands, or cannot be found.
+        !! PRE_LINK, PRE_BUILD or POST_BUILD commands, or cannot be found
+        !! (for an OBJECT_LIBRARY: when it is not a plain phony).
         type(cmake_plan_t), intent(in) :: plan
         character(len=*), intent(in) :: ninja
         integer, intent(in) :: t
@@ -245,6 +258,15 @@ contains
         artifact = plan%targets(t)%artifact
         if (index(artifact, plan%build_root//'/') == 1) &
             artifact = artifact(len(plan%build_root) + 2:)
+        if (plan%targets(t)%type == 'OBJECT_LIBRARY') then
+            ! No link statement: the target is a phony over its objects
+            ! unless commands are attached to it.
+            at = index(artifact, 'CMakeFiles/'//plan%targets(t)%name//'.dir/')
+            if (at == 0) return
+            has = index(ninja, nl//'build '//artifact(:at - 1)// &
+                plan%targets(t)%name//': phony ') == 0
+            return
+        end if
         start = index(ninja, nl//'build '//artifact//': ')
         if (start == 0) return
         start = start + 1
@@ -498,39 +520,46 @@ contains
         end do
     end subroutine wanted_targets
 
-    subroutine all_members(plan, ninja, wanted, message)
+    recursive subroutine all_members(plan, ninja, wanted, message, phony)
         !! Targets of the generator's default `all` target, read from the
         !! `build all: phony ...` line of build.ninja (CMake offers no
-        !! EXCLUDE_FROM_ALL flag in the File API). An entry that matches no
-        !! target by name or artifact makes the membership unknown.
+        !! EXCLUDE_FROM_ALL flag in the File API). A subdirectory entry
+        !! `DIR/all` expands through its own phony line; any other entry that
+        !! matches no target by name, artifact or `DIR/name` (CMake target names
+        !! are global) makes the membership unknown.
         type(cmake_plan_t), intent(in) :: plan
         character(len=*), intent(in) :: ninja
         logical, intent(inout) :: wanted(:)
         character(len=:), allocatable, intent(inout) :: message
-        character(len=*), parameter :: key = nl//'build all: phony '
-        character(len=:), allocatable :: text, word, artifact
+        character(len=*), intent(in), optional :: phony
+        character(len=:), allocatable :: key, word, raw, artifact
         integer :: start, last, i, k
         logical :: matched
         character(len=1) :: ch
 
-        text = ninja
-        start = index(text, key)
+        key = nl//'build all: phony'
+        if (present(phony)) key = nl//'build '//phony//': phony'
+        start = index(ninja, key//' ')
+        if (start == 0) start = index(ninja, key//nl)
         if (start == 0) then
             message = 'build.ninja has no default target'
+            if (present(phony)) message = 'build.ninja has no phony '//phony
             return
         end if
         start = start + len(key)
-        last = start + index(text(start:), nl) - 2
-        if (last < start - 1) last = len(text)
+        last = start + index(ninja(start:), nl) - 2
+        if (last < start - 1) last = len(ninja)
         word = ''
+        raw = ''
         i = start
         do while (i <= last + 1)
             ch = ' '
-            if (i <= last) ch = text(i:i)
+            if (i <= last) ch = ninja(i:i)
             if (ch == '$' .and. i < last) then
-                if (text(i + 1:i + 1) == ' ' .or. text(i + 1:i + 1) == ':' .or. &
-                    text(i + 1:i + 1) == '$') then
-                    word = word//text(i + 1:i + 1)
+                if (ninja(i + 1:i + 1) == ' ' .or. ninja(i + 1:i + 1) == ':' .or. &
+                    ninja(i + 1:i + 1) == '$') then
+                    word = word//ninja(i + 1:i + 1)
+                    raw = raw//ninja(i:i + 1)
                     i = i + 2
                     cycle
                 end if
@@ -542,24 +571,103 @@ contains
                         artifact = plan%targets(k)%artifact
                         if (index(artifact, plan%build_root//'/') == 1) &
                             artifact = artifact(len(plan%build_root) + 2:)
-                        if (plan%targets(k)%name == word .or. artifact == word) then
+                        if (plan%targets(k)%name == word .or. artifact == word .or. &
+                            ends_with(word, '/'//plan%targets(k)%name)) then
                             wanted(k) = .true.
                             matched = .true.
                         end if
                     end do
+                    if (.not. matched .and. len(word) > 4) then
+                        if (word(len(word) - 3:) == '/all') then
+                            call all_members(plan, ninja, wanted, message, raw)
+                            if (len(message) > 0) return
+                            matched = .true.
+                        end if
+                    end if
                     if (.not. matched) then
                         message = 'default target entry '//word// &
                             ' belongs to no known target'
                         return
                     end if
                     word = ''
+                    raw = ''
                 end if
             else
                 word = word//ch
+                raw = raw//ch
             end if
             i = i + 1
         end do
     end subroutine all_members
+
+    subroutine object_library_source(plan, object, provider, source)
+        !! The OBJECT_LIBRARY target and source index whose object CMake
+        !! names `object` (`<dir>/CMakeFiles/<name>.dir/<path>.o`), or 0.
+        type(cmake_plan_t), intent(in) :: plan
+        character(len=*), intent(in) :: object
+        integer, intent(out) :: provider, source
+        character(len=:), allocatable :: marker, rest, path
+        integer :: t, s, at, n_found
+
+        provider = 0
+        source = 0
+        if (.not. ends_with(object, '.o') .and. .not. ends_with(object, '.obj')) &
+            return
+        n_found = 0
+        do t = 1, size(plan%targets)
+            if (plan%targets(t)%type /= 'OBJECT_LIBRARY') cycle
+            marker = '/CMakeFiles/'//plan%targets(t)%name//'.dir/'
+            at = index(object, marker, back=.true.)
+            if (at == 0) cycle
+            rest = object(at + len(marker):index(object, '.', back=.true.) - 1)
+            do while (index(rest, './') == 1)
+                rest = rest(3:)
+            end do
+            do s = 1, plan%targets(t)%n_sources
+                if (plan%targets(t)%src_generated(s)) cycle
+                path = plan%targets(t)%sources(s)%s
+                if (.not. ends_with(path, '/'//rest) .and. path /= rest) cycle
+                n_found = n_found + 1
+                provider = t
+                source = s
+            end do
+        end do
+        if (n_found /= 1) then
+            provider = 0
+            source = 0
+        end if
+    end subroutine object_library_source
+
+    subroutine demote_object_consumers(route, log_file)
+        !! A native target that consumes objects of an OBJECT_LIBRARY which is
+        !! not built natively goes to CMake as well.
+        type(cmake_route_t), intent(inout) :: route
+        character(len=*), intent(in) :: log_file
+        integer :: t, k
+        logical :: changed, ok
+
+        changed = .true.
+        do while (changed)
+            changed = .false.
+            do t = 1, size(route%plan%targets)
+                if (route%mode(t) /= MODE_NATIVE) cycle
+                ok = .true.
+                do k = 1, size(route%actions(t)%obj_target)
+                    if (route%mode(route%actions(t)%obj_target(k)) /= MODE_NATIVE) &
+                        ok = .false.
+                end do
+                if (ok) cycle
+                route%mode(t) = MODE_DELEGATED
+                route%n_delegated = route%n_delegated + 1
+                route%delegated = [route%delegated(1:route%n_delegated - 1), &
+                    string_t(route%plan%targets(t)%name)]
+                call log_line(log_file, 'fo: delegated: '// &
+                    route%plan%targets(t)%name// &
+                    ' (consumes objects of a delegated object library)')
+                changed = .true.
+            end do
+        end do
+    end subroutine demote_object_consumers
 
     subroutine demote_conflicts(route, log_file)
         !! A source compiled with different actions by two native targets, or
@@ -763,8 +871,11 @@ contains
                     call argv_push(packed, n_args, '-cpp')
                     call argv_push(packed, n_args, '-P')
                     call argv_push_split_nl(packed, n_args, actions(n_units)%argv)
+                    ! The compiler, not the optional AST frontend, decides
+                    ! what is valid Fortran: a source the frontend cannot
+                    ! parse is scanned for module statements instead.
                     call scan_file_preprocessed(source, units(n_units), ierr, &
-                        packed, n_args)
+                        packed, n_args, allow_regex_fallback=.true.)
                     if (ierr /= 0) then
                         call native_failure(log_file, &
                             'cannot scan Fortran source '//source)
@@ -841,10 +952,18 @@ contains
         character(len=512), allocatable, intent(out) :: objects(:)
         integer :: k
 
-        allocate (objects(size(route%actions(t)%a)))
-        do k = 1, size(objects)
+        integer :: n_own
+
+        n_own = size(route%actions(t)%a)
+        allocate (objects(n_own + size(route%actions(t)%obj_target)))
+        do k = 1, n_own
             call make_obj_path(route%plan%targets(t)%sources( &
                 route%actions(t)%source(k))%s, root, obj_dir, objects(k))
+        end do
+        do k = 1, size(route%actions(t)%obj_target)
+            call make_obj_path(route%plan%targets(route%actions(t)%obj_target(k))% &
+                sources(route%actions(t)%obj_source(k))%s, root, obj_dir, &
+                objects(n_own + k))
         end do
     end subroutine target_objects
 

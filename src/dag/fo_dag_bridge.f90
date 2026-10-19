@@ -23,7 +23,7 @@ contains
         !! process is never stopped.
 
         integer :: i, j, node_id, dep_id
-        integer :: unit_nodes(n_units)
+        integer :: unit_nodes(n_units), module_nodes(n_units)
         character(len=256) :: program_label
         character(len=32) :: suffix
 
@@ -33,6 +33,7 @@ contains
         if (present(is_test_arr)) is_test_arr = .false.
         if (present(is_prog_arr)) is_prog_arr = .false.
         unit_nodes = 0
+        module_nodes = 0
 
         do i = 1, n_units
             if (len_trim(units(i)%module_name) > 0) then
@@ -43,6 +44,7 @@ contains
                 end if
                 if (node_id > 0) then
                     unit_nodes(i) = node_id
+                    module_nodes(i) = node_id
                     if (present(filenames)) filenames(node_id) = units(i)%filename
                     if (present(is_test_arr)) is_test_arr(node_id) = units(i)%is_test
                 end if
@@ -76,11 +78,19 @@ contains
             node_id = unit_nodes(i)
             if (node_id == 0) cycle
 
+            ! A source that defines a module and a program has two nodes;
+            ! both need its dependencies, or the module node is scheduled
+            ! before the modules the source uses exist.
             do j = 1, units(i)%n_deps
                 dep_id = dag_find_source_provider(units, n_units, dag, units(i)%deps(j))
-                if (dep_id == 0 .or. dep_id == node_id) cycle
-                call dag_add_edge(dag, node_id, dep_id)
+                if (dep_id == 0) cycle
+                if (dep_id /= node_id) call dag_add_edge(dag, node_id, dep_id)
+                if (module_nodes(i) > 0 .and. module_nodes(i) /= node_id .and. &
+                    dep_id /= module_nodes(i)) &
+                    call dag_add_edge(dag, module_nodes(i), dep_id)
             end do
+            if (module_nodes(i) > 0 .and. module_nodes(i) /= node_id) &
+                call dag_add_edge(dag, node_id, module_nodes(i))
         end do
     end subroutine build_dag_from_units
 

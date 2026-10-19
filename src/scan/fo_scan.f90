@@ -112,15 +112,17 @@ contains
     end subroutine scan_file
 
     subroutine scan_file_preprocessed(filename, unit_info, ierr, preprocessor, &
-            n_args)
+            n_args, allow_regex_fallback)
         !! Scan the source as the compiler sees it: a file with preprocessor
         !! directives is run through `preprocessor` (a packed argv prefix such
         !! as `gfortran -E -cpp -P -DNAME -Iinc`; this routine appends
         !! `-o <temporary> <filename>`) so a `use` or module definition in an
         !! inactive branch is not reported. A file without directives is
         !! scanned as is. unit_info%filename stays the original path.
+        !! allow_regex_fallback is passed to scan_file.
         character(len=*), intent(in) :: filename, preprocessor
         integer, intent(in) :: n_args
+        logical, intent(in), optional :: allow_regex_fallback
         type(scan_unit_t), intent(out) :: unit_info
         integer, intent(out) :: ierr
         character(len=:), allocatable :: packed
@@ -146,7 +148,7 @@ contains
             close (funit)
         end if
         if (.not. directives .or. n_args < 1) then
-            call scan_file(filename, unit_info, ierr)
+            call scan_file(filename, unit_info, ierr, allow_regex_fallback)
             return
         end if
         call make_tmpfile('fo_cpp', scratch)
@@ -164,7 +166,7 @@ contains
             ierr = 1
             return
         end if
-        call scan_file(scratch, unit_info, ierr)
+        call scan_file(scratch, unit_info, ierr, allow_regex_fallback)
         call delete_tmpfile(scratch)
         unit_info%filename = filename
     end subroutine scan_file_preprocessed

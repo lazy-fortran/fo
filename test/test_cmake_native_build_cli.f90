@@ -15,7 +15,11 @@ program test_cmake_native_build_cli
     !!    dependents, and only that target reaches `cmake --build`;
     !!  - interface cutoff, observed with a compiler shim that records every
     !!    compile: a body-only edit of a low-level module compiles exactly that
-    !!    file and relinks, an interface edit compiles its dependents.
+    !!    file and relinks, an interface edit compiles its dependents;
+    !!  - a copy of a project at another path reuses every compile result
+    !!    with FO_CACHE_RELOCATABLE=1 (debug objects compiled at two paths are
+    !!    byte-identical), stays
+    !!    location-keyed without it, and a body edit compiles one file.
     use fo_test_harness, only: process_result_t, string_list_t, list_add
     use fo_test_harness, only: make_scratch, join_path, write_lines, write_text
     use fo_test_harness, only: read_text, remove_tree, remove_path, environment_value
@@ -52,6 +56,7 @@ program test_cmake_native_build_cli
     call generated_source_is_delegated()
     call duplicate_modules_are_delegated()
     call interface_cutoff()
+    call relocated_tree_reuses_results()
 
     call remove_tree(scratch)
     call finish_assertions()
@@ -511,5 +516,133 @@ contains
         call assert_equal_integer(line_count(read_text(compile_log), 'mid.f90'), 1, &
             'a dependent of a changed interface is compiled')
     end subroutine interface_cutoff
+
+    subroutine write_relocation_project(root, low_body)
+        !! A subdirectory with an OBJECT library consumed by a static library,
+        !! a generic interface (`module procedure`, no .smod) and a source
+        !! that defines a module and the program using it; debug information.
+        character(len=*), intent(in) :: root, low_body
+        character(len=100), allocatable :: lines(:)
+        character(len=100) :: value_line
+
+        value_line = '  part = '//low_body
+        lines = [character(len=100) :: &
+            'cmake_minimum_required(VERSION 3.20)', &
+            'project(relocate Fortran)', &
+            'set(CMAKE_Fortran_FLAGS "-O1 -g")', &
+            'add_subdirectory(sub)', &
+            'add_executable(top top.f90)', &
+            'target_link_libraries(top low)']
+        call write_lines(join_path(root, 'CMakeLists.txt'), lines)
+        lines = [character(len=100) :: &
+            'add_library(parts OBJECT parts.f90)', &
+            'add_library(low STATIC low.f90 $<TARGET_OBJECTS:parts>)', &
+            'add_dependencies(low parts)']
+        call write_lines(join_path(root, 'sub/CMakeLists.txt'), lines)
+        lines = [character(len=100) :: &
+            'module parts_mod', 'implicit none', 'contains', &
+            'integer function part()', value_line, 'end function', &
+            'end module']
+        call write_lines(join_path(root, 'sub/parts.f90'), lines)
+        lines = [character(len=100) :: &
+            'module low_mod', 'use parts_mod, only: part', 'implicit none', &
+            'interface low_value', '  module procedure low_int, low_real', &
+            'end interface', 'contains', 'integer function low_int(k)', &
+            '  integer, intent(in) :: k', '  low_int = k + part()', &
+            'end function', 'real function low_real(x)', &
+            '  real, intent(in) :: x', '  low_real = x', 'end function', &
+            'end module']
+        call write_lines(join_path(root, 'sub/low.f90'), lines)
+        lines = [character(len=100) :: &
+            'module top_helper', 'use low_mod, only: low_value', 'implicit none', &
+            'contains', 'integer function helper()', '  helper = low_value(10)', &
+            'end function', 'end module', 'program top', &
+            'use top_helper, only: helper', 'implicit none', &
+            'print "(i0)", helper()', 'end program']
+        call write_lines(join_path(root, 'top.f90'), lines)
+    end subroutine write_relocation_project
+
+    integer function project_compiles() result(n)
+        !! Compiles of the relocation project's sources (configure-time
+        !! compiler checks excluded).
+        character(:), allocatable :: text
+
+        text = read_text(compile_log)
+        n = line_count(text, 'parts.f90') + line_count(text, 'low.f90') + &
+            line_count(text, 'top.f90')
+    end function project_compiles
+
+    subroutine relocated_tree_reuses_results()
+        !! A copy of a project at another path reuses every compile result
+        !! with FO_CACHE_RELOCATABLE=1, and objects compiled at different paths
+        !! are byte-identical; without it results stay keyed by location.
+        !! A body edit then compiles exactly the edited file.
+        character(:), allocatable :: first, second, third, fresh, objects
+        type(string_list_t) :: args, environment, plain
+        type(process_result_t) :: observed
+
+        first = join_path(scratch, 'relocate-a')
+        second = join_path(scratch, 'relocate-b')
+        third = join_path(scratch, 'relocate-c')
+        fresh = join_path(scratch, 'relocate-d')
+        call write_relocation_project(first, '1')
+        call write_relocation_project(second, '1')
+        call write_relocation_project(third, '1')
+        plain = fo_environment(.false., .false.)
+        call list_add(plain, 'FO_CMAKE_ARGS=-DCMAKE_Fortran_COMPILER='// &
+            join_path(shim_dir, 'gfortran-count'))
+        call list_add(plain, 'FO_TEST_REAL_FC='//fortran)
+        call list_add(plain, 'FO_TEST_FC_LOG='//compile_log)
+        environment = plain
+        call list_add(environment, 'FO_CACHE_RELOCATABLE=1')
+        call list_add(args, 'build')
+        call remove_path(compile_log)
+        call run_fo(driver, args, first, cache, observed, environment)
+        call assert_process_ok(observed, 'cold build of the relocation project')
+        call assert_not_contains(route_record(first), 'delegated', &
+            'subdirectory, object library and module+program sources are native')
+        call assert_equal_string(run_text(join_path(first, 'build/top')), '11'//nl, &
+            'cold relocation project output')
+        call assert_equal_integer(project_compiles(), 3, &
+            'cold build compiles the three sources once each')
+
+        call remove_path(compile_log)
+        call run_fo(driver, args, second, cache, observed, environment)
+        call assert_process_ok(observed, 'build of the copied project')
+        call assert_equal_integer(project_compiles(), 0, &
+            'the copy reuses every compile result')
+        call assert_equal_string(run_text(join_path(second, 'build/top')), '11'//nl, &
+            'copied project output')
+        ! Independent oracle: the same sources compiled at a third path with
+        ! an empty cache give byte-identical debug objects.
+        call write_relocation_project(fresh, '1')
+        call run_fo(driver, args, fresh, join_path(scratch, 'fo-cache-fresh'), &
+            observed, environment)
+        call assert_process_ok(observed, 'independent build at another path')
+        objects = 'build/.fo-native-cmake/obj/'
+        call assert_equal_string(read_text(join_path(fresh, objects//'sub_low.f90.o')), &
+            read_text(join_path(first, objects//'sub_low.f90.o')), &
+            'debug objects compiled at two paths are identical')
+        call assert_equal_string(read_text(join_path(fresh, objects//'top.f90.o')), &
+            read_text(join_path(second, objects//'top.f90.o')), &
+            'a restored object equals an independently compiled one')
+
+        call remove_path(compile_log)
+        call run_fo(driver, args, third, cache, observed, plain)
+        call assert_process_ok(observed, 'build of a copy keyed by location')
+        call assert_equal_integer(project_compiles(), 3, &
+            'without FO_CACHE_RELOCATABLE a copy compiles at its own location')
+
+        call remove_path(compile_log)
+        call write_relocation_project(second, '2')
+        call run_fo(driver, args, second, cache, observed, environment)
+        call assert_process_ok(observed, 'build after a body edit in the copy')
+        call assert_equal_integer(project_compiles(), 1, &
+            'a body edit compiles exactly the edited file')
+        call assert_equal_integer(line_count(read_text(compile_log), 'parts.f90'), 1, &
+            'the edited file is the one compiled')
+        call assert_equal_string(run_text(join_path(second, 'build/top')), '12'//nl, &
+            'edited copy output')
+    end subroutine relocated_tree_reuses_results
 
 end program test_cmake_native_build_cli

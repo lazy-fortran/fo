@@ -209,7 +209,26 @@ native fpm backend explicitly).
 
 Action IDs are SHA-256 hashes of source content, compiler identity, effective
 flags, and dependency module payloads. Shared cache data defaults below
-`~/.cache/fo`; set `FO_CACHE_DIR` to isolate it. Store schema and migration
+`~/.cache/fo`; set `FO_CACHE_DIR` to isolate it.
+
+A compile action of the CMake split route is keyed by: the content of the
+source and of every file its `include`/`#include "x"`/`#include <x>` lines
+resolve to (an include through a macro makes the action uncacheable); the
+compiler identity; the compile options in order, with output and module
+directories dropped and include directories replaced by their position
+(what they resolve to is keyed by content); the interface keys of the
+modules it uses; and the source argument passed to the compiler, because
+compilers embed it in the object (gfortran in runtime error messages even
+without `-g`). With debug information the compile directory is keyed too,
+and `-march=native`-style options add the host CPU identity. Every part is
+keyed in full; a key that cannot be complete is not used. Results therefore
+stay keyed by location by default. `FO_CACHE_RELOCATABLE=1` passes sources
+below the project root relative to it and, with `-g`, adds
+`-fdebug-prefix-map=<root>=.` and `-gno-record-gcc-switches`, so identical
+trees at different paths (worktrees, CI checkouts) share results and produce
+byte-identical objects; a renamed file is still a different action.
+Compiler/system modules outside the include directories (intrinsic modules,
+system `.mod` files) are part of the toolchain identity, not keyed by content. Store schema and migration
 contracts are recorded in [PLAN.md](PLAN.md).
 
 The module DAG and selected tests run through native OpenMP loops. Each worker
