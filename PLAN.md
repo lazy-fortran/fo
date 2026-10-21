@@ -59,7 +59,8 @@ Nix/Spack replacement, CI/promotion engine or agent orchestrator.
   1 FAIL in the backend child-cleanup oracle; FO_JOBS=16 gives 182 PASS, 2 FAIL
   in owner-release/contained-capture oracles. Their process code is unchanged;
   the original installed driver passes four focused lifecycle controls.
-  These runs are not full green qualification. Lifecycle causes remain unresolved
+  The backend process-tree subset also fails in a standalone rerun. These runs
+  are not full green qualification. Lifecycle causes remain unresolved
   under [#139](https://github.com/lazy-fortran/fo/issues/139).
 
 ## Compile-cache qualification (2026-10-20)
