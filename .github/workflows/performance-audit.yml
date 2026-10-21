@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   audit:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, itp-ubuntu24]
     timeout-minutes: 30
     env:
       GIT_TERMINAL_PROMPT: 0

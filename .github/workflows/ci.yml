@@ -20,7 +20,7 @@ jobs:
     name: Flang native build + focused tests
     if: >-
       github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && github.actor != 'github-merge-queue[bot]') || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'full-ci'))
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, itp-ubuntu24]
     timeout-minutes: 20
     env:
       GIT_TERMINAL_PROMPT: 0
@@ -103,7 +103,7 @@ jobs:
     name: build + focused tests
     if: >-
       github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && github.actor != 'github-merge-queue[bot]') || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'full-ci'))
-    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","itp-build"]') }}
+    runs-on: ${{ github.event.pull_request.head.repo.fork && fromJSON('["self-hosted","itp-ubuntu24"]') || fromJSON('["self-hosted","itp-build"]') }}
     timeout-minutes: 40
     env:
       # Never let a missing credential turn into a hung git prompt.
