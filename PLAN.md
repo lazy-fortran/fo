@@ -329,6 +329,16 @@ compiler bootstrap/focused/consumer logs and exact source manifests.
   39593355783 is green; the combined race/MCP native gate passes 32 programs
   on GCC 12.2 with -O1 -g -fopenmp (21817031, COMPLETED 0:0).
 
+## Staged pre-commit checks (2026-10-21)
+
+`fo hook pre-commit [--json]` now isolates Git's index, checks formatting,
+reuses exact Gremlin build/fast-test receipts or requires a capped staged build
+and bounded fast affected tests. Unrun tests are reported as DEFERRED.
+See [the design and primary sources](doc/PRECOMMIT_PLAN.md). The gfortran 12.2
+focused gate passes the hook process oracle, formatter and fpm model checks;
+shared receipt/Gremlin checks and deployment receipts are tracked in the
+fohook handoff, with exact source and immutable driver identities.
+
 ## Native CMake Fortran repair (2026-10-21)
 
 - [V] Source `8734651` retains CMake's per-source preprocessing choice from
