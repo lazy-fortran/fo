@@ -1604,6 +1604,7 @@ contains
 
     subroutine finish_assertions(retain_failed_scratch)
         logical, optional, intent(in) :: retain_failed_scratch
+        procedure(teardown_hook_i), pointer :: pending_teardown
         type(string_t), allocatable :: pending_failures(:)
         character(kind=c_char), allocatable, target :: path_bytes(:)
         character(kind=c_char) :: retained_path(4096)
@@ -1614,8 +1615,9 @@ contains
         logical :: retain
 
         if (associated(teardown_hook)) then
-            call teardown_hook()
+            pending_teardown => teardown_hook
             teardown_hook => null()
+            call pending_teardown()
         end if
         rc = c_gate_close_all()
         if (rc /= 0) call record_failure("close test-owned process gates")
