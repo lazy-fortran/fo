@@ -1921,6 +1921,7 @@
         call make_tmp_path('fo_backend_devdep', log_file)
 
         call fs_make_dir(trim(libdir)//'/src')
+        call fs_make_dir(trim(appdir)//'/src')
         call fs_make_dir(trim(appdir)//'/test')
         open (newunit=u, file=trim(libdir)//'/fpm.toml', status='replace')
         write (u, '(a)') 'name = "devhelper"'
@@ -1932,6 +1933,23 @@
         write (u, '(a)') '  integer, parameter :: dev_value = 21'
         write (u, '(a)') 'end module devhelper'
         close (u)
+        ! The dev-dependency's ordinary C object needs a symbol from the
+        ! project's archive. It must precede that archive on the link line.
+        open (newunit=u, file=trim(libdir)//'/src/bridge.c', status='replace')
+        write (u, '(a)') 'int project_answer(void);'
+        write (u, '(a)') 'int dev_answer(void) { return project_answer(); }'
+        close (u)
+        open (newunit=u, file=trim(appdir)//'/src/project_library.f90', status='replace')
+        write (u, '(a)') 'module project_library'
+        write (u, '(a)') 'use, intrinsic :: iso_c_binding, only: c_int'
+        write (u, '(a)') 'implicit none'
+        write (u, '(a)') 'contains'
+        write (u, '(a)') 'function project_answer() bind(C) result(value)'
+        write (u, '(a)') 'integer(c_int) :: value'
+        write (u, '(a)') 'value = 42_c_int'
+        write (u, '(a)') 'end function'
+        write (u, '(a)') 'end module'
+        close (u)
         open (newunit=u, file=trim(appdir)//'/fpm.toml', status='replace')
         write (u, '(a)') 'name = "devapp"'
         write (u, '(a)') '[dev-dependencies]'
@@ -1940,7 +1958,16 @@
         open (newunit=u, file=trim(appdir)//'/test/check.f90', status='replace')
         write (u, '(a)') 'program check'
         write (u, '(a)') '  use devhelper, only: dev_value'
+        write (u, '(a)') '  use, intrinsic :: iso_c_binding, only: c_int'
+        write (u, '(a)') '  implicit none'
+        write (u, '(a)') '  interface'
+        write (u, '(a)') '    function dev_answer() bind(C) result(value)'
+        write (u, '(a)') '      import c_int'
+        write (u, '(a)') '      integer(c_int) :: value'
+        write (u, '(a)') '    end function'
+        write (u, '(a)') '  end interface'
         write (u, '(a)') '  if (dev_value /= 21) stop 1'
+        write (u, '(a)') '  if (dev_answer() /= 42_c_int) stop 2'
         write (u, '(a)') 'end program check'
         close (u)
 

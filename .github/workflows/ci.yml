@@ -14,11 +14,15 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  flang:
-    name: Flang native build + focused tests
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+  flang_compiler:
+    name: Flang ${{ matrix.llvm }} bootstrap + consumers
+    if: github.event_name == 'merge_group'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        llvm: [21, 22]
     env:
       GIT_TERMINAL_PROMPT: 0
       FO_FC: gfortran
@@ -29,17 +33,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install LLVM Flang 21
+      - name: Install LLVM Flang ${{ matrix.llvm }}
         run: |
           curl --fail --location https://apt.llvm.org/llvm-snapshot.gpg.key |
             sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc >/dev/null
-          echo 'deb https://apt.llvm.org/noble/ llvm-toolchain-noble-21 main' |
+          echo 'deb https://apt.llvm.org/noble/ llvm-toolchain-noble-${{ matrix.llvm }} main' |
             sudo tee /etc/apt/sources.list.d/llvm.list
           sudo apt-get update
-          sudo apt-get install -y flang-21 libomp-21-dev gfortran
-          flang-21 --version
+          sudo apt-get install -y flang-${{ matrix.llvm }} libomp-${{ matrix.llvm }}-dev gfortran
+          flang-${{ matrix.llvm }} --version
           mkdir -p "$HOME/.local/bin"
-          ln -s /usr/bin/flang-21 "$HOME/.local/bin/flang"
+          ln -s /usr/bin/flang-${{ matrix.llvm }} "$HOME/.local/bin/flang"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Install fpm
@@ -51,9 +55,7 @@ jobs:
 
       - name: Build Fo and pin its exact image
         run: |
-          # FortFront currently needs GNU Fortran to build the tool itself.
-          # Flang compiles the real native consumers in the final step.
-          fpm install --compiler gfortran --prefix "$HOME/.local"
+          fpm install --compiler flang-${{ matrix.llvm }} --prefix "$HOME/.local"
           digest="$(sha256sum "$HOME/.local/bin/fo" | cut -d' ' -f1)"
           driver="$RUNNER_TEMP/fo-driver-pins/$digest"
           mkdir -p "$(dirname "$driver")"
@@ -70,11 +72,12 @@ jobs:
           mkdir -p "$TMPDIR"
           "$FO_DRIVER_A" test --rerun --retries 0 --verbose \
             test_compiler_dialect test_project_model test_fpm_project_model \
-            test_section_capability test_native_compiler_path_cli
+            test_section_capability test_native_compiler_path_cli \
+            test_mcp_system test_mcp_protocol_contract
 
       - name: Build and test real native consumers with Flang
         run: |
-          export FO_FC=flang-21
+          export FO_FC=flang-${{ matrix.llvm }}
           export TMPDIR="$RUNNER_TEMP/fo-flang-tests"
           export FO_CACHE_DIR="$RUNNER_TEMP/fo-flang-cache"
           cd test-fixtures/flang_smoke
@@ -82,7 +85,7 @@ jobs:
           "$FO_DRIVER_A" test --rerun --retries 0 --verbose
           "$FO_DRIVER_A" exec --no-build flang_smoke
           cd cmake
-          export FO_CMAKE_ARGS=-DCMAKE_Fortran_COMPILER=/usr/bin/flang-21
+          export FO_CMAKE_ARGS=-DCMAKE_Fortran_COMPILER=/usr/bin/flang-${{ matrix.llvm }}
           "$FO_DRIVER_A" build
           "$FO_DRIVER_A" test --rerun --retries 0 --verbose
 
@@ -90,15 +93,25 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: flang-failure-logs
+          name: flang-${{ matrix.llvm }}-failure-logs
           if-no-files-found: ignore
           path: |
             build/fo/test-logs/*.log
             ${{ runner.temp }}/fo-flang-tests/**/*.log
 
+  flang:
+    name: Flang native build + focused tests
+    needs: flang_compiler
+    if: always() && github.event_name == 'merge_group'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Require both compiler bootstraps and consumer gates
+        run: test "${{ needs.flang_compiler.result }}" = success
+
   build-test:
     name: build + focused tests
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    if: github.event_name == 'merge_group'
     runs-on: ubuntu-latest
     timeout-minutes: 40
     env:
