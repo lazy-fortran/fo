@@ -6,6 +6,7 @@ program test_atomic_link_artifacts
     use fo_test_harness, only: make_scratch, join_path, write_text, remove_tree
     use fo_test_harness, only: remove_path, file_exists, assert_process_ok
     use fo_test_harness, only: assert_true, assert_equal_integer, assert_equal_string
+    use fo_test_harness, only: assert_contains
     use fo_test_harness, only: assert_file_exists
     use fo_test_harness, only: finish_assertions, spawn_process, poll_process
     use fo_test_harness, only: terminate_process_group
@@ -103,6 +104,18 @@ program test_atomic_link_artifacts
     call assert_equal_string(result%stdout, '42' // new_line('a'), &
         'recovered archive links and runs')
 
+    call source_files(37, 5)
+    call run_build('wrong', result)
+    call assert_true(result%exit_code /= 0, &
+        'archive with correct member names but wrong object bytes is rejected')
+    call assert_contains(result%stderr, &
+        'archiver output does not contain the expected object members', &
+        'wrong member bytes fail archive validation')
+    call run_build('normal', result)
+    call assert_process_ok(result, 'correct producer recovers after wrong member bytes')
+    call run_program(result)
+    call assert_equal_string(result%stdout, '42' // new_line('a'), &
+        'recovered archive contains the correct objects')
     call test_profile_copy()
     if (child > 0) call cleanup_child()
     call remove_tree(scratch)
@@ -235,6 +248,9 @@ contains
             when_rcs // 'fail write $ARG2 "partial\n"' // lf // &
             when_rcs // 'fail exit 37' // lf // &
             when_rcs // 'omit exec $FO_TEST_REAL_AR rcs $ARG2' // lf // &
+            when_rcs // 'wrong run $FO_TEST_REAL_AR $@' // lf // &
+            when_rcs // 'wrong copy $ARG4 $FO_TEST_WRONG_OBJECT' // lf // &
+            when_rcs // 'wrong exec $FO_TEST_REAL_AR rcs $ARG2 $FO_TEST_WRONG_OBJECT' // lf // &
             'exec $FO_TEST_REAL_AR $@' // lf)
     end subroutine install_archiver
 
@@ -249,6 +265,8 @@ contains
         call list_add(environment, 'FO_TEST_REAL_AR=' // real_ar)
         call list_add(environment, 'FO_TEST_AR_LOG=' // join_path(scratch, 'ar.log'))
         call list_add(environment, 'FO_TEST_MARKER=' // marker)
+        call list_add(environment, 'FO_TEST_WRONG_OBJECT=' // &
+            join_path(scratch, 'src_model.f90.o'))
     end function build_environment
 
     function environment_value(name) result(value)

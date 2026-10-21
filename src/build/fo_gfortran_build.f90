@@ -4550,7 +4550,7 @@ contains
         character(len=512) :: expected
         logical, allocatable :: matched(:)
         integer :: i, n_args, exitcode, u, ios, j
-        logical :: member_found, member_content_ok
+        logical :: member_found
 
         valid = .false.
         if (n_objects < 1) return
@@ -4606,14 +4606,7 @@ contains
         end if
         call delete_tmpfile(listing_file)
         if (.not. valid) return
-        do j = 1, n_objects
-            call archive_member_content_matches(project_dir, archive_path, &
-                objects(j), member_content_ok)
-            if (.not. member_content_ok) then
-                valid = .false.
-                return
-            end if
-        end do
+        call archive_contents_match(archive_path, objects, n_objects, valid)
     end subroutine archive_has_expected_members
 
     logical function archive_member_is_metadata(member)
@@ -4632,35 +4625,54 @@ contains
         end select
     end function archive_member_is_metadata
 
-    subroutine archive_member_content_matches(project_dir, archive_path, &
-            object_path, matches)
-        character(len=*), intent(in) :: project_dir, archive_path, object_path
+    subroutine archive_contents_match(archive_path, objects, n_objects, matches)
+        !! Extract once into owned scratch, then check every member's bytes.
+        !! Starting a contained ar process for each object makes cold installs
+        !! pay hundreds of process ownership/capture round trips.
+        character(len=*), intent(in) :: archive_path
+        character(len=512), intent(in) :: objects(:)
+        integer, intent(in) :: n_objects
         logical, intent(out) :: matches
 
         character(len=:), allocatable :: packed
-        character(len=1024) :: member_output
+        character(len=1024) :: stage_dir, log_file
         character(len=512) :: member_name
         character(len=HASH_LEN) :: object_digest, member_digest
-        integer :: n_args, exitcode
+        integer :: n_args, exitcode, attempt, j, cleanup_rc
 
         matches = .false.
-        call archive_member_name(object_path, member_name)
-        if (len_trim(member_name) == 0) return
-        call make_tmpfile('fo_archive_member', member_output)
+        do attempt = 1, 100
+            call make_tmpfile('fo_archive_extract', stage_dir)
+            exitcode = fs_mkdir_excl(trim(stage_dir))
+            if (exitcode == 0) exit
+        end do
+        if (exitcode /= 0) return
+        log_file = trim(stage_dir)//'/extract.log'
         n_args = 0
         call argv_push(packed, n_args, 'ar')
-        call argv_push(packed, n_args, 'p')
+        call argv_push(packed, n_args, 'x')
         call argv_push(packed, n_args, archive_path)
-        call argv_push(packed, n_args, trim(member_name))
-        call process_run_argv_logged(project_dir, packed, n_args, member_output, &
+        call process_run_argv_logged(stage_dir, packed, n_args, log_file, &
             .false., build_timeout_seconds(), exitcode)
-        if (exitcode == 0) then
-            call cache_file_digest(object_path, object_digest)
-            call cache_file_digest(member_output, member_digest)
-            matches = object_digest == member_digest
+        matches = exitcode == 0
+        if (matches) then
+            do j = 1, n_objects
+                call archive_member_name(objects(j), member_name)
+                call cache_file_digest(objects(j), object_digest)
+                call cache_file_digest(trim(stage_dir)//'/'//trim(member_name), &
+                    member_digest)
+                matches = len_trim(object_digest) > 0 .and. &
+                    object_digest == member_digest
+                if (.not. matches) exit
+            end do
         end if
-        call delete_tmpfile(member_output)
-    end subroutine archive_member_content_matches
+        call fs_remove_tree(trim(stage_dir), cleanup_rc)
+        if (cleanup_rc /= 0) then
+            write (error_unit, '(a)') 'fo: archive scratch cleanup failed: '// &
+                trim(stage_dir)
+            matches = .false.
+        end if
+    end subroutine archive_contents_match
 
     subroutine archive_member_name(path, member)
         character(len=*), intent(in) :: path
