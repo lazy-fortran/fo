@@ -51,9 +51,7 @@ jobs:
 
       - name: Build Fo and pin its exact image
         run: |
-          # FortFront currently needs GNU Fortran to build the tool itself.
-          # Flang compiles the real native consumers in the final step.
-          fpm install --compiler gfortran --prefix "$HOME/.local"
+          fpm install --compiler flang-21 --prefix "$HOME/.local"
           digest="$(sha256sum "$HOME/.local/bin/fo" | cut -d' ' -f1)"
           driver="$RUNNER_TEMP/fo-driver-pins/$digest"
           mkdir -p "$(dirname "$driver")"
