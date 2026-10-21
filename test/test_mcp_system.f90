@@ -41,7 +41,8 @@ program test_mcp_system
         call send(mcp_request(2, 'tools/list', '{}'))
         call send(mcp_request(3, 'resources/list', '{}'))
         call send(mcp_call(4, '{"action":"info"}'))
-        call send(mcp_call(8, '{"action":"lint"}'))
+        call send(mcp_call(8, '{"action":"lint","dir":' // &
+            mcp_quote(scratch) // '}'))
         call send(mcp_call(9, '{"action":"check","dir":' // mcp_quote(scratch) // '}'))
         call send(mcp_request(5, 'bogus/method', '{}'))
         call send(mcp_call(6, '{"action":"nonexistent"}'))
