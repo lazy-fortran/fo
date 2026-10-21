@@ -18,7 +18,7 @@ library = false
 [dependencies]
 fx = { git = "https://github.com/lazy-fortran/fx.git", branch = "main" }
 # Explicit arena defaults support the full Flang bootstrap.
-fortfront = { git = "https://github.com/lazy-fortran/fortfront.git", rev = "7f86b3380a9866d43af8ad78a832a26f795a9f34" }
+fortfront = { git = "https://github.com/lazy-fortran/fortfront.git", rev = "929484603822781fd5d702f43c60ad4d69cda530" }
 openmp = "*"
 
 [dev-dependencies]
