@@ -1,7 +1,6 @@
 module fo_stat_memo
-    !! Persistent file-hash memo: maps (path, mtime, ctime, size) -> sha256 so a
-    !! warm build never re-reads an unchanged file to hash it. ctime detects a
-    !! same-size rewrite even when the original mtime is restored.
+    !! Persistent file-hash observations. Stat metadata can collide across
+    !! different contents, so every lookup validates the current bytes.
     !!
     !! The memo lives under the shared cache root so it survives a project-scoped
     !! `fo clean` and is reused across builds. Access is guarded by a named
@@ -88,7 +87,7 @@ contains
     end subroutine memo_hash_file_for_test
 
     subroutine memo_hash_file_impl(path, hash, ierr, provider)
-        !! sha256 of path, served from the memo when its complete stat key matches.
+        !! sha256 of the current bytes, never inferred from a matching stat key.
         !! ierr is nonzero when hashing fails or a stable snapshot cannot be
         !! established within the bounded retry count.
         character(len=*), intent(in) :: path
@@ -99,11 +98,10 @@ contains
         integer(c_long_long) :: mt, ct, sz, stable_mt, stable_ct, stable_size
         integer :: slot
         integer(c_int) :: stat_rc
-        logical :: stable, cache_hit
+        logical :: stable
 
         hash = ''
         ierr = 0
-        cache_hit = .false.
 
         !$omp critical (fo_stat_memo)
         if (.not. loaded) call load_impl()
@@ -112,20 +110,10 @@ contains
         if (stat_rc /= 0) then
             ierr = 1
             hash = ''
-        else
-            slot = find_slot(path)
-            cache_hit = .false.
-            if (slot > 0) then
-                cache_hit = t_used(slot) .and. &
-                    trim(t_path(slot)) == trim(path) .and. &
-                    t_mtime(slot) == mt .and. t_ctime(slot) == ct .and. &
-                    t_size(slot) == sz
-            end if
-            if (cache_hit) hash = t_hash(slot)
         end if
         !$omp end critical (fo_stat_memo)
 
-        if (ierr /= 0 .or. cache_hit) return
+        if (ierr /= 0) return
 
         ! Hashing can read a large object file. Keep it outside the table lock
         ! so independent cold misses can make progress concurrently.
