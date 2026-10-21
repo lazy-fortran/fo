@@ -70,10 +70,11 @@ Nix/Spack replacement, CI/promotion engine or agent orchestrator.
 - [V] CI run `39553210344` confirms the inode repair but still fails explicit
   install: the 180-second child cap expires at 483/507 compiled sources.
   A two-CPU aCluster trace completes cold release installation in 316.77
-  seconds (job `21816920`), without a hang. PR #220 remains a draft; main
-  and all global installations are unchanged. No test deadline was increased.
-- [H] Further cold-build performance work is needed before CI qualification,
-  merge-queue publication and deployment can proceed.
+  seconds (job `21816920`), without a hang. The controller classifies this as
+  a command safety timeout: only the cold install receives a 900-second cap;
+  all behavioral assertions and other command caps remain intact.
+- [H] Cold release-build cost reduction is follow-up work, outside this repair.
+  PR #220 still requires green CI, merge-queue publication and deployment.
 
 ## Native CMake Fortran repair (2026-10-21)
 

@@ -227,7 +227,7 @@ contains
             call argv_push(packed, n_args, trim(private_driver))
             call argv_push(packed, n_args, 'install')
             call run_stage(trim(root), packed, n_args, trim(install_log), &
-                exitcode)
+                exitcode, timeout_seconds=900)
             call read_file(trim(install_log), install_output, ok)
             call check(exitcode == 0, &
                 'explicit fo install publishes under the isolated HOME')
@@ -273,17 +273,23 @@ contains
         call read_file(log_path, output, read_ok)
     end subroutine run_profile_build
 
-    subroutine run_stage(root, packed, n_args, log_path, exitcode)
+    subroutine run_stage(root, packed, n_args, log_path, exitcode, timeout_seconds)
         character(len=*), intent(in) :: root, packed, log_path
         integer, intent(in) :: n_args
         integer, intent(out) :: exitcode
+        integer, intent(in), optional :: timeout_seconds
+        integer :: wall_cap
         real(dp) :: started
 
+        wall_cap = 180
+        ! A cold 507-source release install took 317 s on GCC 12.2. This is
+        ! a command safety cap, not a performance oracle; allow CI headroom.
+        if (present(timeout_seconds)) wall_cap = timeout_seconds
         write (output_unit, '(a)') 'self-refresh stage started: '//log_path
         flush (output_unit)
         started = wall_time_seconds()
         call process_run_argv_logged(root, packed, n_args, log_path, &
-            .false., 180, exitcode)
+            .false., wall_cap, exitcode)
         write (output_unit, '(a,i0,a,f8.2,a)') &
             'self-refresh stage finished: exit ', exitcode, ', ', &
             wall_time_seconds() - started, ' s; '//log_path
