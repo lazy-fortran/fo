@@ -2,6 +2,7 @@
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/stat.h>
 #if defined(_WIN32) && !defined(__CYGWIN__)
 #include <direct.h>
@@ -13,6 +14,25 @@
 int fo_c_hook_prepare(const char *root, const char *view, int build_cap) {
     char source[8192], destination[8192], seconds[32];
     struct stat st;
+    const char *prior = getenv("FO_CMAKE_ARGS");
+    const char *offline = " -DFETCHCONTENT_FULLY_DISCONNECTED=ON"
+                          " -DFETCHCONTENT_UPDATES_DISCONNECTED=ON";
+    size_t size = (prior ? strlen(prior) : 0) + strlen(offline) + 1;
+    char *arguments = malloc(size);
+    int status;
+    if (!arguments) return ENOMEM;
+    if (prior && strlen(prior) >= strlen(offline) &&
+        strcmp(prior + strlen(prior) - strlen(offline), offline) == 0)
+        snprintf(arguments, size, "%s", prior);
+    else
+        snprintf(arguments, size, "%s%s", prior ? prior : "", offline);
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    status = _putenv_s("FO_CMAKE_ARGS", arguments);
+#else
+    status = setenv("FO_CMAKE_ARGS", arguments, 1);
+#endif
+    free(arguments);
+    if (status) return EINVAL;
     snprintf(seconds, sizeof(seconds), "%d", build_cap);
 #if defined(_WIN32) && !defined(__CYGWIN__)
     if (_putenv_s("FO_BUILD_TIMEOUT", seconds) ||
