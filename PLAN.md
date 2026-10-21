@@ -1,6 +1,6 @@
 # Fo delivery goals
 
-Updated 2026-10-20; compile-cache qualification `291862c`, Fx `c8d892e`
+Updated 2026-10-21; compile-cache qualification `291862c`, Fx `c8d892e`
 (earlier consolidation qualification `d1b4a69`).
 Issues define observable success and this plan orders delivery. Apply
 [goals and architectural freedom](doc/GOAL_DRIVEN_DEVELOPMENT.md), choose the
@@ -39,6 +39,25 @@ for people and AI agents. Gremlin is its centre.
 
 The product boundary in `CLAUDE.md` still holds: no hermetic environments,
 Nix/Spack replacement, CI/promotion engine or agent orchestrator.
+
+## Self-refresh and install CI repair (2026-10-21)
+
+- [V] The profile-switch reproducer replaces an unchanged app inode on main.
+  Private app publication now retains identical executable copies and repairs
+  damaged ones. Archive validation extracts once into owned scratch, retaining
+  exact membership and per-object byte checks instead of one process per member.
+- [V] Driver SHA256
+  `d8d52a3f4808b986dcf16f7c9904ec2a527ef10cd330396cbc89bb63272b7829`
+  passes native atomic-archive, install, compiler-artifact, CMake-build and
+  fixture-failure-evidence checks. Incorrect member bytes remain rejected.
+- [V] GCC 12.2 rejects resetting a called host-associated procedure pointer.
+  Copying and clearing the teardown hook before calling it compiles on the
+  compiler floor and preserves once-only teardown. CI's install-help step now
+  retains its pinned driver when HOME is isolated.
+- [H] Full self-refresh CI and platform deployment qualification are pending
+  in [PR #220](https://github.com/lazy-fortran/fo/pull/220); focused passes do
+  not establish a green main run. Evidence and installation receipts belong
+  under `/home/ert/data/handoffs/20261021_cluster_triage/fofix2-logs`.
 
 ## Native CMake Fortran repair (2026-10-21)
 
