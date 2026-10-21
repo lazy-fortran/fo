@@ -151,7 +151,8 @@ contains
         call capture_populated_sources(backend, fetchcontent_base, n_roots, &
             roots, bundles, labels, names, ierr, message)
         if (ierr /= 0) return
-        call validate_cmake_paths(backend, roots(:n_roots), ierr, message)
+        call validate_cmake_paths(backend, roots, ierr, message, &
+            n_roots=n_roots, bundles=bundles, labels=labels, names=names)
         if (ierr /= 0) return
         call capture_path_aliases(cache_text, trim(project_path), trim(build_path), &
             roots(:n_roots), aliases)
@@ -175,7 +176,7 @@ contains
             call cache_entry(line, key, kind, value)
             if (len(key) == 0) cycle
             if (kind /= 'BOOL' .and. kind /= 'STRING' .and. kind /= 'PATH' .and. &
-                kind /= 'FILEPATH') cycle
+                kind /= 'FILEPATH' .and. kind /= 'INTERNAL') cycle
             if (key == 'CMAKE_INSTALL_PREFIX') cycle
             if (index(key, 'CMAKE_FIND_PACKAGE_REDIRECTS_DIR') == 1) cycle
             if (kind == 'PATH' .and. len(value) > 0) then
@@ -189,12 +190,18 @@ contains
             call relocate_value(value, trim(project_path), &
                 trim(build_path), roots(:n_roots), &
                 bundles(:n_roots), aliases, rewritten)
+            ! Find-package results such as Python's headers are often INTERNAL.
+            ! Keep only those internal paths pointing into captured headers;
+            ! compiler and CMake implementation state remains delegated.
+            if (kind == 'INTERNAL') then
+                if (index(rewritten, '/dependencies/include-') == 0) cycle
+            end if
             script = script//'set('//key//' "'//cmake_quote(rewritten)// &
                 '" CACHE '//kind//' "'//cmake_quote(help, literal=.true.)// &
                 '" FORCE)'//new_line('a')
         end do
         do i = 1, n_roots
-            if (index(labels(i), 'cmake-provider:') == 1) cycle
+            if (index(labels(i), 'cmake-dependency:') /= 1) cycle
             key = upper(trim(names(i)))
             script = script//'set(FETCHCONTENT_SOURCE_DIR_'//key// &
                 ' "${CMAKE_CURRENT_LIST_DIR}/dependencies/'//trim(names(i))// &
@@ -227,7 +234,7 @@ contains
             backend%cmake%build_root)
         call input_inventory_discover_cmake(backend%project_dir, roots(:n_roots), &
             bundles(:n_roots), labels(:n_roots), trim(metadata_dir), inventory, &
-            ierr, message)
+            ierr, message, freeze_headers=.true.)
         if (ierr == 0) call validate_cmake_paths(backend, roots(:n_roots), &
             ierr, message, inventory)
         if (ierr /= 0) call fs_remove_tree(trim(metadata_dir), cleanup_status)
@@ -599,7 +606,7 @@ contains
         cursor = 1
         do while (next_cache_line(cache, cursor, line))
             call cache_entry(line, key, kind, value)
-            if (kind /= 'PATH' .and. kind /= 'FILEPATH' .and. &
+            if (kind /= 'PATH' .and. kind /= 'FILEPATH' .and. kind /= 'INTERNAL' .and. &
                 key /= 'CMAKE_HOME_DIRECTORY') cycle
             first = 1
             do while (first <= len(value))
@@ -734,28 +741,36 @@ contains
         end do
     end function upper
 
-    subroutine validate_cmake_paths(backend, roots, ierr, message, inventory)
+    subroutine validate_cmake_paths(backend, roots, ierr, message, inventory, &
+            n_roots, bundles, labels, names)
         type(backend_t), intent(in) :: backend
-        character(len=*), intent(in) :: roots(:)
+        character(len=*), intent(inout) :: roots(:)
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
         type(input_inventory_t), intent(in), optional :: inventory
+        integer, intent(inout), optional :: n_roots
+        character(len=*), intent(inout), optional :: bundles(:), labels(:), names(:)
         character(len=PATH_LEN), allocatable :: files(:)
-        character(len=PATH_LEN) :: normalized, project, build, cmake_root
-        character(len=PATH_LEN) :: toolchain
+        character(len=PATH_LEN) :: normalized, project, build, physical
+        character(len=PATH_LEN) :: cmake_root, toolchain
+        character(len=PATH_LEN) :: digest_parts(1)
+        character(len=HASH_LEN) :: digest
         character(len=:), allocatable :: text
         character(:), allocatable :: key, path, line, kind, value
         type(json_parser_t) :: parser
         type(json_event_t) :: event
-        integer :: n_files, i, j, depth, cursor
+        integer :: n_files, i, j, depth, count, cursor
         character(len=64) :: ancestors(64)
         character(len=PATH_LEN) :: pending_paths(64)
-        logical :: generated(64), cmake_input(64), captured, exists, delegated
+        logical :: generated(64), cmake_input(64), captured, exists, include_path
+        logical :: delegated
 
         allocate(files(2048))
         allocate(character(len=1048576) :: text)
         ierr = 0
         message = ''
+        count = size(roots)
+        if (present(n_roots)) count = n_roots
         call canonical_directory(backend%project_dir, project)
         call canonical_directory(cmake_context_build_path(backend%cmake), build)
         cmake_root = ''
@@ -835,6 +850,35 @@ contains
                                 end if
                             end if
                             call canonical_authored_path(normalized)
+                            include_path = any(ancestors(:depth) == 'includes')
+                            if (include_path) then
+                                call canonical_directory(normalized, physical)
+                                normalized = physical
+                            end if
+                            if (include_path .and. present(n_roots) .and. &
+                                .not. inside(normalized, build)) then
+                                captured = trim(physical) == trim(project)
+                                do j = 1, count
+                                    if (inside(physical, roots(j))) captured = .true.
+                                end do
+                                if (.not. captured) then
+                                    digest_parts(1) = physical
+                                    digest = cache_digest(digest_parts, 1)
+                                    call add_source(trim(physical), 'include-'//digest(:16), &
+                                        n_roots, roots, bundles, labels, names, &
+                                        ierr, message, .false.)
+                                    if (ierr /= 0) return
+                                    labels(n_roots) = 'cmake-include:'//digest(:16)
+                                    count = n_roots
+                                end if
+                            end if
+                            captured = inside(normalized, project) .or. &
+                                inside(normalized, build)
+                            do j = 1, count
+                                if (inside(normalized, roots(j))) captured = .true.
+                            end do
+                            ! CMake's installation and exact toolchain stay delegated.
+                            ! Authored files under /opt or /usr still need capture.
                             delegated = .false.
                             if (index(files(i), '/cmakeFiles-') > 0) then
                                 delegated = cmake_input(depth)
@@ -846,13 +890,6 @@ contains
                                         delegated = .true.
                                 end if
                             end if
-                            captured = inside(normalized, project) .or. &
-                                inside(normalized, build)
-                            do j = 1, size(roots)
-                                if (inside(normalized, roots(j))) captured = .true.
-                            end do
-                            ! CMake's installation and exact toolchain stay delegated.
-                            ! Authored files under /opt or /usr still need capture.
                             if (delegated) captured = .true.
                             if (.not. captured) then
                                 ierr = 1

@@ -7,6 +7,25 @@ Issues define observable success and this plan orders delivery. Apply
 smallest complete change, and preserve supported behaviour and independent
 failure detection. The workspace master plan, when present, owns delivery order.
 
+## CMake capture repair (2026-10-21)
+
+- [V] Driver `8244a858` reproduces the uv Python header rejection in
+  [libneo](https://github.com/itpplasma/libneo) `924ba77`. Replaying the recorded
+  concurrent `git restore -- uv.lock` reproduces the inventory mismatch;
+  diagnostic driver `5009a9ee` identifies `project:uv.lock`. The historical
+  transcript alone cannot prove that it was the only changing entry.
+- [V] Candidate SHA256
+  `6c3c7464c8f651d4cda427d0a8707cca555c5aeb8908c6931ba41c9c352d6faa`
+  on base `18282d3` passes seven focused capture, inventory and generation
+  oracles. Explicit header roots are frozen and fingerprinted; live SDK checks
+  reject changed headers even when CMake forces cache paths or reuses a PASS.
+  Configure-created source files remain inputs, and changed entries are named.
+- [V] The real libneo checkout's Python-enabled capture and selected
+  `test_spectre_reader` gate pass, as does the recorded SKBUILD/system-Python
+  fallback. `fo verify` passes all stages and 43 affected tests without retries;
+  two unchanged formatting warnings remain advisory. Full project/profile
+  parity remains unclaimed.
+
 ## Destination
 
 Fo is the simplest, fastest and most trustworthy Fortran build and test tool

@@ -20,6 +20,7 @@ module fo_build_backend
     use fo_cmake_native_model, only: cm_plan_t
     use fo_cmake_native, only: native_cmake_build, native_cmake_test
     use fo_cmake_build, only: cmake_route_t, cmake_build_route, cmake_build_native
+    use fo_input_inventory, only: cmake_headers_revalidate
     implicit none
     private
     public :: backend_t, detect_backend, detect_nproc, detect_jobs
@@ -652,8 +653,14 @@ contains
         type(cm_plan_t) :: native_plan
         logical :: has_cache, hint_valid, has_frozen_context
         character(len=4096) :: captured_generator
+        character(len=4096) :: header_message
         integer :: n_args, i, line_end
 
+        call cmake_headers_revalidate(context%source_root, exitcode, header_message)
+        if (exitcode /= 0) then
+            write(error_unit, '(a)') trim(header_message)
+            return
+        end if
         if (native_cmake_selected(context%source_root)) then
             call native_cmake_configure(context, native_plan)
             exitcode = 0
@@ -876,6 +883,24 @@ contains
         character(len=*), intent(in) :: flags, log_file
         integer, intent(out) :: exitcode
         logical, intent(in), optional :: configured
+        character(len=4096) :: message
+
+        ! Project code can force cache hints back to absolute SDK paths. Those
+        ! delegated inputs must still match the captured bytes, even on a hit.
+        call cmake_headers_revalidate(context%source_root, exitcode, message)
+        if (exitcode == 0) then
+            call cmake_build_impl(context, flags, log_file, exitcode, configured)
+        end if
+        if (exitcode == 0) &
+            call cmake_headers_revalidate(context%source_root, exitcode, message)
+        if (len_trim(message) > 0) write(error_unit, '(a)') trim(message)
+    end subroutine cmake_build
+
+    subroutine cmake_build_impl(context, flags, log_file, exitcode, configured)
+        type(cmake_context_t), intent(inout) :: context
+        character(len=*), intent(in) :: flags, log_file
+        integer, intent(out) :: exitcode
+        logical, intent(in), optional :: configured
         logical :: skip_configure
         type(cmake_route_t) :: route
         character(len=:), allocatable :: saved_targets(:)
@@ -929,7 +954,7 @@ contains
             if (exitcode /= 0) return
         end if
         call cmake_build_native(route, log_file, exitcode)
-    end subroutine cmake_build
+    end subroutine cmake_build_impl
 
     subroutine cmake_delegate_build(context, log_file, exitcode)
         !! `cmake --build` for the context's build targets (all when none).
