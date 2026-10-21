@@ -163,6 +163,30 @@ Nix/Spack replacement, CI/promotion engine or agent orchestrator.
 - [V] Main b237d63 passes both jobs (CI 39571141426). Ruleset 25437892
   now requires both exact GitHub Actions job names and preserves merge queue.
 
+## Concurrent cache follow-up (2026-10-21)
+
+- [V] Fx 1d99445cc2f95c32c9adf47ada89345438892ce2 removes GCC 12's
+  shared hidden deferred-result lengths at immutable_store_init:118 using an
+  explicit normalization output and fixed C buffer. aCluster 21817012 completes
+  0:0: 1,024 pthread calls preserve exact roots; baseline Helgrind reports 2,300
+  errors/four contexts, repaired zero errors. Fx #58 merged as 5ee64f0; #65 also repairs aliased MCP cursors,
+  and the exact consumer pin is 362464d72eb1b57c6ca63751eca2578d77ea5f00.
+- [V] Fo removes its seven serialized adapter wrappers and re-exports the same
+  provider API. Candidate SHA256
+  6fc6614a81a127d1de6dbe93a607d0f0c8755041ff2116b70f4eb2520b47a715
+  builds with GCC 12.2 in 193.65 seconds (eight workers). Backend and native
+  CMake programs pass. test_stat_memo retains the same two baseline failures
+  recorded in folife's all-jobs16 log; default self-refresh is a skip.
+- [V] Twelve four-project stress invocations pass with each driver: serial
+  15.99 seconds, parallel 16.16 seconds. This sample does not show a speedup.
+  The enabled standalone self-refresh passes in 555.62 seconds (21817018,
+  COMPLETED 0:0). A separate synthetic 256-module real-edit sample validates
+  eight exact sums and lowers median build time from 0.28 to 0.26 seconds
+  (21817026, COMPLETED 0:0); these are advisory samples. Final-pin consumer
+  validation and main deployment remain separate required steps. Library CI
+  39593355783 is green; the combined race/MCP native gate passes 32 programs
+  on GCC 12.2 with -O1 -g -fopenmp (21817031, COMPLETED 0:0).
+
 ## Native CMake Fortran repair (2026-10-21)
 
 - [V] Source `8734651` retains CMake's per-source preprocessing choice from
