@@ -14,6 +14,72 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  flang:
+    name: Flang build + focused tests
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      GIT_TERMINAL_PROMPT: 0
+      FO_FC: flang-21
+      FO_JOBS: 2
+      OMP_NUM_THREADS: 1
+      FO_DISABLE_SELF_REFRESH: 1
+      FO_SELF_REFRESH: 0
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install LLVM Flang 21
+        run: |
+          curl --fail --location https://apt.llvm.org/llvm-snapshot.gpg.key |
+            sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc >/dev/null
+          echo 'deb https://apt.llvm.org/noble/ llvm-toolchain-noble-21 main' |
+            sudo tee /etc/apt/sources.list.d/llvm.list
+          sudo apt-get update
+          sudo apt-get install -y flang-21 libomp-21-dev gfortran
+          flang-21 --version
+          mkdir -p "$HOME/.local/bin"
+          ln -s /usr/bin/flang-21 "$HOME/.local/bin/flang"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install fpm
+        run: |
+          curl --fail --location -o "$HOME/.local/bin/fpm" \
+            https://github.com/fortran-lang/fpm/releases/download/v0.13.0/fpm-0.13.0-linux-x86_64-gcc-12
+          chmod +x "$HOME/.local/bin/fpm"
+          "$HOME/.local/bin/fpm" --version
+
+      - name: Build Fo with Flang and pin its exact image
+        run: |
+          fpm install --compiler flang-21 --profile release --prefix "$HOME/.local"
+          digest="$(sha256sum "$HOME/.local/bin/fo" | cut -d' ' -f1)"
+          driver="$RUNNER_TEMP/fo-driver-pins/$digest"
+          mkdir -p "$(dirname "$driver")"
+          install -m 0555 "$HOME/.local/bin/fo" "$driver"
+          test "$(sha256sum "$driver" | cut -d' ' -f1)" = "$digest"
+          "$driver" --version
+          echo "FO_DRIVER_A=$driver" >> "$GITHUB_ENV"
+
+      - name: Run focused tests with the Flang-built driver and compiler
+        run: |
+          export FO="$FO_DRIVER_A" FO_BIN="$FO_DRIVER_A"
+          export TMPDIR="$RUNNER_TEMP/fo-flang-tests"
+          export FO_CACHE_DIR="$RUNNER_TEMP/fo-flang-cache"
+          mkdir -p "$TMPDIR"
+          "$FO_DRIVER_A" test --rerun --retries 0 --verbose \
+            test_compiler_dialect test_project_model test_fpm_project_model \
+            test_section_capability test_native_compiler_path_cli
+
+      - name: Retain Flang failure logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flang-failure-logs
+          if-no-files-found: ignore
+          path: |
+            build/fo/test-logs/*.log
+            ${{ runner.temp }}/fo-flang-tests/**/*.log
+
   build-test:
     name: build + focused tests
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
