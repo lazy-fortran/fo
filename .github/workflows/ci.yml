@@ -229,6 +229,8 @@ jobs:
         llvm: [21, 22]
     env:
       GIT_TERMINAL_PROMPT: 0
+      FPM_CC: clang-${{ matrix.llvm }}
+      FPM_CXX: clang++-${{ matrix.llvm }}
       FO_FC: gfortran
       FO_JOBS: 2
       OMP_NUM_THREADS: 1
@@ -244,7 +246,7 @@ jobs:
           echo 'deb https://apt.llvm.org/noble/ llvm-toolchain-noble-${{ matrix.llvm }} main' |
             sudo tee /etc/apt/sources.list.d/llvm.list
           sudo apt-get update
-          sudo apt-get install -y flang-${{ matrix.llvm }} libomp-${{ matrix.llvm }}-dev gfortran
+          sudo apt-get install -y flang-${{ matrix.llvm }} clang-${{ matrix.llvm }} libomp-${{ matrix.llvm }}-dev gfortran
           flang-${{ matrix.llvm }} --version
           mkdir -p "$HOME/.local/bin"
           ln -s /usr/bin/flang-${{ matrix.llvm }} "$HOME/.local/bin/flang"
