@@ -77,7 +77,8 @@ jobs:
           mkdir -p "$TMPDIR"
           "$FO_DRIVER_A" test test_project_model test_fpm_project_model \
             test_cmake_project_model test_project_selection_cli \
-            test_project_layering_cli test_gremlin_case_reuse test_gremlin_cmake
+            test_project_layering_cli test_gremlin_case_reuse test_gremlin_cmake \
+            test_atomic_link_artifacts
 
       - name: Test campaign, journal and coverage recovery
         run: |
@@ -139,7 +140,7 @@ jobs:
           TMPDIR: /var/tmp
         run: |
           mkdir -p "$HOME" "$FO_CACHE_DIR"
-          driver="$HOME/.local/bin/fo"
+          driver="$FO_DRIVER_A"
           FO_BIN="$driver" "$driver" test test_install_help
 
       # The retired cancellation fixture forced LD_PRELOAD EPERM/backoff; #161

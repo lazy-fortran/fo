@@ -3325,9 +3325,21 @@ contains
         integer, intent(out) :: copy_rc
 
         character(len=1024) :: stage_dir, staged_output
+        character(len=HASH_LEN) :: source_key, output_key
         integer :: reserve_rc
         logical :: valid_image
 
+        ! A profile switch can miss the shared build stamp while its linked
+        ! image and app copy are still current. Preserve that executable's inode.
+        call cache_file_digest(source, source_key)
+        call cache_file_digest(final_path, output_key)
+        if (len_trim(source_key) > 0 .and. source_key == output_key) then
+            call fs_find_executable(final_path, staged_output, valid_image)
+            if (valid_image) then
+                copy_rc = 0
+                return
+            end if
+        end if
         call reserve_link_stage(final_path, stage_dir, staged_output, reserve_rc)
         if (reserve_rc /= 0) then
             copy_rc = 1
