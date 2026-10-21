@@ -40,6 +40,28 @@ for people and AI agents. Gremlin is its centre.
 The product boundary in `CLAUDE.md` still holds: no hermetic environments,
 Nix/Spack replacement, CI/promotion engine or agent orchestrator.
 
+## Native CMake Fortran repair (2026-10-21)
+
+- [V] Source `8734651` retains CMake's per-source preprocessing choice from
+  Ninja and uses `-I` for Fortran SYSTEM module directories. Compiler dialect
+  detection now ignores misleading parent-directory names.
+- [V] The three affected native CMake, compiler-dialect and dependency-freshness
+  tests pass, including forced `iIFxVv` temporary paths and independent external
+  module lookup. KIN6D `379f3f1` passes both original chart-solver cases through
+  native Fo without the delegate override and through CTest. Its binary matches
+  the recorded reference SHA256 `b19705b2…`.
+- [V] Linux release SHA256
+  `c2f25388041ef5b85c700696b372bc8eb11f3480e213e7ecec529d63d7bd3b2c`;
+  Darwin `8ef6ffed177dda522b3f5cd9f4de9528e5c3150af642561bc4f23b0b39aa359c`
+  passes the combined preprocessing/module smoke. Fx production source matches
+  `c8d892e`/`53aa79d`; FortFront is `a34ada8`.
+- [V] Full slow-inclusive suite, retries disabled: FO_JOBS=8 gives 183 PASS,
+  1 FAIL in the backend child-cleanup oracle; FO_JOBS=16 gives 182 PASS, 2 FAIL
+  in owner-release/contained-capture oracles. Their process code is unchanged;
+  the original installed driver passes four focused lifecycle controls.
+  These runs are not full green qualification. Lifecycle causes remain unresolved
+  under [#139](https://github.com/lazy-fortran/fo/issues/139).
+
 ## Compile-cache qualification (2026-10-20)
 
 - Verified source `291862c` with immutable driver SHA256
