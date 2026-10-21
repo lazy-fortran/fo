@@ -115,6 +115,14 @@ Nix/Spack replacement, CI/promotion engine or agent orchestrator.
   and repaired driver, including six other failing controls. No full green is
   claimed. Evidence: `folife-logs` in the 20261021_cluster_triage handoff root.
 
+- [V] Additional warm-cache stress exposed a GCC 12 generated-length race:
+  Helgrind identifies shared `slen.167.1` at Fx immutable_store_init:118;
+  the crash reaches fx_path:219. Upstream main 53aa79d has no newer repair.
+  Fo's cache adapter now serializes store calls under one OpenMP critical
+  region while compiler/linker processes and test execution stay parallel.
+  All six lifecycle programs pass locally with retries disabled after repair.
+  The existing four-project cold/warm oracle retains every assertion.
+
 ## Darwin relocatable debug results (2026-10-21)
 
 - [V] The original CMake oracle's five Darwin failures have three producers:
@@ -143,7 +151,9 @@ Nix/Spack replacement, CI/promotion engine or agent orchestrator.
   a34ada8 at type_system_arena.f90:58–376 (duplicate PUBLIC attributes and
   incomplete constructors). Upstream main has no newer fix. This gate does
   not claim that the complete Fo/FortFront stack builds with Flang.
-- [H] CI qualification and making both job names required await green main.
+- [V] Main b237d63 passes both jobs (CI 39571141426). Ruleset 25437892
+  now requires both exact GitHub Actions job names and preserves merge queue.
+  Queue admission and merge under the new requirements are the next check.
 
 ## Native CMake Fortran repair (2026-10-21)
 
