@@ -34,7 +34,7 @@ module fo_gremlin_generation
         character(len=PATH_LEN) :: driver_path = ''
         character(len=HASH_LEN) :: driver_digest = ''
         integer(int64) :: driver_size = 0_int64
-        type(input_inventory_t) :: input_inventory
+        type(input_inventory_t) :: input_inventory = input_inventory_t()
     end type generation_context_t
 
     type, public :: generation_t
@@ -50,7 +50,7 @@ module fo_gremlin_generation
         character(len=PATH_LEN) :: build_project_root = ''
         character(len=:), allocatable :: base_commit
         character(len=:), allocatable :: patch_digest
-        type(input_inventory_t) :: input_inventory
+        type(input_inventory_t) :: input_inventory = input_inventory_t()
         logical :: input_inventory_ready = .false.
         logical :: input_inventory_complete = .false.
         character(len=1024) :: input_inventory_diagnostic = ''
