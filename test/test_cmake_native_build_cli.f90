@@ -56,6 +56,7 @@ program test_cmake_native_build_cli
     call twin_verdicts()
     call mixed_project()
     call source_preprocessing()
+    call system_module_include()
     call generated_source_is_delegated()
     call duplicate_modules_are_delegated()
     call interface_cutoff()
@@ -67,6 +68,45 @@ program test_cmake_native_build_cli
     write (*, '(a)') 'cmake-native-build-cli: native build matches cmake --build'
 
 contains
+
+    subroutine system_module_include()
+        character(:), allocatable :: root, modules
+        type(process_result_t) :: observed
+        type(string_list_t) :: command, args, environment
+
+        root = join_path(scratch, 'system-module')
+        modules = join_path(root, 'system')
+        call write_lines(join_path(modules, 'external.f90'), [character(len=80) :: &
+            'module external_config', 'implicit none', &
+            'integer, parameter :: expected = 31', 'end module external_config'])
+        ! An independently compiled module, like an installed MPI module, has
+        ! no provider target whose module directory Fo could add implicitly.
+        call list_add(command, fortran)
+        call list_add(command, '-c')
+        call list_add(command, '-J'//modules)
+        call list_add(command, '-o')
+        call list_add(command, join_path(modules, 'external.o'))
+        call list_add(command, join_path(modules, 'external.f90'))
+        call run_process(command, root, observed)
+        call assert_process_ok(observed, 'independent external module compiles')
+        call write_lines(join_path(root, 'CMakeLists.txt'), [character(len=180) :: &
+            'cmake_minimum_required(VERSION 3.20)', &
+            'project(system_module Fortran)', 'enable_testing()', &
+            'add_executable(probe main.f90)', &
+            'target_include_directories(probe SYSTEM PRIVATE system)', &
+            'add_test(NAME system_module COMMAND probe)'])
+        call write_lines(join_path(root, 'main.f90'), [character(len=80) :: &
+            'program probe', 'use external_config, only: expected', &
+            'implicit none', 'if (expected /= 31) stop 1', 'end program probe'])
+        environment = fo_environment(.false., .true.)
+        call list_add(environment, 'FO_CMAKE_ARGS=-DCMAKE_Fortran_COMPILER='//fortran)
+        call list_add(args, 'test')
+        call remove_path(cmake_log)
+        call run_fo(driver, args, root, cache, observed, environment)
+        call assert_process_ok(observed, 'SYSTEM include finds an external Fortran module')
+        call assert_true(.not. file_exists(cmake_log), &
+            'external module includes do not require delegation')
+    end subroutine system_module_include
 
     subroutine source_preprocessing()
         character(:), allocatable :: root, reference, dir

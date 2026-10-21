@@ -434,7 +434,9 @@ contains
                 call add_token(argv, '-D'//grp%defines(i)%s)
             end do
             do i = 1, grp%n_includes
-                if (grp%include_system(i)) then
+                ! Fortran module lookup needs -I even for SYSTEM includes;
+                ! -isystem only supplies a preprocessor/header search path.
+                if (grp%include_system(i) .and. grp%language /= 'Fortran') then
                     call add_token(argv, '-isystem')
                     call add_token(argv, grp%includes(i)%s)
                 else
