@@ -3,7 +3,7 @@ program test_gremlin_supervisor
     use, intrinsic :: iso_fortran_env, only: error_unit, output_unit, int64
     use fo_cache, only: cache_digest
     use fo_fs, only: fs_make_dir, fs_remove_tree, fs_sleep_ms
-    use fo_gremlin_lifecycle, only: gremlin_freshness_update
+    use fo_gremlin_lifecycle, only: gremlin_freshness_update, gremlin_freshness_check
     use fo_gremlin_journal, only: journal_append
     use fo_gremlin_coverage, only: coverage_epoch_t, coverage_open, &
         coverage_record, COVERAGE_OK
@@ -450,6 +450,8 @@ contains
         integer :: ierr, exitcode, release_error, status, digest_position, attempt
         integer(c_int) :: freshness_pid, child_status
         integer(int64) :: freshness_ticket, earlier_poll, later_request
+        integer(int64) :: before_wait, after_wait, clock_rate
+        logical :: acknowledged
 
         call make_tmpfile('fo-gremlin-readiness-state', state_root)
         call make_tmpfile('fo-gremlin-readiness-project', project_dir)
@@ -477,6 +479,14 @@ contains
         call check(status == 0 .and. freshness_ticket == earlier_poll .and. &
             freshness_ticket < later_request, &
             'an earlier provider poll cannot acknowledge a later consumer request')
+
+        call system_clock(count=before_wait, count_rate=clock_rate)
+        call gremlin_freshness_check(trim(freshness_path), acknowledged)
+        call system_clock(count=after_wait)
+        call check(.not. acknowledged, 'an absent owner never verifies freshness')
+        call check(clock_rate > 0_int64 .and. &
+            after_wait - before_wait < 5_int64*clock_rate, &
+            'unacknowledged freshness returns before the client safety deadline')
 
         freshness_pid = c_fork()
         call check(freshness_pid >= 0, 'starts isolated component freshness provider')
