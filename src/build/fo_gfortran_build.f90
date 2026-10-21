@@ -5699,9 +5699,9 @@ contains
         if (do_cache) do_cache = len_trim(base_digest) > 0
         if (do_cache) then
             call cache_file_digest(prog_obj, prog_key)
-            key_parts(1) = 'fo-link-3'
+            key_parts(1) = 'fo-link-4'
             if (present(exact_flags)) then
-                if (exact_flags) key_parts(1) = 'fo-declared-link-1'
+                if (exact_flags) key_parts(1) = 'fo-declared-link-2'
             end if
             key_parts(2) = trim(fc_command())
             key_parts(3) = 'default'
@@ -5884,11 +5884,13 @@ contains
         call append_fc_command(packed, n_args)
         if (use_lld) call argv_push(packed, n_args, '-fuse-ld=lld')
         call argv_push(packed, n_args, prog_obj)
-        do i = 1, n_lib_objs
-            call argv_push(packed, n_args, lib_objs(i))
-        end do
+        ! Ordinary dependency objects may call into the project archive.
+        ! Introduce those references before the linker scans its members.
         do i = 1, n_dep_objs
             call argv_push(packed, n_args, dep_objs(i))
+        end do
+        do i = 1, n_lib_objs
+            call argv_push(packed, n_args, lib_objs(i))
         end do
         declared_link = .false.
         if (present(exact_flags)) declared_link = exact_flags

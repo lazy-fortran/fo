@@ -6,6 +6,9 @@ permissions:
   contents: read
 jobs:
   repo-hygiene:
+    # A skipped reusable call has no child job to supply the nested check name.
+    name: ${{ github.event_name == 'pull_request' && 'repo-hygiene / repo-hygiene' || 'repo-hygiene' }}
+    if: github.event_name == 'merge_group'
     uses: itpplasma/.github/.github/workflows/repo-hygiene.yml@0663fcdd3b414a741bc3df08959a6f83aedf2d40
     with:
       hygiene-revision: 0663fcdd3b414a741bc3df08959a6f83aedf2d40
