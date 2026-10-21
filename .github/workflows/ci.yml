@@ -19,7 +19,7 @@ jobs:
   build-test:
     name: build + focused tests
     if: >-
-      github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && github.actor != 'github-merge-queue[bot]') || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'full-ci'))
+      github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && github.actor != 'github-merge-queue[bot]')
     runs-on: ${{ github.event.pull_request.head.repo.fork && fromJSON('["self-hosted","itp-ubuntu24"]') || fromJSON('["self-hosted","itp-build"]') }}
     timeout-minutes: 40
     env:
@@ -218,7 +218,7 @@ jobs:
         if: ${{ github.event.pull_request.head.repo.fork }}
   flang_compiler:
     name: Flang ${{ matrix.llvm }} bootstrap + consumers
-    if: github.event_name == 'merge_group'
+    if: github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch'
     runs-on:
       - self-hosted
       - itp-ubuntu24
@@ -305,7 +305,7 @@ jobs:
 
   flang-result:
     name: Flang native build + focused tests
-    if: ${{ always() && github.event_name == 'merge_group' }}
+    if: ${{ always() && (github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch') }}
     needs: flang_compiler
     runs-on:
       - self-hosted

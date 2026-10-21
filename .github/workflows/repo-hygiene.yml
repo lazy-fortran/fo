@@ -15,6 +15,7 @@ permissions:
   contents: read
 jobs:
   repo-hygiene:
+    if: github.event_name != 'pull_request'
     uses: itpplasma/.github/.github/workflows/repo-hygiene.yml@dd4e7ef8217afa34e70efe4dc6a9289f6b5176b2
     with:
       hygiene-revision: dd4e7ef8217afa34e70efe4dc6a9289f6b5176b2
