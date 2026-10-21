@@ -16,13 +16,9 @@ module-naming = false
 library = false
 
 [dependencies]
-fx = { git = "https://github.com/lazy-fortran/fx.git", rev = "362464d72eb1b57c6ca63751eca2578d77ea5f00" }
-# Tracking fortfront's main rather than a tag while the two move together.
-# Pinning to v0.1.1 meant fixes landing in fortfront were invisible here -
-# including the out-of-bounds token read that segfaults every fo run under
-# gfortran 13.3, which is what Ubuntu 24.04 and so every GitHub runner has.
-# Pin again once that has settled.
-fortfront = { git = "https://github.com/lazy-fortran/fortfront.git", branch = "main" }
+fx = { git = "https://github.com/lazy-fortran/fx.git", rev = "84b3f6daedb9fe66ab078eb71bd0ffd8e3c23bab" }
+# Explicit arena defaults support the full Flang bootstrap.
+fortfront = { git = "https://github.com/lazy-fortran/fortfront.git", rev = "be2de15ed0869365b9cfd6f996a12454a33e482b" }
 openmp = "*"
 
 [dev-dependencies]

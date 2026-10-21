@@ -163,18 +163,47 @@ Nix/Spack replacement, CI/promotion engine or agent orchestrator.
   sCluster 5842a6c135818def1808438f372de77cd7d59ee1d3ca45291747b3e73c315146;
   aCluster 447e345d6df50c900402b33dad1cae75ae30a1a5c1f687b96ad52ce2808d42be.
 
-## Independent Flang consumer gate (2026-10-21)
+## Complete Flang bootstrap qualification (2026-10-21)
 
-- [V] The Flang CI job builds and tests native FPM and CMake consumers whose
-  programs verify compiler_version() identifies Flang and check a module result.
-  Both routes pass locally with Flang 23.1.3 through the qualified Fo driver.
-  The job also runs five focused compiler/project-model tests and merge groups.
-- [V] Fo itself is bootstrapped with GNU Fortran: Flang 21 rejects FortFront
-  a34ada8 at type_system_arena.f90:58–376 (duplicate PUBLIC attributes and
-  incomplete constructors). Upstream main has no newer fix. This gate does
-  not claim that the complete Fo/FortFront stack builds with Flang.
-- [V] Main b237d63 passes both jobs (CI 39571141426). Ruleset 25437892
-  now requires both exact GitHub Actions job names and preserves merge queue.
+- [V] FortFront's GNU-only constructs are repaired upstream in #3038:
+  duplicate accessibility, incomplete nested defaults, and borrowed pointer
+  targets. GCC 12.2 job 21817050 builds all 377 library sources and passes six
+  affected native programs; Flang 21.1.8 builds the complete Fo bootstrap in
+  21817049. Fo also initializes nested generation/lease/owned-job components
+  explicitly and declares CMake route accessibility once.
+- [V] The Flang-built consumer then exposed Fx manifest field-length loss at
+  fx_immutable_manifest.f90:226. Fx #70 assigns an array section to retain its
+  allocation. Job 21817060 passes the four hash/store/cache programs with both
+  GCC 12.2 and Flang 21.1.8 at -O3 -fopenmp; the original Flang store/cache
+  programs fail (21817058). No validation is bypassed.
+- [V] Full Fo bootstrap and native FPM/CMake consumers pass with Flang 21.1.8
+  and 22.1.8 (21817061/21817062, COMPLETED 0:0). The Flang 21-built image
+  b16548554d6b71b893c574c465fec68a8cc83545e3edcbbd53eae0704246269d
+  also passes public MCP smoke and a green/quiescent resident lane whose owner
+  exits before scratch cleanup (21817071, COMPLETED 0:0). Initial diagnostic
+  script bounds, cleanup expectations and state/cache isolation were corrected;
+  their failed jobs are not counted as PASS. CI now bootstraps Fo
+  itself with each Flang 21 and 22 compiler, then runs the compiler/model and
+  real native FPM/CMake consumers. The existing required Flang check aggregates
+  both matrix results and runs on merge groups. FortFront #3038 is merged as
+  be2de15ed0869365b9cfd6f996a12454a33e482b. Fx #70 preserves manifest
+  field allocation; #74 flushes complete MCP responses and sizes JSON escapes
+  exactly. GCC12/Flang21 JSON and interactive MCP tests pass (21817090).
+- [V] Native development C objects must precede their provider archive in link
+  arguments. The independent forwarding-adapter regression fails before this
+  correction (21817084) and all 295 backend checks plus CMake pass afterward
+  (21817085). Link-cache namespaces advance with the corrected ordering.
+  Fx #74 is merged as 84b3f6daedb9fe66ab078eb71bd0ffd8e3c23bab.
+  The repaired Flang22 lint exchange exits normally (21817096). Its complete
+  check path needs the matching LLVM22 libomp runtime: the system library
+  lacks __kmpc_fork_call_if, emitted by compile_sources at the conditional
+  OpenMP regions. With that matching runtime, both complete MCP oracles pass
+  (21817100, COMPLETED 0:0). GCC12 backend/CMake/MCP all pass in
+  21817092 (COMPLETED 0:0); Darwin also passes those four programs, with
+  the full MCP case isolated after the combined run reached its local cap.
+  Following the current policy, required CI jobs skip PR/push events and run
+  on merge_group; the queue supplies the real CI guarantee. Queue CI and
+  deployment remain pending.
 
 ## Concurrent cache follow-up (2026-10-21)
 
@@ -195,8 +224,13 @@ Nix/Spack replacement, CI/promotion engine or agent orchestrator.
   The enabled standalone self-refresh passes in 555.62 seconds (21817018,
   COMPLETED 0:0). A separate synthetic 256-module real-edit sample validates
   eight exact sums and lowers median build time from 0.28 to 0.26 seconds
-  (21817026, COMPLETED 0:0); these are advisory samples. Final-pin consumer
-  validation and main deployment remain separate required steps. Library CI
+  (21817026, COMPLETED 0:0); these are advisory samples. Final-pin image
+  043721b908c2c48a3676d5efbdf5bf297ad385e12a3fb37b37fdb306e756d3b3
+  passes backend, native CMake, MCP system/protocol and enabled self-refresh
+  (551.76 seconds) in GCC 12.2 job 21817033, COMPLETED 0:0. Darwin image
+  3cde7026396946a732f34aca8c989262b2ba282cbff9001f096cb16aa24bebfe
+  passes CLI/profile and MCP smoke; identical Linux image smoke passes locally
+  and on sCluster (3311014, COMPLETED 0:0). Main deployment awaits #226. Library CI
   39593355783 is green; the combined race/MCP native gate passes 32 programs
   on GCC 12.2 with -O1 -g -fopenmp (21817031, COMPLETED 0:0).
 
