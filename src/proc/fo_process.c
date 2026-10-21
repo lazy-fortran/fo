@@ -1082,7 +1082,8 @@ static int signal_owned_tree(pid_t root, uint64_t root_start,
    Zombies can only be reaped by their parent/subreaper and do not run work. */
 static int kill_isolated_group(pid_t pid) {
     struct timespec now, deadline;
-    if (kill(-pid, SIGKILL) != 0 && errno != ESRCH) return errno;
+    int signal_error = 0;
+    if (kill(-pid, SIGKILL) != 0 && errno != ESRCH) signal_error = errno;
 #if defined(__linux__) || defined(__APPLE__)
     if (clock_gettime(CLOCK_MONOTONIC, &deadline) != 0) return errno;
     add_seconds(&deadline, 2);
@@ -1100,6 +1101,9 @@ static int kill_isolated_group(pid_t pid) {
         }
         free(pids);
         if (!running) return 0;
+        /* Darwin can return EPERM for an already-dead group's zombie leader.
+           A signal error matters only while there is still work to stop. */
+        if (signal_error != 0) return signal_error;
         if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) return errno;
         if (timespec_at_or_after(&now, &deadline)) return ETIMEDOUT;
         sleep_ms(10);
@@ -1107,7 +1111,7 @@ static int kill_isolated_group(pid_t pid) {
 #else
     (void)now;
     (void)deadline;
-    return 0;
+    return signal_error;
 #endif
 }
 
