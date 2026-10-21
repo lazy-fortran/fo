@@ -4,10 +4,13 @@ module fo_cache
     !! the action/keying API that lives in fx_action_cache.
     use fx_action_cache, only: cache_t, HASH_LEN, &
         action_cache_root, action_cache_store_root, action_cache_schema, &
-        action_cache_init, cache_key_for, cache_lookup, &
-        cache_restore_action, &
-        cache_store_action, cache_action_mod_key, cache_store_binary, &
-        cache_restore_binary, cache_binary_matches, cache_digest, &
+        action_cache_init, cache_key_for, fx_cache_lookup => cache_lookup, &
+        fx_cache_restore_action => cache_restore_action, &
+        fx_cache_store_action => cache_store_action, &
+        fx_cache_action_mod_key => cache_action_mod_key, &
+        fx_cache_store_binary => cache_store_binary, &
+        fx_cache_restore_binary => cache_restore_binary, &
+        fx_cache_binary_matches => cache_binary_matches, cache_digest, &
         cache_file_digest, hash_mod_file
     use fx_action_result_store, only: action_result_store_policy
     use, intrinsic :: iso_fortran_env, only: int64
@@ -71,6 +74,90 @@ contains
         end if
         !$omp end critical (fo_cache_policy)
     end subroutine cache_init
+
+    ! GCC 12 emits a shared deferred-result length for Fx's
+    ! immutable_store_init -> path_normalize call (fx_immutable_store.f90:118).
+    ! Serialize store access at this adapter boundary; compiler processes and
+    ! test execution remain parallel. The upstream store stays authoritative.
+    function cache_lookup(c, key) result(hit)
+        type(cache_t), intent(in) :: c
+        character(len=*), intent(in) :: key
+        logical :: hit
+
+        !$omp critical (fo_cache_store)
+        hit = fx_cache_lookup(c, key)
+        !$omp end critical (fo_cache_store)
+    end function cache_lookup
+
+    subroutine cache_restore_action(c, action_id, obj_path, mod_dir, restored, &
+            output_id, required_mod_names, required_smod_names)
+        type(cache_t), intent(in) :: c
+        character(len=*), intent(in) :: action_id, obj_path, mod_dir
+        logical, intent(out) :: restored
+        character(len=HASH_LEN), intent(out), optional :: output_id
+        character(len=*), intent(in), optional :: required_mod_names(:), &
+            required_smod_names(:)
+
+        !$omp critical (fo_cache_store)
+        call fx_cache_restore_action(c, action_id, obj_path, mod_dir, restored, &
+            output_id, required_mod_names, required_smod_names)
+        !$omp end critical (fo_cache_store)
+    end subroutine cache_restore_action
+
+    subroutine cache_store_action(c, action_id, obj_path, mod_dir, module_names, &
+            output_id, ierr, smod_names)
+        type(cache_t), intent(in) :: c
+        character(len=*), intent(in) :: action_id, obj_path, mod_dir, module_names(:)
+        character(len=HASH_LEN), intent(out) :: output_id
+        integer, intent(out) :: ierr
+        character(len=*), intent(in), optional :: smod_names(:)
+
+        !$omp critical (fo_cache_store)
+        call fx_cache_store_action(c, action_id, obj_path, mod_dir, module_names, &
+            output_id, ierr, smod_names)
+        !$omp end critical (fo_cache_store)
+    end subroutine cache_store_action
+
+    subroutine cache_action_mod_key(c, action_id, mod_key, found)
+        type(cache_t), intent(in) :: c
+        character(len=*), intent(in) :: action_id
+        character(len=HASH_LEN), intent(out) :: mod_key
+        logical, intent(out) :: found
+
+        !$omp critical (fo_cache_store)
+        call fx_cache_action_mod_key(c, action_id, mod_key, found)
+        !$omp end critical (fo_cache_store)
+    end subroutine cache_action_mod_key
+
+    subroutine cache_store_binary(c, action_id, bin_path, ierr)
+        type(cache_t), intent(in) :: c
+        character(len=*), intent(in) :: action_id, bin_path
+        integer, intent(out) :: ierr
+
+        !$omp critical (fo_cache_store)
+        call fx_cache_store_binary(c, action_id, bin_path, ierr)
+        !$omp end critical (fo_cache_store)
+    end subroutine cache_store_binary
+
+    subroutine cache_restore_binary(c, action_id, dest_path, restored)
+        type(cache_t), intent(in) :: c
+        character(len=*), intent(in) :: action_id, dest_path
+        logical, intent(out) :: restored
+
+        !$omp critical (fo_cache_store)
+        call fx_cache_restore_binary(c, action_id, dest_path, restored)
+        !$omp end critical (fo_cache_store)
+    end subroutine cache_restore_binary
+
+    subroutine cache_binary_matches(c, action_id, bin_path, matches)
+        type(cache_t), intent(in) :: c
+        character(len=*), intent(in) :: action_id, bin_path
+        logical, intent(out) :: matches
+
+        !$omp critical (fo_cache_store)
+        call fx_cache_binary_matches(c, action_id, bin_path, matches)
+        !$omp end critical (fo_cache_store)
+    end subroutine cache_binary_matches
 
     subroutine cache_env_size(name, value, ok)
         !! Read a non-negative integer with an optional K/M/G/T (1024-based)

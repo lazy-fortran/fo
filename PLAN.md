@@ -115,6 +115,14 @@ Nix/Spack replacement, CI/promotion engine or agent orchestrator.
   and repaired driver, including six other failing controls. No full green is
   claimed. Evidence: `folife-logs` in the 20261021_cluster_triage handoff root.
 
+- [V] Additional warm-cache stress exposed a GCC 12 generated-length race:
+  Helgrind identifies shared `slen.167.1` at Fx immutable_store_init:118;
+  the crash reaches fx_path:219. Upstream main 53aa79d has no newer repair.
+  Fo's cache adapter now serializes store calls under one OpenMP critical
+  region while compiler/linker processes and test execution stay parallel.
+  All six lifecycle programs pass locally with retries disabled after repair.
+  The existing four-project cold/warm oracle retains every assertion.
+
 ## Independent Flang consumer gate (2026-10-21)
 
 - [V] The Flang CI job builds and tests native FPM and CMake consumers whose
