@@ -84,7 +84,7 @@ jobs:
     name: build + focused tests
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 40
     env:
       # Never let a missing credential turn into a hung git prompt.
       GIT_TERMINAL_PROMPT: 0
@@ -173,13 +173,14 @@ jobs:
         run: |
           export TMPDIR="$RUNNER_TEMP/fo-self-refresh-oracle-tmp"
           mkdir -p "$TMPDIR"
-          # Use fpm.toml's wall cap for the cumulative cold self/profile builds.
-          # Nested commands retain 180-second caps; cold release install has
-          # a 900-second safety cap (317 seconds measured on GCC 12.2).
+          # Cold profiles plus release install exceed the ordinary 600-second
+          # test cap on CI. These are safety bounds, not timing assertions.
+          # Each nested command has a 900-second cap (317 s measured install).
           # Run this expensive oracle once so its first failure reaches the log
           # collector instead of a cold retry consuming the job's safety budget.
           FO_BIN="$HOME/.local/bin/fo" \
           FO_RUN_SELF_REFRESH_ORACLE=1 \
+          FO_TEST_WALL_TIMEOUT=1800 \
           FO_DISABLE_SELF_REFRESH=1 \
           FO_SELF_REFRESH=0 \
           FO_CACHE_DIR="$RUNNER_TEMP/fo-self-refresh-oracle-cache" \
