@@ -1,6 +1,6 @@
 # Fast staged pre-commit checks
 
-`fo hook pre-commit [--json]` validates the **index**, including partially staged
+`fo hook pre-commit --bounded [--json]` validates the **index**, including partially staged
 files. Git `write-tree` freezes its identity; a private index materializes that
 exact tree in an owned sibling directory. Initialized submodules are checked out
 at their staged gitlink commits. Unstaged and untracked project files are never
@@ -18,16 +18,20 @@ input inventory and shared store. No new scheduler or test registry:
    input closure, compiler/configuration/environment and Fo driver identity.
    Git's tree ID accompanies the result. An incomplete input inventory never
    yields a cache hit. Build artifacts alone never prove tests passed.
-3. On a miss, the staged build is mandatory. A failure or expiry of its hard
-   cap blocks the commit. The normal budget does not cancel this build.
+3. On a miss, the staged build is mandatory. The bounded commit command shares
+   one approximately ten-second wall budget across configuration, compilation,
+   tests, cancellation and cleanup. A failure or missing verification blocks
+   the commit and directs explicit preparation with `fo hook pre-commit`.
 4. Run fast affected cases in model order within the remaining normal budget,
    using the same conservative impact model as `fo test --only-changed`.
    Unknown impact widens selection. A failing completed test blocks. Slow,
-   excluded and budget-limited cases are **DEFERRED to merge_group CI**. A killed
-   budget-limited test is deferred, never PASS. No wait for active Gremlin work,
+   excluded cases are **DEFERRED to merge_group CI**. A killed or unrun fast
+   case is never PASS and blocks the bounded commit command. No wait for active Gremlin work,
    graph ranking, sampling or full suite in the hook. Fo Git acquisition is
-   restricted to local files; acquire dependencies before committing. CMake
-   projects retain responsibility for network access in their configure scripts.
+   restricted to local files; acquire dependencies before committing. Both hook modes add the disconnected flags to the existing CMake configuration
+   identity and disable FetchContent downloads and updates. Acquire prerequisites
+   with normal `fo build` before explicit hook preparation;
+   arbitrary project configure scripts retain responsibility for their own network contract.
 
 The existing shared store holds a small atomic receipt only after the build and
 **every** fast model case passed. Gremlin publishes the same receipt at green
@@ -38,8 +42,11 @@ when CMake inputs cannot be relocated; correctness takes precedence over a hit.
 The snapshot itself and native model loading still cost time on a receipt hit;
 millisecond latency is a target to measure, not a promised constant.
 
-Defaults are 10 seconds normal budget, 60 seconds mandatory build cap, and a
-1-second fast-test warning threshold. Set per repository using:
+The explicit manual preparation command retains a 10-second test budget, a
+60-second mandatory build cap and a 1-second fast-test warning threshold. The
+bounded commit command cancels owned work after eight seconds, reserving about
+two seconds for process drainage and snapshot cleanup. Raising manual budgets
+does not extend the commit budget. Configure manual preparation per repository:
 
 ```sh
 git config fo.hookBudget 10
@@ -71,7 +78,7 @@ native CMake/CTest or fpm merge-group CI remains the final guarantee.
 
 ## Hook chain and tool choices
 
-The shared global hook runs staged hygiene, optional Fo checks, then the repo's
+The shared global hook invokes the bounded mode after staged hygiene, then the repo's
 own hook/framework. No Fo installation is required to use CMake/fpm or commit:
 missing Fo or gitleaks prints one hint and skips that tool. Missing optional
 framework executables warn too. A cached release hint is advisory, refreshed
@@ -82,7 +89,7 @@ guarantees. Install/pin tools ahead of commits; no network setup in hooks.
 
 | Repo/files | Per commit | Typical warm time |
 | --- | --- | --- |
-| Fortran fpm/CMake | staged native format check; exact receipt or build + fast affected tests | receipt target <1 s; miss ~1–10 s, build cap 60 s |
+| Fortran fpm/CMake | staged native format check; exact receipt or build + fast affected tests | overall target ~10 s; larger builds need explicit preparation |
 | Python | `ruff check`, `ruff format --check`; focused tests only if cheap | ~0.05–1 s |
 | Shell | `shellcheck`, `shfmt -d` on staged scripts | ~0.05–1 s |
 | YAML/Actions | YAML parse/lint; `actionlint` on staged workflows | ~0.05–1 s |

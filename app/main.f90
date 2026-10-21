@@ -464,7 +464,7 @@ contains
 
         select case (command)
         case ('hook')
-            write(output_unit, '(a)') 'usage: fo hook pre-commit [--json]'
+            write(output_unit, '(a)') 'usage: fo hook pre-commit [--json] [--bounded]'
         case ('install')
             call print_install_usage()
         case ('test')

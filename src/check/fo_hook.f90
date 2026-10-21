@@ -6,6 +6,7 @@ module fo_hook
     use fo_project_load, only: project_affected
     use fo_gremlin_context, only: case_identity_capture
     use fo_gremlin_generation, only: generation_t
+    use fo_gremlin_request, only: gremlin_json_text_valid
     use fo_hook_evidence, only: hook_input_key, hook_receipt_read, &
         hook_receipt_write, hook_slow_case
     use fo_test_results, only: test_result_entry_t, parse_test_results
@@ -24,6 +25,7 @@ module fo_hook
     implicit none
     private
     public :: hook_cli
+    real(dp), save :: commit_deadline = 0.0_dp
     interface
         integer(c_int) function c_prepare(root, view, cap) bind(C, name='fo_c_hook_prepare')
             import :: c_char, c_int
@@ -33,31 +35,117 @@ module fo_hook
     end interface
 contains
     subroutine hook_cli()
-        character(len=4096) :: argument
-        logical :: json
+        character(len=4096) :: argument, owned_view
+        logical :: json, bounded
         integer :: i, code
 
         json = .false.
+        bounded = .false.
+        owned_view = ''
         call get_command_argument(2, argument)
         if (trim(argument) /= 'pre-commit') then
-            write(error_unit, '(a)') 'usage: fo hook pre-commit [--json]'
+            write(error_unit, '(a)') 'usage: fo hook pre-commit [--json] [--bounded]'
             call process_exit(2)
         end if
         do i = 3, command_argument_count()
             call get_command_argument(i, argument)
-            if (trim(argument) /= '--json') then
+            select case (trim(argument))
+            case ('--json')
+                json = .true.
+            case ('--bounded')
+                bounded = .true.
+            case default
+                if (index(argument, '--view=') == 1) then
+                    owned_view = argument(8:)
+                    cycle
+                end if
                 write(error_unit, '(a)') 'fo hook: unknown option '//trim(argument)
                 call process_exit(2)
-            end if
-            json = .true.
+            end select
         end do
-        call staged_check(json, code)
+        if (bounded) then
+            call bounded_check(json, code)
+        else
+            call staged_check(json, code, trim(owned_view))
+        end if
         call process_exit(code)
     end subroutine hook_cli
 
-    subroutine staged_check(json, code)
+    subroutine bounded_check(json, code)
         logical, intent(in) :: json
         integer, intent(out) :: code
+        character(len=4096) :: driver, log
+        character(len=:), allocatable :: root, snapshot, packed, text, message
+        type(string_t), allocatable :: empty(:)
+        integer :: status, n, attempt, cleanup, kind
+        logical :: found, owned
+
+        ! Reserve two seconds of the approximate ten-second commit budget
+        ! for owned-process drainage and snapshot cleanup after cancellation.
+        commit_deadline = wall_time_seconds() + 8.0_dp
+        code = 1
+        owned = .false.
+        allocate(empty(0))
+        message = 'staged verification incomplete; prepare with: fo hook pre-commit'
+        call make_tmpfile('fo-bounded-hook', log)
+        call process_self_executable(driver, found)
+        validation: block
+            if (.not. found) exit validation
+            call git_text('.', git_words('rev-parse', '--show-toplevel'), root, status)
+            if (status /= 0) exit validation
+            root = fs_canonical_path(root)
+            do attempt = 1, 100
+                snapshot = path_dirname(root)//'/.fo-hook-'// &
+                    int_text(process_getpid())//'-'//int_text(attempt)
+                if (fs_mkdir_excl(snapshot) /= 0) cycle
+                owned = .true.
+                exit
+            end do
+            if (.not. owned) exit validation
+            n = 0
+            packed = ''
+            call argv_push(packed, n, trim(driver))
+            call argv_push(packed, n, 'hook')
+            call argv_push(packed, n, 'pre-commit')
+            call argv_push(packed, n, '--view='//snapshot)
+            if (json) call argv_push(packed, n, '--json')
+            if (wall_time_seconds() >= commit_deadline) exit validation
+            call process_run_argv_logged(root, packed, n, log, .false., &
+                max(1, int(commit_deadline - wall_time_seconds())), status, &
+                heartbeat_s=0, cpu_budget_s=86400, timeout_kind=kind)
+            if (status == 125) then
+                owned = .false.
+                message = message//'; process drainage failed; retained '//snapshot
+                exit validation
+            end if
+            if (kind == TIMEOUT_WALL .or. status == 124) exit validation
+            call read_text_file_alloc(trim(log), text, cleanup)
+            if (cleanup /= 0 .or. len_trim(text) == 0) exit validation
+            if (json) then
+                if (.not. gremlin_json_text_valid(text)) exit validation
+            end if
+            code = status
+            message = ''
+        end block validation
+        if (owned) then
+            call fs_remove_tree(snapshot, cleanup)
+            if (cleanup /= 0) then
+                code = 1
+                message = 'cannot remove owned staged view: '//snapshot
+            end if
+        end if
+        if (len(message) == 0) then
+            write(output_unit, '(a)') trim(text)
+        else
+            call report(json, code, '', '', .false., .false., 0, empty, empty, message)
+        end if
+        call delete_tmpfile(trim(log))
+    end subroutine bounded_check
+
+    subroutine staged_check(json, code, owned_view)
+        logical, intent(in) :: json
+        integer, intent(out) :: code
+        character(len=*), intent(in) :: owned_view
         type(backend_t) :: backend
         type(project_model_t) :: model
         type(model_request_t) :: request
@@ -110,15 +198,23 @@ contains
             budget = config_seconds(root, 'fo.hookBudget', 10)
             cap = config_seconds(root, 'fo.hookBuildCap', 60)
             threshold = real(config_seconds(root, 'fo.hookFastThreshold', 1), dp)
-            do attempts = 1, 100
+            if (len(owned_view) > 0) then
+                if (index(owned_view, path_dirname(root)//'/.fo-hook-') /= 1) then
+                    message = 'invalid owned staged view'
+                    exit validation
+                end if
+                snapshot = owned_view
+            else
+              do attempts = 1, 100
                 snapshot = path_dirname(root)//'/.fo-hook-'//int_text(process_getpid())// &
                     '-'//int_text(attempts)
                 if (fs_mkdir_excl(snapshot) == 0) then
                     snapshot_owned = .true.
                     exit
                 end if
-            end do
-            if (.not. snapshot_owned) then
+              end do
+            end if
+            if (.not. snapshot_owned .and. len(owned_view) == 0) then
                 message = 'cannot create an isolated staged view beside the repository'
                 exit validation
             end if
@@ -274,6 +370,13 @@ contains
                 passed = passed + 1
             end do
             if (len(message) > 0) exit validation
+            if (len(owned_view) > 0) then
+                if (.not. identity_ok .or. .not. model%complete .or. passed /= fast) then
+                    message = 'staged verification incomplete; prepare with: '// &
+                        'fo hook pre-commit'
+                    exit validation
+                end if
+            end if
             ! Only a complete fast tier is a reusable receipt. An affected
             ! subset is useful evidence, but cannot stand for every fast test.
             if (model%complete .and. passed == count_model_fast(model)) &
@@ -399,7 +502,7 @@ contains
         integer, intent(out) :: status
         character(len=*), intent(in), optional :: env
         character(len=:), allocatable :: packed
-        integer :: n, i
+        integer :: n, i, cap
 
         packed = ''
         n = 0
@@ -414,7 +517,15 @@ contains
         do i = 1, len(args)
             if (args(i:i) == achar(0)) n = n + 1
         end do
-        call process_run_argv_logged(root, packed, n, log, .false., 10, status, &
+        cap = 10
+        if (commit_deadline > 0.0_dp) then
+            cap = int(commit_deadline - wall_time_seconds())
+            if (cap < 1) then
+                status = 124
+                return
+            end if
+        end if
+        call process_run_argv_logged(root, packed, n, log, .false., cap, status, &
             env_extra=env, heartbeat_s=0)
     end subroutine git_run
 
