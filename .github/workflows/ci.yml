@@ -2,29 +2,240 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
   pull_request:
     branches: [main]
-    types: [opened, synchronize, reopened, ready_for_review]
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
   merge_group:
     types: [checks_requested]
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
+  build-test:
+    name: build + focused tests
+    if: >-
+      github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && github.actor != 'github-merge-queue[bot]')
+    runs-on: ${{ github.event.pull_request.head.repo.fork && fromJSON('["self-hosted","itp-ubuntu24"]') || fromJSON('["self-hosted","itp-build"]') }}
+    timeout-minutes: 40
+    env:
+      # Never let a missing credential turn into a hung git prompt.
+      GIT_TERMINAL_PROMPT: 0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The stale-MCP verifier archives its exact historical base commit.
+          fetch-depth: 0
+
+          persist-credentials: false
+      - name: Run native checks in the build container
+        if: ${{ !github.event.pull_request.head.repo.fork }}
+        env:
+          SCI_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+          SCI_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
+        run: |-
+          ci/run.sh ci-build-test
+      - name: Install gfortran
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gfortran
+          gfortran --version | head -1
+
+        if: ${{ github.event.pull_request.head.repo.fork }}
+      - name: Install fpm
+        run: |
+          sudo curl -L -o /usr/local/bin/fpm \
+            https://github.com/fortran-lang/fpm/releases/download/v0.13.0/fpm-0.13.0-linux-x86_64-gcc-12
+          sudo chmod +x /usr/local/bin/fpm
+          fpm --version
+
+        if: ${{ github.event.pull_request.head.repo.fork }}
+      - name: Build
+        run: fpm build
+
+        if: ${{ github.event.pull_request.head.repo.fork }}
+      - name: Install fo onto PATH
+        run: |
+          # test_scaffold verifies that a freshly scaffolded project builds by
+          # running `fo check` inside it, so `fo` has to be resolvable. Install
+          # the binary just built rather than skipping the assertion: a test
+          # that silently does nothing when a tool is absent is worse than one
+          # that fails.
+          # Runner home is noexec; use job-private executable scratch.
+          FO_INSTALL_PREFIX="$RUNNER_TEMP/fo-install"
+          echo "FO_INSTALL_PREFIX=$FO_INSTALL_PREFIX" >> "$GITHUB_ENV"
+          fpm install --prefix "$FO_INSTALL_PREFIX"
+          echo "$FO_INSTALL_PREFIX/bin" >> "$GITHUB_PATH"
+
+        if: ${{ github.event.pull_request.head.repo.fork }}
+      - name: Verify fo is the binary just built
+        run: |
+          test -x "$FO_INSTALL_PREFIX/bin/fo"
+          "$FO_INSTALL_PREFIX/bin/fo" --version
+
+        if: ${{ github.event.pull_request.head.repo.fork }}
+      - name: Pin exact fo image for Gremlin driver oracle
+        run: |
+          umask 077
+          driver="$FO_INSTALL_PREFIX/bin/fo"
+          digest="$(sha256sum "$driver" | cut -d' ' -f1)"
+          pinned="$RUNNER_TEMP/fo-driver-pins/$digest"
+          mkdir -p "$(dirname "$pinned")"
+          install -m 0555 "$driver" "$pinned"
+          test "$(sha256sum "$pinned" | cut -d' ' -f1)" = "$digest"
+          echo "FO_DRIVER_A=$pinned" >> "$GITHUB_ENV"
+
+        if: ${{ github.event.pull_request.head.repo.fork }}
+      - name: Test project model and scoped Gremlin behavior
+        run: |
+          export PATH="$FO_INSTALL_PREFIX/bin:$PATH"
+          export FO="$FO_DRIVER_A" FO_BIN="$FO_DRIVER_A"
+          export FO_DISABLE_SELF_REFRESH=1 FO_SELF_REFRESH=0 FO_JOBS=1
+          export TMPDIR="$RUNNER_TEMP/fo-focused-tests"
+          mkdir -p "$TMPDIR"
+          "$FO_DRIVER_A" test test_project_model test_fpm_project_model \
+            test_cmake_project_model test_cmake_capture_paths test_cmake_capture_inputs \
+            test_project_selection_cli test_project_layering_cli test_gremlin_case_reuse \
+            test_gremlin_cmake test_atomic_link_artifacts test_cmake_native_build_cli
+
+        if: ${{ github.event.pull_request.head.repo.fork }}
+      - name: Test campaign, journal and coverage recovery
+        run: |
+          export PATH="$FO_INSTALL_PREFIX/bin:$PATH"
+          export FO="$FO_DRIVER_A" FO_BIN="$FO_DRIVER_A"
+          export FO_DISABLE_SELF_REFRESH=1 FO_SELF_REFRESH=0 FO_JOBS=1
+          export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
+          export FO_TEST_WALL_TIMEOUT=300
+          export TMPDIR="$RUNNER_TEMP/fo-recovery-tests"
+          mkdir -p "$TMPDIR"
+          "$FO_DRIVER_A" test test_gremlin_journal_recovery \
+            test_gremlin_coverage_restart test_gremlin_campaign_resolution
+
+        if: ${{ github.event.pull_request.head.repo.fork }}
+      - name: Test public fo test dispatch
+        run: |
+          export PATH="$FO_INSTALL_PREFIX/bin:$PATH"
+          export FO="$FO_INSTALL_PREFIX/bin/fo"
+          export FO_DISABLE_SELF_REFRESH=1 FO_SELF_REFRESH=0
+          FO_TEST_WALL_TIMEOUT=180 \
+          FO_CACHE_DIR="$RUNNER_TEMP/fo-mcp-system" \
+            "$FO_INSTALL_PREFIX/bin/fo" test test_mcp_system
+
+        if: ${{ github.event.pull_request.head.repo.fork }}
+      - name: Test Gremlin self refresh
+        run: |
+          export TMPDIR="$RUNNER_TEMP/fo-self-refresh-oracle-tmp"
+          mkdir -p "$TMPDIR"
+          # Cold profiles plus release install exceed the ordinary 600-second
+          # test cap on CI. These are safety bounds, not timing assertions.
+          # Each nested command has a 900-second cap (317 s measured install).
+          # Run this expensive oracle once so its first failure reaches the log
+          # collector instead of a cold retry consuming the job's safety budget.
+          FO_BIN="$FO_INSTALL_PREFIX/bin/fo" \
+          FO_RUN_SELF_REFRESH_ORACLE=1 \
+          FO_TEST_WALL_TIMEOUT=1800 \
+          FO_DISABLE_SELF_REFRESH=1 \
+          FO_SELF_REFRESH=0 \
+          FO_CACHE_DIR="$RUNNER_TEMP/fo-self-refresh-oracle-cache" \
+            "$FO_INSTALL_PREFIX/bin/fo" test --rerun --retries 0 --verbose \
+              test_self_refresh
+
+        if: ${{ github.event.pull_request.head.repo.fork }}
+      - name: Retain self-refresh failure logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: self-refresh-failure-logs
+          if-no-files-found: ignore
+          path: |
+            ${{ runner.temp }}/fo-self-refresh-oracle-tmp/**/*.log
+            ${{ runner.temp }}/fo-self-refresh-oracle-tmp/**/fo_test_case-*.tmp
+            ${{ runner.temp }}/fo-self-refresh-oracle-tmp/**/fo_test_rerun-*.tmp
+            build/fo/test-logs/*.log
+
+      - name: Test install help side effects
+        env:
+          FO_RUN_INSTALL_HELP_ORACLE: "1"
+          FO_DISABLE_SELF_REFRESH: "1"
+          FO_SELF_REFRESH: "0"
+          HOME: ${{ runner.temp }}/fo-install-help-home
+          FO_CACHE_DIR: ${{ runner.temp }}/fo-install-help-cache
+          FO_INSTALL_HELP_PREFIX: ${{ runner.temp }}/fo-install-help-prefix
+          TMPDIR: /var/tmp
+        run: |
+          mkdir -p "$HOME" "$FO_CACHE_DIR"
+          driver="$FO_DRIVER_A"
+          FO_BIN="$driver" "$driver" test test_install_help
+
+      # The retired cancellation fixture forced LD_PRELOAD EPERM/backoff; #161
+      # excludes that artificial syscall window. Its cleanup probe tested only
+      # the JS fixture's own process-group helper, not Fo behavior.
+        if: ${{ github.event.pull_request.head.repo.fork }}
+      - name: Test stale MCP recovery
+        run: |
+          driver="$FO_DRIVER_A"
+          FO="$driver" FO_BIN="$driver" FO_DISABLE_SELF_REFRESH=1 FO_SELF_REFRESH=0 \
+            "$driver" test test_mcp_gremlin_stale
+
+        if: ${{ github.event.pull_request.head.repo.fork }}
+      - name: Test MCP cancellation and diagnostics
+        run: |
+          driver="$FO_DRIVER_A"
+          FO="$driver" FO_BIN="$driver" FO_DISABLE_SELF_REFRESH=1 FO_SELF_REFRESH=0 \
+            "$driver" test test_mcp_cancel_error
+
+        if: ${{ github.event.pull_request.head.repo.fork }}
+      - name: Test standalone asynchronous process C fixtures
+        run: |
+          export FO_TEST_CLI="$FO_DRIVER_A"
+          export TMPDIR="$RUNNER_TEMP/fo-process-fixtures"
+          mkdir -p "$TMPDIR"
+          verifier_dir="$(mktemp -d)"
+          trap 'rm -rf "$verifier_dir"' EXIT
+          fixture_dir=test-fixtures/c
+          process_dependencies=(src/proc/fo_gremlin_state.c
+                                src/proc/fo_execution_scratch.c src/util/fo_fs.c
+                                src/util/fo_sys.c)
+          cc -std=gnu11 -O2 -Wall -Wextra -Wno-unused-function \
+            "$fixture_dir/async_filter.c" "${process_dependencies[@]}" -o "$verifier_dir/filter-native"
+          "$verifier_dir/filter-native"
+          for target in AARCH64 ARM X86_64 UNSUPPORTED; do
+            cc -std=gnu11 -O2 -Wall -Wextra -Wno-unused-function \
+              "-DFO_ASYNC_TEST_$target" "$fixture_dir/async_filter.c" \
+              "${process_dependencies[@]}" \
+              -o "$verifier_dir/filter-$target"
+            "$verifier_dir/filter-$target"
+          done
+          cc -std=gnu11 -O2 -Wall -Wextra -Wno-unused-function \
+            "$fixture_dir/async_process_nested.c" "${process_dependencies[@]}" \
+            -o "$verifier_dir/nested"
+          "$verifier_dir/nested"
+          cc -std=gnu11 -O2 -Wall -Wextra -Wno-unused-function \
+            "$fixture_dir/async_process_nested_cancel.c" "${process_dependencies[@]}" \
+            -o "$verifier_dir/nested-cancel"
+          "$verifier_dir/nested-cancel"
+        if: ${{ github.event.pull_request.head.repo.fork }}
   flang_compiler:
     name: Flang ${{ matrix.llvm }} bootstrap + consumers
-    if: github.event_name == 'merge_group'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    if: github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch'
+    runs-on:
+      - self-hosted
+      - itp-ubuntu24
+    # Two-CPU cold bootstrap measured 12m52s; focused-test compilation then
+    # exhausted 20m. Allow another 20m for tests/consumers plus 7m margin.
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
         llvm: [21, 22]
     env:
       GIT_TERMINAL_PROMPT: 0
+      FPM_CC: clang-${{ matrix.llvm }}
+      FPM_CXX: clang++-${{ matrix.llvm }}
       FO_FC: gfortran
       FO_JOBS: 2
       OMP_NUM_THREADS: 1
@@ -40,7 +251,7 @@ jobs:
           echo 'deb https://apt.llvm.org/noble/ llvm-toolchain-noble-${{ matrix.llvm }} main' |
             sudo tee /etc/apt/sources.list.d/llvm.list
           sudo apt-get update
-          sudo apt-get install -y flang-${{ matrix.llvm }} libomp-${{ matrix.llvm }}-dev gfortran
+          sudo apt-get install -y flang-${{ matrix.llvm }} clang-${{ matrix.llvm }} libomp-${{ matrix.llvm }}-dev gfortran
           flang-${{ matrix.llvm }} --version
           mkdir -p "$HOME/.local/bin"
           ln -s /usr/bin/flang-${{ matrix.llvm }} "$HOME/.local/bin/flang"
@@ -99,190 +310,13 @@ jobs:
             build/fo/test-logs/*.log
             ${{ runner.temp }}/fo-flang-tests/**/*.log
 
-  flang:
+  flang-result:
     name: Flang native build + focused tests
+    if: ${{ always() && (github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch') }}
     needs: flang_compiler
-    if: always() && github.event_name == 'merge_group'
-    runs-on: ubuntu-latest
-    timeout-minutes: 2
+    runs-on:
+      - self-hosted
+      - itp-light
     steps:
-      - name: Require both compiler bootstraps and consumer gates
+      - name: Require both native Flang bootstrap and consumer cells
         run: test "${{ needs.flang_compiler.result }}" = success
-
-  build-test:
-    name: build + focused tests
-    if: github.event_name == 'merge_group'
-    runs-on: ubuntu-latest
-    timeout-minutes: 40
-    env:
-      # Never let a missing credential turn into a hung git prompt.
-      GIT_TERMINAL_PROMPT: 0
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          # The stale-MCP verifier archives its exact historical base commit.
-          fetch-depth: 0
-
-      - name: Install gfortran
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gfortran
-          gfortran --version | head -1
-
-      - name: Install fpm
-        run: |
-          sudo curl -L -o /usr/local/bin/fpm \
-            https://github.com/fortran-lang/fpm/releases/download/v0.13.0/fpm-0.13.0-linux-x86_64-gcc-12
-          sudo chmod +x /usr/local/bin/fpm
-          fpm --version
-
-      - name: Build
-        run: fpm build
-
-      - name: Install fo onto PATH
-        run: |
-          # test_scaffold verifies that a freshly scaffolded project builds by
-          # running `fo check` inside it, so `fo` has to be resolvable. Install
-          # the binary just built rather than skipping the assertion: a test
-          # that silently does nothing when a tool is absent is worse than one
-          # that fails.
-          fpm install --prefix "$HOME/.local"
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-
-      - name: Verify fo is the binary just built
-        run: |
-          test -x "$HOME/.local/bin/fo"
-          "$HOME/.local/bin/fo" --version
-
-      - name: Pin exact fo image for Gremlin driver oracle
-        run: |
-          umask 077
-          driver="$HOME/.local/bin/fo"
-          digest="$(sha256sum "$driver" | cut -d' ' -f1)"
-          pinned="$RUNNER_TEMP/fo-driver-pins/$digest"
-          mkdir -p "$(dirname "$pinned")"
-          install -m 0555 "$driver" "$pinned"
-          test "$(sha256sum "$pinned" | cut -d' ' -f1)" = "$digest"
-          echo "FO_DRIVER_A=$pinned" >> "$GITHUB_ENV"
-
-      - name: Test project model and scoped Gremlin behavior
-        run: |
-          export PATH="$HOME/.local/bin:$PATH"
-          export FO="$FO_DRIVER_A" FO_BIN="$FO_DRIVER_A"
-          export FO_DISABLE_SELF_REFRESH=1 FO_SELF_REFRESH=0 FO_JOBS=1
-          export TMPDIR="$RUNNER_TEMP/fo-focused-tests"
-          mkdir -p "$TMPDIR"
-          "$FO_DRIVER_A" test test_project_model test_fpm_project_model \
-            test_cmake_project_model test_project_selection_cli \
-            test_project_layering_cli test_gremlin_case_reuse test_gremlin_cmake \
-            test_atomic_link_artifacts test_cmake_native_build_cli
-
-      - name: Test campaign, journal and coverage recovery
-        run: |
-          export PATH="$HOME/.local/bin:$PATH"
-          export FO="$FO_DRIVER_A" FO_BIN="$FO_DRIVER_A"
-          export FO_DISABLE_SELF_REFRESH=1 FO_SELF_REFRESH=0 FO_JOBS=1
-          export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
-          export FO_TEST_WALL_TIMEOUT=300
-          export TMPDIR="$RUNNER_TEMP/fo-recovery-tests"
-          mkdir -p "$TMPDIR"
-          "$FO_DRIVER_A" test test_gremlin_journal_recovery \
-            test_gremlin_coverage_restart test_gremlin_campaign_resolution
-
-      - name: Test public fo test dispatch
-        run: |
-          export PATH="$HOME/.local/bin:$PATH"
-          export FO="$HOME/.local/bin/fo"
-          export FO_DISABLE_SELF_REFRESH=1 FO_SELF_REFRESH=0
-          FO_TEST_WALL_TIMEOUT=180 \
-          FO_CACHE_DIR="$RUNNER_TEMP/fo-mcp-system" \
-            "$HOME/.local/bin/fo" test test_mcp_system
-
-      - name: Test Gremlin self refresh
-        run: |
-          export TMPDIR="$RUNNER_TEMP/fo-self-refresh-oracle-tmp"
-          mkdir -p "$TMPDIR"
-          # Cold profiles plus release install exceed the ordinary 600-second
-          # test cap on CI. These are safety bounds, not timing assertions.
-          # Each nested command has a 900-second cap (317 s measured install).
-          # Run this expensive oracle once so its first failure reaches the log
-          # collector instead of a cold retry consuming the job's safety budget.
-          FO_BIN="$HOME/.local/bin/fo" \
-          FO_RUN_SELF_REFRESH_ORACLE=1 \
-          FO_TEST_WALL_TIMEOUT=1800 \
-          FO_DISABLE_SELF_REFRESH=1 \
-          FO_SELF_REFRESH=0 \
-          FO_CACHE_DIR="$RUNNER_TEMP/fo-self-refresh-oracle-cache" \
-            "$HOME/.local/bin/fo" test --rerun --retries 0 --verbose \
-              test_self_refresh
-
-      - name: Retain self-refresh failure logs
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: self-refresh-failure-logs
-          if-no-files-found: ignore
-          path: |
-            ${{ runner.temp }}/fo-self-refresh-oracle-tmp/**/*.log
-            ${{ runner.temp }}/fo-self-refresh-oracle-tmp/**/fo_test_case-*.tmp
-            ${{ runner.temp }}/fo-self-refresh-oracle-tmp/**/fo_test_rerun-*.tmp
-            build/fo/test-logs/*.log
-
-      - name: Test install help side effects
-        env:
-          FO_RUN_INSTALL_HELP_ORACLE: "1"
-          FO_DISABLE_SELF_REFRESH: "1"
-          FO_SELF_REFRESH: "0"
-          HOME: ${{ runner.temp }}/fo-install-help-home
-          FO_CACHE_DIR: ${{ runner.temp }}/fo-install-help-cache
-          FO_INSTALL_HELP_PREFIX: ${{ runner.temp }}/fo-install-help-prefix
-          TMPDIR: /var/tmp
-        run: |
-          mkdir -p "$HOME" "$FO_CACHE_DIR"
-          driver="$FO_DRIVER_A"
-          FO_BIN="$driver" "$driver" test test_install_help
-
-      # The retired cancellation fixture forced LD_PRELOAD EPERM/backoff; #161
-      # excludes that artificial syscall window. Its cleanup probe tested only
-      # the JS fixture's own process-group helper, not Fo behavior.
-      - name: Test stale MCP recovery
-        run: |
-          driver="$FO_DRIVER_A"
-          FO="$driver" FO_BIN="$driver" FO_DISABLE_SELF_REFRESH=1 FO_SELF_REFRESH=0 \
-            "$driver" test test_mcp_gremlin_stale
-
-      - name: Test MCP cancellation and diagnostics
-        run: |
-          driver="$FO_DRIVER_A"
-          FO="$driver" FO_BIN="$driver" FO_DISABLE_SELF_REFRESH=1 FO_SELF_REFRESH=0 \
-            "$driver" test test_mcp_cancel_error
-
-      - name: Test standalone asynchronous process C fixtures
-        run: |
-          export FO_TEST_CLI="$FO_DRIVER_A"
-          export TMPDIR="$RUNNER_TEMP/fo-process-fixtures"
-          mkdir -p "$TMPDIR"
-          verifier_dir="$(mktemp -d)"
-          trap 'rm -rf "$verifier_dir"' EXIT
-          fixture_dir=test-fixtures/c
-          process_dependencies=(src/proc/fo_gremlin_state.c
-                                src/proc/fo_execution_scratch.c src/util/fo_fs.c
-                                src/util/fo_sys.c)
-          cc -std=gnu11 -O2 -Wall -Wextra -Wno-unused-function \
-            "$fixture_dir/async_filter.c" "${process_dependencies[@]}" -o "$verifier_dir/filter-native"
-          "$verifier_dir/filter-native"
-          for target in AARCH64 ARM X86_64 UNSUPPORTED; do
-            cc -std=gnu11 -O2 -Wall -Wextra -Wno-unused-function \
-              "-DFO_ASYNC_TEST_$target" "$fixture_dir/async_filter.c" \
-              "${process_dependencies[@]}" \
-              -o "$verifier_dir/filter-$target"
-            "$verifier_dir/filter-$target"
-          done
-          cc -std=gnu11 -O2 -Wall -Wextra -Wno-unused-function \
-            "$fixture_dir/async_process_nested.c" "${process_dependencies[@]}" \
-            -o "$verifier_dir/nested"
-          "$verifier_dir/nested"
-          cc -std=gnu11 -O2 -Wall -Wextra -Wno-unused-function \
-            "$fixture_dir/async_process_nested_cancel.c" "${process_dependencies[@]}" \
-            -o "$verifier_dir/nested-cancel"
-          "$verifier_dir/nested-cancel"

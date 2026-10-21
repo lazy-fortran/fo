@@ -211,6 +211,29 @@ Nix/Spack replacement, CI/promotion engine or agent orchestrator.
   on merge_group; the queue supplies the real CI guarantee. Queue CI and
   deployment remain pending.
 
+### Owned runner handoff (2026-10-21)
+
+PR #231 remains a draft at workflow/source revision
+05dd10f85d8f897a09b42689de8bb7d8c36f6659, integrated with merged core
+18282d3bc9187a03d06f86e5f6eeecad494a8b77. GNU checks retain their native
+recipe; Flang 21 and 22 retain full bootstrap, seven focused programs including
+MCP, and real FPM/CMake consumers. Every PR event skips required CI; explicit
+dispatch and merge-group verification remain enabled. Shared strict hygiene is
+pinned to 104634c01aa669d542e8a26a34a50b6471fc19ce in both revision fields.
+Actionlint with owned runner labels and whitespace validation pass.
+
+Functional Slurm runs 21817534_21 and 21817534_22 pass all focused programs and
+consumers against the exact 357 compiled/test/fixture/manifest inputs of merged
+core. Their preceding cold 20-minute jobs 21817517_21/_22 timed out after the
+bootstraps completed; resumed runs completed in 6:07/6:26. These results do not
+prove cold-budget or Ubuntu 24 operational success. The owned runner pilot
+[39647756328](https://github.com/lazy-fortran/fo/actions/runs/39647756328)
+remains pending at handoff. Continue with
+`gh run view 39647756328 --repo lazy-fortran/fo --json status,conclusion,jobs`.
+Inspect its retained failure logs before changing any native recipe or bound;
+controller review precedes promotion. Durable controller receipts include both
+compiler bootstrap/focused/consumer logs and exact source manifests.
+
 ## Concurrent cache follow-up (2026-10-21)
 
 - [V] Fx 1d99445cc2f95c32c9adf47ada89345438892ce2 removes GCC 12's
