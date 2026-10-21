@@ -2,7 +2,7 @@ program test_hook_precommit
     use fo_test_harness, only: string_list_t, process_result_t, list_add, &
         make_scratch, make_directory, join_path, write_text, read_text, remove_tree, &
         assert_contains, assert_equal_string, assert_true, assert_process_ok, &
-        finish_assertions
+        finish_assertions, copy_mtime
     use fo_test_gremlin_oracle, only: gremlin_json, gremlin_field, gremlin_stop_lane
     use fo_test_json, only: json_value_t
     use fo_test_cli, only: resolve_driver, run_fo, run_external
@@ -12,7 +12,7 @@ program test_hook_precommit
     character(len=:), allocatable :: driver, scratch, project, original, tree, session
     type(process_result_t) :: result
     type(json_value_t) :: reply
-    type(string_list_t) :: args
+    type(string_list_t) :: args, environment
     integer(int64) :: started, finished, rate
     logical :: downloaded
 
@@ -139,6 +139,37 @@ program test_hook_precommit
     call bounded_hook()
     call assert_process_ok(result, 'bounded CMake reuses prepared evidence')
     call assert_contains(result%stdout, '"cache_hit":true', 'bounded CMake receipt hit')
+    call git([character(len=64) :: 'write-tree'])
+    tree = trim(result%stdout)
+    call git([character(len=64) :: 'symbolic-ref', 'HEAD', 'refs/heads/alternate'])
+    call bounded_hook()
+    call assert_process_ok(result, 'verify changed unborn Git ref')
+    call assert_contains(result%stdout, '"cache_hit":false', 'unborn ref invalidates proof')
+    call git([character(len=64) :: 'commit', '-qm', 'Create synthetic CMake provenance'])
+    call bounded_hook()
+    call assert_process_ok(result, 'verify newly committed Git provenance')
+    call assert_contains(result%stdout, '"cache_hit":false', 'new HEAD invalidates proof')
+    call git([character(len=64) :: 'commit', '--allow-empty', '-qm', 'Advance synthetic HEAD'])
+    call git([character(len=64) :: 'write-tree'])
+    call assert_equal_string(trim(result%stdout), tree, 'HEAD edit preserves staged tree')
+    call bounded_hook()
+    call assert_process_ok(result, 'verify changed HEAD at same staged tree')
+    call assert_contains(result%stdout, '"cache_hit":false', 'changed HEAD cannot reuse proof')
+    call git([character(len=64) :: 'tag', 'prepared-context'])
+    call bounded_hook()
+    call assert_process_ok(result, 'verify changed tag at same staged tree')
+    call assert_contains(result%stdout, '"cache_hit":false', 'tag change invalidates proof')
+    environment = string_list_t()
+    call list_add(environment, 'FO_CMAKE_ARGS=-DHOOK_CONTEXT_FLAG=1')
+    call bounded_hook(environment)
+    call assert_process_ok(result, 'verify changed effective CMake arguments')
+    call assert_contains(result%stdout, '"cache_hit":false', 'CMake arguments invalidate proof')
+    environment = string_list_t()
+    call list_add(environment, 'FFLAGS=-O1')
+    call bounded_hook(environment)
+    call assert_process_ok(result, 'verify changed compiler environment')
+    call assert_contains(result%stdout, '"cache_hit":false', 'compiler environment invalidates proof')
+
 
     call write_text(project//'/CMakeLists.txt', read_text(project//'/CMakeLists.txt')// &
         'add_custom_target(wait_build ALL COMMAND "${CMAKE_COMMAND}" -E sleep 3)'//nl)
@@ -224,6 +255,40 @@ program test_hook_precommit
     call assert_true(result%exit_code /= 0, 'missing dependency remains invalid')
     inquire(file=scratch//'/downloaded', exist=downloaded)
     call assert_true(downloaded, 'normal build can run declared acquisition outside hooks')
+    project = join_path(scratch, 'external_consumer')
+    call write_text(project//'/fpm.toml', 'name = "hook_external"'//nl// &
+        '[dependencies]'//nl//'helper = { path = "../dependency" }'//nl)
+    call write_text(scratch//'/dependency/fpm.toml', 'name = "helper"'//nl)
+    call write_text(scratch//'/dependency/src/dependency.f90', original)
+    call write_text(project//'/test/test_answer.f90', 'program test_answer'//nl// &
+        '    use answer_mod, only: answer'//nl//'    implicit none'//nl// &
+        '    if (answer /= 42) stop 1'//nl//'end program test_answer'//nl)
+    call git([character(len=64) :: 'init', '-q'])
+    call git([character(len=64) :: 'add', 'fpm.toml', 'test/test_answer.f90'])
+    call hook()
+    call assert_process_ok(result, 'prepare external dependency evidence')
+    call bounded_hook()
+    call assert_process_ok(result, 'reuse unchanged external dependency')
+    call assert_contains(result%stdout, '"cache_hit":true', 'external dependency cache hit')
+    call write_text(scratch//'/saved.f90', original)
+    call copy_mtime(scratch//'/dependency/src/dependency.f90', scratch//'/saved.f90')
+    call write_text(scratch//'/dependency/src/dependency.f90', &
+        'module answer_mod'//nl//'    implicit none'//nl// &
+        '    integer, parameter :: answer = 41'//nl//'end module answer_mod'//nl)
+    call copy_mtime(scratch//'/saved.f90', scratch//'/dependency/src/dependency.f90')
+    call bounded_hook()
+    call assert_true(result%exit_code /= 0, 'restored-mtime external byte edit rejects old proof')
+    call assert_contains(result%stdout, '"cache_hit":false', 'restored-mtime bytes invalidate proof')
+    call write_text(scratch//'/dependency/src/dependency.f90', original)
+    call write_text(scratch//'/dependency/src/added.f90', &
+        'module added_mod'//nl//'    implicit none'//nl//'end module added_mod'//nl)
+    call bounded_hook()
+    call assert_contains(result%stdout, '"cache_hit":false', 'external source addition invalidates proof')
+    call remove_tree(scratch//'/dependency/src/added.f90')
+    call remove_tree(scratch//'/dependency/src/dependency.f90')
+    call bounded_hook()
+    call assert_true(result%exit_code /= 0, 'external source deletion rejects old proof')
+    call assert_contains(result%stdout, '"cache_hit":false', 'external source deletion invalidates proof')
     call finish_assertions(retain_failed_scratch=.true.)
     call remove_tree(scratch)
 contains
@@ -254,7 +319,8 @@ contains
         call list_add(args, '--json')
         call run_fo(driver, args, project, scratch//'/cache', result, timeout_ms=90000)
     end subroutine hook
-    subroutine bounded_hook()
+    subroutine bounded_hook(extra_environment)
+        type(string_list_t), optional, intent(in) :: extra_environment
         args = string_list_t()
         call list_add(args, 'hook')
         call list_add(args, 'pre-commit')
@@ -263,7 +329,8 @@ contains
         block
             integer(int64) :: begin, end, ticks
             call system_clock(count=begin, count_rate=ticks)
-            call run_fo(driver, args, project, scratch//'/cache', result, timeout_ms=15000)
+            call run_fo(driver, args, project, scratch//'/cache', result, &
+                extra_environment=extra_environment, timeout_ms=15000)
             call system_clock(count=end)
             write (*, '(a,f8.3,a,i0)') 'bounded hook seconds=', &
                 real(end-begin)/real(ticks), ' exit=', result%exit_code
