@@ -25,6 +25,7 @@
 #ifdef __APPLE__
 #include <libproc.h>
 #include <sys/proc.h>
+#include <sys/sysctl.h>
 #endif
 #include "fo_sys.h"
 
@@ -318,5 +319,48 @@ int fo_sys_process_start_text(pid_t pid, char *out, size_t cap) {
     if (e != 0) return e;
     if (!alive) return ESRCH;
     return fo_sys_identity_text(start, out, cap);
+#endif
+}
+
+/* GCC's Darwin native CPU selection uses the CPU family. Keep the type,
+   subtype and brand as well; Intel feature masks distinguish enabled ISAs. */
+int fo_c_darwin_cpu_identity(char *text, size_t capacity) {
+#ifdef __APPLE__
+    const char *numbers[] = {"hw.cputype", "hw.cpusubtype", "hw.cpufamily"};
+    const char *features[] = {"machdep.cpu.features", "machdep.cpu.extfeatures",
+                              "machdep.cpu.leaf7_features"};
+    char brand[256];
+    uint32_t values[3];
+    size_t size = sizeof(brand), used;
+    int n;
+    if (sysctlbyname("machdep.cpu.brand_string", brand, &size, NULL, 0) != 0)
+        return errno;
+    brand[sizeof(brand) - 1] = '\0';
+    for (size_t i = 0; i < 3; i++) {
+        size = sizeof(values[i]);
+        if (sysctlbyname(numbers[i], &values[i], &size, NULL, 0) != 0) return errno;
+    }
+    n = snprintf(text, capacity, "darwin:%u:%u:%u:%s", values[0], values[1],
+                 values[2], brand);
+    if (n < 0 || (size_t)n >= capacity) return EOVERFLOW;
+    used = (size_t)n;
+    /* ARM's family identifies GCC's native target. Intel additionally probes
+       the OS-enabled features; fail conservatively if a mask is unavailable. */
+    if (values[0] == 7 || values[0] == (7U | 0x01000000U)) {
+        for (size_t i = 0; i < 3; i++) {
+            char mask[1024];
+            size = sizeof(mask);
+            if (sysctlbyname(features[i], mask, &size, NULL, 0) != 0) return errno;
+            mask[sizeof(mask) - 1] = '\0';
+            n = snprintf(text + used, capacity - used, ":%s", mask);
+            if (n < 0 || (size_t)n >= capacity - used) return EOVERFLOW;
+            used += (size_t)n;
+        }
+    }
+    return 0;
+#else
+    (void)text;
+    (void)capacity;
+    return ENOTSUP;
 #endif
 }
