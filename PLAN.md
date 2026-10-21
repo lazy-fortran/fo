@@ -335,6 +335,42 @@ compiler bootstrap/focused/consumer logs and exact source manifests.
 budget; explicit manual preparation and behavior are described in
 [the pre-commit guide](doc/PRECOMMIT_PLAN.md).
 
+Handoff: PR #232 remains a draft and is **not deployed**. Qualified production
+source 0680e3c6fbb7fe726ca25d0ba72a8ca206aaae5b has all 361 compiled/test/fixture/
+manifest inputs equal to the native candidate; later handoff documentation does
+not change those inputs. The existing Git-provenance capture is reused for staged
+CMake views, including unborn repositories, HEAD/ref and tag invalidation. Both
+hook modes identify their effective disconnected CMake configuration.
+
+The expanded native hook oracle passes locally, on ARM Mac, sCluster 3322377
+and aCluster 21817539. Small prepared hits take 0.172–1.679 seconds; owned
+slow-child termination fails closed in 7.231–7.347 seconds. Real
+[FortNum](https://github.com/lazy-fortran/FortNum) 71a9de09c025336bf91babcbc9b1975047f9c062
+passes all 166 immutable cases in 3322362; its prepared hit takes 5.33 seconds
+with 163 fast PASS results and zero deferred cases. A staged mutation invalidates
+that evidence and fails closed in 7.25 seconds. Existing deadlines are unchanged.
+
+The broad gate is **not green**: 21817543 inherited an invalid retry override;
+corrected eight-way run 21817545 records 47 PASS, lifecycle-fixture failures in
+continuous_preemption/capture_pending, and a registry FLAKY result. Comparison
+21817546_0/_1 runs the same four native fixtures against deployed core and hook
+candidate at two-way native concurrency; the candidate also runs 11 directly
+affected CMake/inventory/receipt/supervisor programs. This work is still running
+at handoff. Continue with `ssh acluster 'sacct -j 21817546 --format=JobID,State,ExitCode,Elapsed'`
+and inspect the retained focused/affected logs before deciding regression or
+promotion. The durable controller handoff collects those logs and the owned CI
+pilot 39647756328; no further repair campaign is started.
+
+Merged core 18282d3bc9187a03d06f86e5f6eeecad494a8b77 is separately deployed on
+all four approved hosts with native/MCP/lint smokes passing (3322393/21817544
+and local/ARM Mac). It excludes #232. Shared
+[CODE wrapper #72](https://github.com/itpplasma/code/pull/72) remains a one-line
+draft at 3100c59, undeployed. Controller review and verified final gates precede
+hook/wrapper promotion. KIN6D/SIMPLE full scientific audits and the separately
+recorded CMake outer-cap, transitive OpenMP and sibling-input boundary defects
+remain incomplete; these results do not claim full scientific or clean ASan
+verification.
+
 ## Native CMake Fortran repair (2026-10-21)
 
 - [V] Source `8734651` retains CMake's per-source preprocessing choice from
