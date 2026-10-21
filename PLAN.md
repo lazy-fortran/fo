@@ -373,6 +373,15 @@ and inspect the retained focused/affected logs before deciding regression or
 promotion. The durable controller handoff collects those logs and the owned CI
 pilot 39647756328; no further repair campaign is started.
 
+Terminal update: 21817546_0 completed 0:0 in 3:17 with all four baseline
+fixtures passing. Candidate 21817546_1 failed 1:0 in 7:52: its same four focused
+fixtures pass, but the affected gate ends with 10 PASS and 1 FAIL in 203.29
+seconds. `test_native_cmake_cli` records resident build exits 134, followed by
+missing-generation replay (`generation_id must contain exactly 64 characters`).
+The retained `affected-0680.log` is the terminal evidence; the earlier pending
+status above is superseded. No new investigation, repair or run follows this
+handoff update. PR #232 and the shared wrapper remain drafts and undeployed.
+
 Merged core 18282d3bc9187a03d06f86e5f6eeecad494a8b77 is separately deployed on
 all four approved hosts with native/MCP/lint smokes passing (3322393/21817544
 and local/ARM Mac). It excludes #232. Shared
