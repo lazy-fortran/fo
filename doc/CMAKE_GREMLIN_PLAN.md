@@ -200,6 +200,11 @@ FetchContent source directories. `FO_CMAKE_BUILD_TARGETS` selects native build
 targets while `--target` selects registered test names; neither changes native
 project flags. Declared prebuilt `*_BUILD` providers capture their include/lib
 inputs and real Git HEAD provenance for the observed CMakeCache source probe.
+Explicit target include directories, including system and virtual-environment
+headers, are captured and fingerprinted. Frozen cache hints retain internal
+find-package header paths. Original header trees must also remain unchanged
+through configuration and building: project code can force absolute SDK paths
+despite those hints. Changed trees fail explicitly, including on a cache hit.
 Repository-root projects also retain shallow, self-contained Git metadata so
 configure-time and runtime revision/dirty-state queries use the frozen sources.
 Arbitrary provider protocols, uncaptured external authored inputs, metadata

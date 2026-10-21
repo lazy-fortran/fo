@@ -72,6 +72,7 @@ module fo_input_inventory
 
     public :: input_inventory_discover, input_inventory_declarations_from_config
     public :: input_inventory_revalidate, input_inventory_discover_cmake
+    public :: cmake_headers_revalidate
     public :: input_inventory_rediscover
     public :: alias_root, hex_value, safe_relative_path
 
@@ -92,14 +93,17 @@ module fo_input_inventory
 contains
 
     subroutine input_inventory_discover_cmake(project_dir, sources, bundles, &
-            labels, metadata_dir, inventory, ierr, message)
+            labels, metadata_dir, inventory, ierr, message, freeze_headers)
         character(len=*), intent(in) :: project_dir, sources(:), bundles(:)
         character(len=*), intent(in) :: labels(:), metadata_dir
         type(input_inventory_t), intent(out) :: inventory
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
-        integer :: root_index, i, j, newline_at
+        logical, intent(in), optional :: freeze_headers
+        integer :: root_index, i, j, newline_at, header_unit, closed
         character(len=PATH_LEN) :: build_directory
+        character(len=HASH_LEN) :: header_digest
+        character(:), allocatable :: headers
         logical :: provider_dir_exists
         type(input_entry_t) :: provider_dir
         character(len=7), parameter :: provider_dirs(2) = &
@@ -150,6 +154,38 @@ contains
             end if
             if (ierr /= 0) return
         end do
+        if (present(freeze_headers)) then
+            if (freeze_headers) then
+                headers = ''
+                do i = 1, size(sources)
+                    if (index(labels(i), 'cmake-include:') /= 1) cycle
+                    if (index(sources(i), new_line('a')) > 0) then
+                        ierr = 1
+                        message = 'CMake header directory contains a newline'
+                        return
+                    end if
+                    call cmake_header_digest(trim(sources(i)), header_digest, &
+                        ierr, message)
+                    if (ierr /= 0) return
+                    headers = headers//header_digest//' '//trim(sources(i))// &
+                        new_line('a')
+                end do
+                if (len(headers) > 0) then
+                    open(newunit=header_unit, file=trim(metadata_dir)//'/headers.txt', &
+                        status='replace', access='stream', form='unformatted', &
+                        iostat=ierr)
+                    if (ierr == 0) then
+                        write(header_unit, iostat=ierr) headers
+                        close(header_unit, iostat=closed)
+                        if (ierr == 0) ierr = closed
+                    end if
+                    if (ierr /= 0) then
+                        message = 'cannot write captured CMake header fingerprints'
+                        return
+                    end if
+                end if
+            end if
+        end if
         call add_root(inventory, 'cmake-context', metadata_dir, root_index, &
             ierr, message, 'project/.fo-cmake')
         if (ierr /= 0) return
@@ -160,6 +196,68 @@ contains
         if (ierr /= 0) return
         inventory%valid = .true.
     end subroutine input_inventory_discover_cmake
+
+    subroutine cmake_header_digest(root, digest, ierr, message)
+        character(len=*), intent(in) :: root
+        character(len=*), intent(out) :: digest, message
+        integer, intent(out) :: ierr
+        type(input_inventory_t) :: headers
+        integer :: root_index
+
+        digest = ''
+        allocate(headers%roots(MAX_ROOTS), headers%entries(64), &
+            headers%declarations(0))
+        headers%entry_capacity = 64
+        headers%complete = .true.
+        call add_root(headers, 'headers', root, root_index, ierr, message, 'headers')
+        if (ierr /= 0) return
+        call scan_tree(headers, root_index, 'headers', root, '', &
+            'cmake-header-input', .false., ierr, message, cmake_scan=.true.)
+        if (ierr /= 0) return
+        call canonicalize_inventory(headers, ierr, message)
+        digest = headers%digest
+    end subroutine cmake_header_digest
+
+    subroutine cmake_headers_revalidate(project, ierr, message)
+        character(len=*), intent(in) :: project
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+        character(len=PATH_LEN + HASH_LEN + 1) :: line
+        character(len=HASH_LEN) :: digest
+        integer :: unit, ios
+        logical :: exists
+
+        ierr = 0
+        message = ''
+        inquire(file=project//'/.fo-cmake/headers.txt', exist=exists)
+        if (.not. exists) return
+        open(newunit=unit, file=project//'/.fo-cmake/headers.txt', &
+            status='old', action='read', iostat=ierr)
+        if (ierr /= 0) then
+            message = 'cannot read captured CMake header fingerprints'
+            return
+        end if
+        do
+            read(unit, '(a)', iostat=ios) line
+            if (ios /= 0) exit
+            if (len_trim(line) <= HASH_LEN + 1) then
+                ierr = 1
+                message = 'invalid captured CMake header fingerprint'
+                exit
+            end if
+            call cmake_header_digest(trim(line(HASH_LEN + 2:)), digest, ierr, message)
+            if (ierr /= 0 .or. digest /= line(:HASH_LEN)) then
+                ierr = 1
+                message = 'captured CMake headers changed: '//trim(line(HASH_LEN + 2:))
+                exit
+            end if
+        end do
+        close(unit)
+        if (ios > 0) then
+            ierr = 1
+            message = 'cannot read captured CMake header fingerprints'
+        end if
+    end subroutine cmake_headers_revalidate
 
     subroutine input_inventory_discover(project_dir, declarations, inventory, &
             ierr, message)
@@ -494,6 +592,32 @@ contains
                 (observed%valid .neqv. expected%valid)) then
             ierr = 1
             message = 'input inventory changed during generation capture'
+            do i = 1, min(expected%entry_count, observed%entry_count)
+                if (same_entry_key(expected%entries(i), observed%entries(i))) then
+                    if (same_entry_value(expected%entries(i), observed%entries(i))) cycle
+                    message = trim(message)//': changed '// &
+                        trim(expected%entries(i)%root_alias)//':'// &
+                        trim(expected%entries(i)%relative_path)
+                else
+                    message = trim(message)//': expected '// &
+                        trim(expected%entries(i)%root_alias)//':'// &
+                        trim(expected%entries(i)%relative_path)//'; observed '// &
+                        trim(observed%entries(i)%root_alias)//':'// &
+                        trim(observed%entries(i)%relative_path)
+                end if
+                return
+            end do
+            if (expected%entry_count /= observed%entry_count) then
+                if (expected%entry_count > observed%entry_count) then
+                    message = trim(message)//': removed '// &
+                        trim(expected%entries(i)%root_alias)//':'// &
+                        trim(expected%entries(i)%relative_path)
+                else
+                    message = trim(message)//': added '// &
+                        trim(observed%entries(i)%root_alias)//':'// &
+                        trim(observed%entries(i)%relative_path)
+                end if
+            end if
             return
         end if
         do i = 1, expected%root_count
