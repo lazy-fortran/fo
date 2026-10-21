@@ -16,7 +16,7 @@ module-naming = false
 library = false
 
 [dependencies]
-fx = { git = "https://github.com/lazy-fortran/fx.git", branch = "main" }
+fx = { git = "https://github.com/lazy-fortran/fx.git", rev = "362464d72eb1b57c6ca63751eca2578d77ea5f00" }
 # Tracking fortfront's main rather than a tag while the two move together.
 # Pinning to v0.1.1 meant fixes landing in fortfront were invisible here -
 # including the out-of-bounds token read that segfaults every fo run under
