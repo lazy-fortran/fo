@@ -15,13 +15,13 @@ concurrency:
 
 jobs:
   flang:
-    name: Flang build + focused tests
+    name: Flang native build + focused tests
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
       GIT_TERMINAL_PROMPT: 0
-      FO_FC: flang-21
+      FO_FC: gfortran
       FO_JOBS: 2
       OMP_NUM_THREADS: 1
       FO_DISABLE_SELF_REFRESH: 1
@@ -49,9 +49,11 @@ jobs:
           chmod +x "$HOME/.local/bin/fpm"
           "$HOME/.local/bin/fpm" --version
 
-      - name: Build Fo with Flang and pin its exact image
+      - name: Build Fo and pin its exact image
         run: |
-          fpm install --compiler flang-21 --profile release --prefix "$HOME/.local"
+          # FortFront currently needs GNU Fortran to build the tool itself.
+          # Flang compiles the real native consumers in the final step.
+          fpm install --compiler gfortran --prefix "$HOME/.local"
           digest="$(sha256sum "$HOME/.local/bin/fo" | cut -d' ' -f1)"
           driver="$RUNNER_TEMP/fo-driver-pins/$digest"
           mkdir -p "$(dirname "$driver")"
@@ -60,7 +62,7 @@ jobs:
           "$driver" --version
           echo "FO_DRIVER_A=$driver" >> "$GITHUB_ENV"
 
-      - name: Run focused tests with the Flang-built driver and compiler
+      - name: Run compiler and project-model focused tests
         run: |
           export FO="$FO_DRIVER_A" FO_BIN="$FO_DRIVER_A"
           export TMPDIR="$RUNNER_TEMP/fo-flang-tests"
@@ -69,6 +71,20 @@ jobs:
           "$FO_DRIVER_A" test --rerun --retries 0 --verbose \
             test_compiler_dialect test_project_model test_fpm_project_model \
             test_section_capability test_native_compiler_path_cli
+
+      - name: Build and test real native consumers with Flang
+        run: |
+          export FO_FC=flang-21
+          export TMPDIR="$RUNNER_TEMP/fo-flang-tests"
+          export FO_CACHE_DIR="$RUNNER_TEMP/fo-flang-cache"
+          cd test-fixtures/flang_smoke
+          "$FO_DRIVER_A" build
+          "$FO_DRIVER_A" test --rerun --retries 0 --verbose
+          "$FO_DRIVER_A" exec --no-build flang_smoke
+          cd cmake
+          export FO_CMAKE_ARGS=-DCMAKE_Fortran_COMPILER=/usr/bin/flang-21
+          "$FO_DRIVER_A" build
+          "$FO_DRIVER_A" test --rerun --retries 0 --verbose
 
       - name: Retain Flang failure logs
         if: failure()
