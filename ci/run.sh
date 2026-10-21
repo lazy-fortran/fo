@@ -37,6 +37,8 @@ export CMAKE_BUILD_PARALLEL_LEVEL=$SCI_CPUS CTEST_PARALLEL_LEVEL=$SCI_CPUS
 export OMP_NUM_THREADS=${OMP_NUM_THREADS:-1}
 export RUNNER_TEMP=$root/tmp
 mkdir -p "$RUNNER_TEMP" ci-out
+# Runner home is noexec; keep the installed driver in job-private executable scratch.
+export FO_INSTALL_PREFIX=$RUNNER_TEMP/fo-install
 # Compiler probes and isolated Python builds must execute outside noexec /tmp.
 export TMPDIR=$RUNNER_TEMP
 { hostname; /usr/bin/gfortran --version | head -1; git rev-parse HEAD; } | tee ci-out/toolchain.txt
@@ -61,22 +63,22 @@ fpm build
 # the binary just built rather than skipping the assertion: a test
 # that silently does nothing when a tool is absent is worse than one
 # that fails.
-fpm install --prefix "$HOME/.local"
-echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+fpm install --prefix "$FO_INSTALL_PREFIX"
+echo "$FO_INSTALL_PREFIX/bin" >> "$GITHUB_PATH"
 
     )
     load_job_environment
     echo 'Verify fo is the binary just built'
     (
-test -x "$HOME/.local/bin/fo"
-"$HOME/.local/bin/fo" --version
+test -x "$FO_INSTALL_PREFIX/bin/fo"
+"$FO_INSTALL_PREFIX/bin/fo" --version
 
     )
     load_job_environment
     echo 'Pin exact fo image for Gremlin driver oracle'
     (
 umask 077
-driver="$HOME/.local/bin/fo"
+driver="$FO_INSTALL_PREFIX/bin/fo"
 digest="$(sha256sum "$driver" | cut -d' ' -f1)"
 pinned="$RUNNER_TEMP/fo-driver-pins/$digest"
 mkdir -p "$(dirname "$pinned")"
@@ -88,7 +90,7 @@ echo "FO_DRIVER_A=$pinned" >> "$GITHUB_ENV"
     load_job_environment
     echo 'Test project model and scoped Gremlin behavior'
     (
-export PATH="$HOME/.local/bin:$PATH"
+export PATH="$FO_INSTALL_PREFIX/bin:$PATH"
 export FO="$FO_DRIVER_A" FO_BIN="$FO_DRIVER_A"
 export FO_DISABLE_SELF_REFRESH=1 FO_SELF_REFRESH=0 FO_JOBS=1
 export TMPDIR="$RUNNER_TEMP/fo-focused-tests"
@@ -102,7 +104,7 @@ mkdir -p "$TMPDIR"
     load_job_environment
     echo 'Test campaign, journal and coverage recovery'
     (
-export PATH="$HOME/.local/bin:$PATH"
+export PATH="$FO_INSTALL_PREFIX/bin:$PATH"
 export FO="$FO_DRIVER_A" FO_BIN="$FO_DRIVER_A"
 export FO_DISABLE_SELF_REFRESH=1 FO_SELF_REFRESH=0 FO_JOBS=1
 export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
@@ -116,12 +118,12 @@ mkdir -p "$TMPDIR"
     load_job_environment
     echo 'Test public fo test dispatch'
     (
-export PATH="$HOME/.local/bin:$PATH"
-export FO="$HOME/.local/bin/fo"
+export PATH="$FO_INSTALL_PREFIX/bin:$PATH"
+export FO="$FO_INSTALL_PREFIX/bin/fo"
 export FO_DISABLE_SELF_REFRESH=1 FO_SELF_REFRESH=0
 FO_TEST_WALL_TIMEOUT=180 \
 FO_CACHE_DIR="$RUNNER_TEMP/fo-mcp-system" \
-  "$HOME/.local/bin/fo" test test_mcp_system
+  "$FO_INSTALL_PREFIX/bin/fo" test test_mcp_system
 
     )
     load_job_environment
@@ -134,13 +136,13 @@ mkdir -p "$TMPDIR"
 # Each nested command has a 900-second cap (317 s measured install).
 # Run this expensive oracle once so its first failure reaches the log
 # collector instead of a cold retry consuming the job's safety budget.
-FO_BIN="$HOME/.local/bin/fo" \
+FO_BIN="$FO_INSTALL_PREFIX/bin/fo" \
 FO_RUN_SELF_REFRESH_ORACLE=1 \
 FO_TEST_WALL_TIMEOUT=1800 \
 FO_DISABLE_SELF_REFRESH=1 \
 FO_SELF_REFRESH=0 \
 FO_CACHE_DIR="$RUNNER_TEMP/fo-self-refresh-oracle-cache" \
-  "$HOME/.local/bin/fo" test --rerun --retries 0 --verbose \
+  "$FO_INSTALL_PREFIX/bin/fo" test --rerun --retries 0 --verbose \
     test_self_refresh
 
     )
