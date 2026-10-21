@@ -4036,7 +4036,8 @@ contains
                 bin_path = run_bins(i)
                 call link_binary(project_dir, obj_path, link_inputs, n_link_inputs, &
                     test_dep_objs, n_link_dep_objs, link_libs, n_link_libs, bin_path, &
-                    log_local, run_exits(i), test_flags, c, link_base)
+                    log_local, run_exits(i), test_flags, c, link_base, &
+                    compiler_identity=compiler)
             end if
         end do
         !$omp end parallel do
@@ -5651,7 +5652,7 @@ contains
 
     subroutine link_binary(project_dir, prog_obj, lib_objs, n_lib_objs, dep_objs, n_dep_objs, &
             link_libs, n_link_libs, output, log_file, exitcode, flags, &
-            cache, base_digest, exact_flags)
+            cache, base_digest, exact_flags, compiler_identity)
         character(len=*), intent(in) :: project_dir
         character(len=*), intent(in) :: prog_obj, output, log_file
         character(len=512), intent(in) :: lib_objs(:)
@@ -5672,6 +5673,7 @@ contains
         type(cache_t), intent(in), optional :: cache
         character(len=*), intent(in), optional :: base_digest
         logical, intent(in), optional :: exact_flags
+        character(len=*), intent(in), optional :: compiler_identity
 
         character(len=:), allocatable :: packed
         character(len=8) :: debug_links
@@ -5708,7 +5710,14 @@ contains
             key_parts(5) = trim(link_lib_flags(project_dir, link_libs, n_link_libs))
             key_parts(6) = trim(base_digest)
             key_parts(7) = trim(prog_key)
-            call detect_compiler(compiler)
+            ! The parallel test loop resolved this before starting workers.
+            ! Redetection clears the shared executable path while a peer may
+            ! be packing argv, making its object file become argv[0].
+            if (present(compiler_identity)) then
+                compiler = compiler_identity
+            else
+                call detect_compiler(compiler)
+            end if
             key_parts(8) = compiler
             action_id = cache_digest(key_parts, 8)
             ! Fast path: the output is already the binary this action produces.

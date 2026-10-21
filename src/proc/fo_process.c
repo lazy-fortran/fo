@@ -697,6 +697,8 @@ static void record_timeout(struct run_budget *budget, int kind,
 
 /* The command monitor cleans its own adopted descendants on SIGTERM. If it
    cannot finish, fail closed on that nested handle's group. */
+static int kill_isolated_group(pid_t pid);
+
 static void kill_group_and_reap(pid_t pid, int *status, int isolated_group) {
     int reaped = 0;
     pid_t waited;
@@ -704,18 +706,22 @@ static void kill_group_and_reap(pid_t pid, int *status, int isolated_group) {
 
     kill(target, SIGTERM);
     for (int k = 0; k < 15; k++) {
-        waited = waitpid(pid, status, WNOHANG);
-        if (waited == pid) {
-            reaped = 1;
-            break;
-        }
+        siginfo_t info = {0};
+        /* Keep the leader's identity anchored until group cleanup finishes. */
+        waited = waitid(P_PID, (id_t)pid, &info, WEXITED | WNOHANG | WNOWAIT);
+        if (waited == 0 && info.si_pid == pid) break;
         if (waited < 0 && errno != EINTR) break;
         sleep_ms(200);
     }
-    if (!isolated_group && reaped) return;
+    if (!isolated_group) {
+        waited = waitpid(pid, status, WNOHANG);
+        reaped = waited == pid;
+        if (reaped) return;
+    }
     if (!isolated_group && getpgrp() == getpid() && getsid(0) != getpid())
         (void)kill(-getpgrp(), SIGKILL);
-    kill(target, SIGKILL);
+    if (isolated_group) (void)kill_isolated_group(pid);
+    else kill(target, SIGKILL);
     if (!reaped) {
         while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {
         }
@@ -1071,6 +1077,40 @@ static int signal_owned_tree(pid_t root, uint64_t root_start,
 }
 #endif
 
+/* A delivered SIGKILL is not proof that descendants have stopped. Hold the
+   exact child unreaped, anchoring its private group ID, until no member runs.
+   Zombies can only be reaped by their parent/subreaper and do not run work. */
+static int kill_isolated_group(pid_t pid) {
+    struct timespec now, deadline;
+    if (kill(-pid, SIGKILL) != 0 && errno != ESRCH) return errno;
+#if defined(__linux__) || defined(__APPLE__)
+    if (clock_gettime(CLOCK_MONOTONIC, &deadline) != 0) return errno;
+    add_seconds(&deadline, 2);
+    for (;;) {
+        pid_t *pids = NULL;
+        size_t count = 0;
+        int running = 0;
+        int error = owned_list_processes(&pids, &count);
+        if (error != 0) return error;
+        for (size_t i = 0; i < count; i++) {
+            pid_t group = 0;
+            int alive = 0;
+            if (fo_sys_process_info(pids[i], NULL, &group, NULL, NULL, &alive) == 0 &&
+                group == pid && alive) running = 1;
+        }
+        free(pids);
+        if (!running) return 0;
+        if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) return errno;
+        if (timespec_at_or_after(&now, &deadline)) return ETIMEDOUT;
+        sleep_ms(10);
+    }
+#else
+    (void)now;
+    (void)deadline;
+    return 0;
+#endif
+}
+
 static int run_argv(const char *cwd, char *const argv[], const char *log_file,
                     int append, int jobs, int timeout_s, int heartbeat_s,
                     const char *env_extra, struct run_budget *budget) {
@@ -1198,7 +1238,7 @@ static int run_argv(const char *cwd, char *const argv[], const char *log_file,
                 /* The leader's zombie keeps its private process-group ID
                    anchored while we terminate any background descendants.
                    The seccomp monitor owns cleanup when this group is shared. */
-                if (isolated_group) (void)kill(-pid, SIGKILL);
+                int cleanup_error = isolated_group ? kill_isolated_group(pid) : 0;
                 while (wait4(pid, &status, 0, &usage) < 0) {
                     if (errno == EINTR) continue;
                     if (pid_fd >= 0) close(pid_fd);
@@ -1217,6 +1257,12 @@ static int run_argv(const char *cwd, char *const argv[], const char *log_file,
                               (long long)usage.ru_utime.tv_usec / 1000LL;
                     }
                     budget->cpu_ms = own;
+                }
+                if (cleanup_error != 0) {
+                    emit_spawn_error(log_file, "command group cleanup", cleanup_error);
+                    if (pid_fd >= 0) close(pid_fd);
+                    if (report_fd >= 0) close(report_fd);
+                    return 126;
                 }
                 break;
             }
@@ -1306,11 +1352,17 @@ static int run_argv(const char *cwd, char *const argv[], const char *log_file,
         }
         /* Keep the completed leader unreaped until its isolated children are
            gone, so the numeric group ID cannot be reused during cleanup. */
-        if (isolated_group) (void)kill(-pid, SIGKILL);
+        int cleanup_error = isolated_group ? kill_isolated_group(pid) : 0;
         while (wait4(pid, &status, 0, NULL) < 0) {
             if (errno == EINTR) continue;
             if (report_fd >= 0) close(report_fd);
             return 1;
+        }
+        if (cleanup_error != 0) {
+            emit_spawn_error(log_file, "command group cleanup", cleanup_error);
+            if (pid_fd >= 0) close(pid_fd);
+            if (report_fd >= 0) close(report_fd);
+            return 126;
         }
     }
     if (pid_fd >= 0) close(pid_fd);

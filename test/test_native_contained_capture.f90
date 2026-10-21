@@ -441,11 +441,24 @@ contains
         call list_add(args, 'capture-owner')
         call list_add(args, '--session')
         call list_add(args, session_id)
-        call run_process(args, trim(root), result, timeout_ms=10000)
+        ! Wait for inventory discovery so an empty-inventory owner failure
+        ! cannot race a successful stop request and escape this oracle.
+        do cli_attempt = 1, 100
+            call run_process(args, trim(root), result, timeout_ms=10000)
+            if (result%runner_failed .or. result%exit_code /= 0) exit
+            call json_parse(result%stdout, cli_json, json_valid, json_error)
+            if (.not. json_valid) exit
+            if (json_string_value(json_member(cli_json, 'state')) == 'idle') exit
+            call fs_sleep_ms(20)
+        end do
         call write_text(trim(root)//'/public-status.stdout', result%stdout)
         call write_text(trim(root)//'/public-status.stderr', result%stderr)
         call assert_true(.not. result%runner_failed .and. result%reaped .and. &
             result%exit_code == 0, 'public status attaches after start capture exits')
+        call json_parse(result%stdout, cli_json, json_valid, json_error)
+        call assert_true(json_valid .and. &
+            json_string_value(json_member(cli_json, 'state')) == 'idle', &
+            'an empty test inventory settles idle before stop')
         cli_owner_live = cli_owner_pid > 0 .and. cli_owner_start > 0_c_int64_t
         if (cli_owner_live) cli_owner_live = &
             mcp_process_identity_running(cli_owner_pid, cli_owner_start)

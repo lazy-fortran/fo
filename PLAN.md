@@ -83,6 +83,33 @@ Nix/Spack replacement, CI/promotion engine or agent orchestrator.
   variants locally. The cancellation fixture explicitly installs the strict
   inherited-group filter it asserts; ordinary native groups remain allowed.
 
+## Lifecycle qualification (2026-10-21)
+
+- [V] Synchronous completion sent SIGKILL but waited only for the leader.
+  It now retains that exact leader unreaped until its private group stops;
+  timeout cleanup also retains the group identity until signalling finishes.
+  The backend oracle repeats named and unnamed background-child completion.
+- [V] Gremlin previously deleted build scratch and maintained its cache after
+  publishing stopped and releasing ownership. Both now precede publication.
+- [V] Contained capture's owner could fail before stop when an empty inventory
+  reached coverage_open, which requires members. Campaign selection now returns
+  no debt for that empty inventory. The public oracle waits for inventory
+  discovery: the pre-fix driver fails and the repaired driver settles idle.
+- [V] Immutable local driver SHA256
+  `f862da4869275382bc9c4bffe95f10d91899c024a0cf25243d32d2a2d4691bdc`
+  passes six affected native programs with retries disabled. GCC 12.2's option
+  table SELECT CASE compilation uses a typed copy with unchanged probes.
+- [V] Cluster tracing reproduces a pre-existing parallel link exit 126 on the
+  baseline: execve receives an object file as argv[0]. Per-worker compiler
+  detection clears the shared executable path while another worker packs argv.
+  Test workers now reuse the compiler identity resolved before their loop.
+  The original cold/warm parallel regression repeats four fresh projects.
+- [V] Cluster jobs 3300457/3300478 passed the initial focused four-program gate;
+  the latter's FO_JOBS=16 suite reports 177 PASS / 7 FAIL, including the empty
+  inventory failure repaired above. Job 3301176 compares the exact baseline
+  and repaired driver, including six other failing controls. No full green is
+  claimed. Evidence: `folife-logs` in the 20261021_cluster_triage handoff root.
+
 ## Darwin relocatable debug results (2026-10-21)
 
 - [V] The original CMake oracle's five Darwin failures have three producers:

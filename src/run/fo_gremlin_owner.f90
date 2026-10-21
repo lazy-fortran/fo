@@ -1225,6 +1225,15 @@ contains
                 trim(o%fatal_message), response)
             return
         end if
+        ! Finish potentially slow filesystem work before exposing stopped or
+        ! releasing the owner; observers use that terminal state as a barrier.
+        if (len_trim(o%active%build_project_root) > 0) then
+            call fs_remove_tree(trim(o%active%build_project_root))
+            o%active%build_project_root = ''
+        end if
+        call maintain_fo_cache(o%cache_cursor, status)
+        if (status /= 0) write (error_unit, '(a,i0)') &
+            'Gremlin cache maintenance at stop: ', status
         outcome = 'NONE'
         if (o%stop_requested) outcome = 'CANCELLED'
         call publish(o, 'stopped', '', outcome, 0, publish_error, o%message, &
@@ -1245,15 +1254,8 @@ contains
             call gremlin_error_response('run', trim(detail), response)
             return
         end if
-        if (len_trim(o%active%build_project_root) > 0) then
-            call fs_remove_tree(trim(o%active%build_project_root))
-            o%active%build_project_root = ''
-        end if
         ! Stopping keeps this session's generations: terminal reproduction replays
         ! them after the owner exits. Later builds prune inactive generations.
-        call maintain_fo_cache(o%cache_cursor, status)
-        if (status /= 0) write (error_unit, '(a,i0)') &
-            'Gremlin cache maintenance at stop: ', status
         exitcode = 0
         call gremlin_simple_response('run', o%request%lane_id, o%session%session_id, &
             'stopped', response)

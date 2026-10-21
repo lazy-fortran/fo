@@ -872,24 +872,41 @@
     end subroutine test_gfortran_interface_change_rebuilds_dependent
 
     subroutine test_gfortran_parallel_test_loop_restores_cached_objects()
-        integer :: exitcode, n_first, n_second
+        integer :: exitcode, n_first, n_second, unit, ios, i, attempt
         character(len=512) :: project_dir, log_file
+        character(len=1024) :: diagnostic
 
-        call make_tmp_path('fo_test_parallel_tests', project_dir)
-        call make_tmp_path('fo_backend_parallel_tests', log_file)
-        call make_many_test_fpm_project(project_dir, 8)
+        ! Fresh actions repeatedly expose compiler-command packing races.
+        do attempt = 1, 4
+            call make_tmp_path('fo_test_parallel_tests', project_dir)
+            call make_tmp_path('fo_backend_parallel_tests', log_file)
+            call make_many_test_fpm_project(project_dir, 8)
 
-        call native_test_run(project_dir, log_file, exitcode, n_compiled=n_first)
-        call assert(exitcode == 0, 'parallel gfortran test suite succeeds')
-        call assert(n_first == 8, 'parallel gfortran test first run compiles')
+            call native_test_run(project_dir, log_file, exitcode, n_compiled=n_first)
+            if (exitcode /= 0) then
+                write (error_unit, '(a,i0)') 'parallel test first-run exit: ', exitcode
+                open (newunit=unit, file=trim(log_file), status='old', &
+                    action='read', iostat=ios)
+                if (ios == 0) then
+                    do i = 1, 60
+                        read (unit, '(a)', iostat=ios) diagnostic
+                        if (ios /= 0) exit
+                        write (error_unit, '(a)') trim(diagnostic)
+                    end do
+                    close (unit)
+                end if
+            end if
+            call assert(exitcode == 0, 'parallel gfortran test suite succeeds')
+            call assert(n_first == 8, 'parallel gfortran test first run compiles')
 
-        call native_test_run(project_dir, log_file, exitcode, n_compiled=n_second)
-        call assert(exitcode == 0, 'parallel gfortran test suite rerun succeeds')
-        call assert(n_second == 0, &
-            'parallel gfortran test second run restores tests')
+            call native_test_run(project_dir, log_file, exitcode, n_compiled=n_second)
+            call assert(exitcode == 0, 'parallel gfortran test suite rerun succeeds')
+            call assert(n_second == 0, &
+                'parallel gfortran test second run restores tests')
 
-        call remove_tree(project_dir)
-        call fs_remove_file(trim(log_file))
+            call remove_tree(project_dir)
+            call fs_remove_file(trim(log_file))
+        end do
     end subroutine test_gfortran_parallel_test_loop_restores_cached_objects
 
     subroutine test_gfortran_test_links_helper_modules_and_lib()
