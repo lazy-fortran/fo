@@ -99,7 +99,7 @@ jobs:
   build-test:
     name: build + focused tests
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","itp-build"]') }}
     timeout-minutes: 40
     env:
       # Never let a missing credential turn into a hung git prompt.
@@ -110,12 +110,21 @@ jobs:
           # The stale-MCP verifier archives its exact historical base commit.
           fetch-depth: 0
 
+          persist-credentials: false
+      - name: Run native checks in the build container
+        if: ${{ !github.event.pull_request.head.repo.fork }}
+        env:
+          SCI_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          SCI_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |-
+          ci/run.sh ci-build-test
       - name: Install gfortran
         run: |
           sudo apt-get update
           sudo apt-get install -y gfortran
           gfortran --version | head -1
 
+        if: ${{ github.event.pull_request.head.repo.fork }}
       - name: Install fpm
         run: |
           sudo curl -L -o /usr/local/bin/fpm \
@@ -123,9 +132,11 @@ jobs:
           sudo chmod +x /usr/local/bin/fpm
           fpm --version
 
+        if: ${{ github.event.pull_request.head.repo.fork }}
       - name: Build
         run: fpm build
 
+        if: ${{ github.event.pull_request.head.repo.fork }}
       - name: Install fo onto PATH
         run: |
           # test_scaffold verifies that a freshly scaffolded project builds by
@@ -136,11 +147,13 @@ jobs:
           fpm install --prefix "$HOME/.local"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
+        if: ${{ github.event.pull_request.head.repo.fork }}
       - name: Verify fo is the binary just built
         run: |
           test -x "$HOME/.local/bin/fo"
           "$HOME/.local/bin/fo" --version
 
+        if: ${{ github.event.pull_request.head.repo.fork }}
       - name: Pin exact fo image for Gremlin driver oracle
         run: |
           umask 077
@@ -152,6 +165,7 @@ jobs:
           test "$(sha256sum "$pinned" | cut -d' ' -f1)" = "$digest"
           echo "FO_DRIVER_A=$pinned" >> "$GITHUB_ENV"
 
+        if: ${{ github.event.pull_request.head.repo.fork }}
       - name: Test project model and scoped Gremlin behavior
         run: |
           export PATH="$HOME/.local/bin:$PATH"
@@ -164,6 +178,7 @@ jobs:
             test_project_layering_cli test_gremlin_case_reuse test_gremlin_cmake \
             test_atomic_link_artifacts test_cmake_native_build_cli
 
+        if: ${{ github.event.pull_request.head.repo.fork }}
       - name: Test campaign, journal and coverage recovery
         run: |
           export PATH="$HOME/.local/bin:$PATH"
@@ -176,6 +191,7 @@ jobs:
           "$FO_DRIVER_A" test test_gremlin_journal_recovery \
             test_gremlin_coverage_restart test_gremlin_campaign_resolution
 
+        if: ${{ github.event.pull_request.head.repo.fork }}
       - name: Test public fo test dispatch
         run: |
           export PATH="$HOME/.local/bin:$PATH"
@@ -185,6 +201,7 @@ jobs:
           FO_CACHE_DIR="$RUNNER_TEMP/fo-mcp-system" \
             "$HOME/.local/bin/fo" test test_mcp_system
 
+        if: ${{ github.event.pull_request.head.repo.fork }}
       - name: Test Gremlin self refresh
         run: |
           export TMPDIR="$RUNNER_TEMP/fo-self-refresh-oracle-tmp"
@@ -203,6 +220,7 @@ jobs:
             "$HOME/.local/bin/fo" test --rerun --retries 0 --verbose \
               test_self_refresh
 
+        if: ${{ github.event.pull_request.head.repo.fork }}
       - name: Retain self-refresh failure logs
         if: failure()
         uses: actions/upload-artifact@v4
@@ -232,18 +250,21 @@ jobs:
       # The retired cancellation fixture forced LD_PRELOAD EPERM/backoff; #161
       # excludes that artificial syscall window. Its cleanup probe tested only
       # the JS fixture's own process-group helper, not Fo behavior.
+        if: ${{ github.event.pull_request.head.repo.fork }}
       - name: Test stale MCP recovery
         run: |
           driver="$FO_DRIVER_A"
           FO="$driver" FO_BIN="$driver" FO_DISABLE_SELF_REFRESH=1 FO_SELF_REFRESH=0 \
             "$driver" test test_mcp_gremlin_stale
 
+        if: ${{ github.event.pull_request.head.repo.fork }}
       - name: Test MCP cancellation and diagnostics
         run: |
           driver="$FO_DRIVER_A"
           FO="$driver" FO_BIN="$driver" FO_DISABLE_SELF_REFRESH=1 FO_SELF_REFRESH=0 \
             "$driver" test test_mcp_cancel_error
 
+        if: ${{ github.event.pull_request.head.repo.fork }}
       - name: Test standalone asynchronous process C fixtures
         run: |
           export FO_TEST_CLI="$FO_DRIVER_A"
@@ -273,3 +294,4 @@ jobs:
             "$fixture_dir/async_process_nested_cancel.c" "${process_dependencies[@]}" \
             -o "$verifier_dir/nested-cancel"
           "$verifier_dir/nested-cancel"
+        if: ${{ github.event.pull_request.head.repo.fork }}
