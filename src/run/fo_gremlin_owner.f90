@@ -38,6 +38,7 @@ module fo_gremlin_owner
         GREMLIN_VERIFY_ORDINARY
     use fo_gremlin_receipts, only: NAME_LEN, PATH_LEN, record_receipt, &
         case_reuse_source, prior_generation_case_passed, compute_readiness, &
+        publish_hook_receipt, &
         lifecycle_path_for_session, coverage_state_path, runner_case_outcome
     use fo_gremlin_request, only: gremlin_request_t
     use fo_gremlin_retention, only: gremlin_retention_json, gremlin_trim_cache
@@ -1373,6 +1374,7 @@ contains
             coverage_view, have_coverage, readiness, status, event_message)
         ! Quiescence is write-free once its lifecycle/state becomes visible.
         if (status == 0 .and. state == 'quiescent') then
+            if (readiness%local_gate_green) call publish_hook_receipt(o%session, o%active)
             trimmed = gremlin_trim_cache(retention_root, o%session%state_dir)
             if (trimmed < 0) write(error_unit, '(a,i0)') &
                 'Gremlin retained-view eviction: ', trimmed

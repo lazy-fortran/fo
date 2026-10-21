@@ -4,6 +4,7 @@ module fo_gremlin_receipts
     !! log, and the readiness of a published lane state from its receipts.
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_size_t, c_null_char
     use, intrinsic :: iso_fortran_env, only: int64
+    use fo_hook_evidence, only: hook_input_key, hook_receipt_write, hook_receipt_forget, hook_slow_case
     use fo_cache, only: HASH_LEN, cache_digest
     use fo_fs, only: fs_make_dir
     use fo_gremlin_case_inputs, only: generation_case_digest, generation_oracle_digest
@@ -38,6 +39,7 @@ module fo_gremlin_receipts
     private
 
     public :: NAME_LEN, PATH_LEN
+    public :: publish_hook_receipt
     public :: record_receipt, case_reuse_source, prior_generation_case_passed
     public :: compute_readiness, lifecycle_path_for_session, coverage_state_path
     public :: gate_receipt_matches, status_is_failure, receipt_limit
@@ -72,6 +74,32 @@ module fo_gremlin_receipts
     end interface
 
 contains
+
+    subroutine publish_hook_receipt(session, generation)
+        !! Quiescence alone is insufficient: require a current PASS for every
+        !! fast project case, including cases outside a scoped lane request.
+        type(gremlin_session_t), intent(in) :: session
+        type(generation_t), intent(in) :: generation
+        type(case_index_entry_t) :: entry
+        character(len=64) :: digest
+        logical :: found
+        integer :: i
+
+        if (.not. allocated(generation%model)) return
+        if (.not. generation%model%complete) return
+        do i = 1, generation%model%n_cases
+            if (generation%model%cases(i)%explicit_only) cycle
+            if (generation%model%cases(i)%expanded) cycle
+            if (hook_slow_case(generation%model%cases(i))) cycle
+            digest = generation_case_digest(generation, generation%model%cases(i)%name)
+            if (len_trim(digest) /= 64) return
+            call case_index_read(session, generation%model%cases(i)%name, entry, found)
+            if (.not. found) return
+            if (entry%last_digest /= digest .or. entry%last_status /= 'PASS') return
+        end do
+        call hook_receipt_write(trim(hook_input_key(generation)))
+    end subroutine publish_hook_receipt
+
 
     function coverage_state_path(session, identity) result(path)
         !! The coverage state file of one generation of the lane.
@@ -377,6 +405,8 @@ contains
                 call json_key_string(jb, 'disposition', 'run')
             end if
         end if
+        if (outcome /= 'PASS' .and. outcome /= 'BUILD_PASS') &
+            call hook_receipt_forget(trim(hook_input_key(generation)))
         if (outcome == 'PASS' .or. outcome == 'BUILD_PASS') then
             call json_key_string(jb, 'outcome', 'pass')
         else
