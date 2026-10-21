@@ -350,6 +350,11 @@ See [the design and primary sources](doc/PRECOMMIT_PLAN.md). The gfortran 12.2
 focused gate passes the hook process oracle, formatter and fpm model checks;
 shared receipt/Gremlin checks and deployment receipts are tracked in the
 fohook handoff, with exact source and immutable driver identities.
+Integrated source `0571d01` passes the same gfortran 12.2 gate (Slurm 3321532;
+immutable driver `47aa911e579261cfd62ee77df566c799b28b98748c57f8408c0c2437f5453ccc`).
+The broad head gate is not green: the restored-mtime stat-memo oracle also fails
+on main, independently confirmed by colliding metadata for differing contents.
+PR #232 remains a draft; Fo deployment and consumer timings are unfinished.
 
 ## Native CMake Fortran repair (2026-10-21)
 
