@@ -66,7 +66,7 @@ module fo_gremlin_owner
 
     type :: child_t
         !! One owned child process tree: the candidate build or a campaign case.
-        type(exec_job_t) :: job
+        type(exec_job_t) :: job = exec_job_t()
         type(execution_view_t) :: execution_view = execution_view_t()
         character(len=NAME_LEN) :: case_name = ''
         integer :: case_index = 0
