@@ -77,6 +77,11 @@ Nix/Spack replacement, CI/promotion engine or agent orchestrator.
   this one oracle now receives 1800 seconds within a 40-minute CI job.
 - [H] Cold release-build cost reduction is follow-up work, outside this repair.
   PR #220 still requires green CI, merge-queue publication and deployment.
+- [V] CI 39560225391 passes the complete Fortran gate, including cold
+  self-refresh, then exposes the standalone C fixture link command's missing
+  fo_sys.c dependency. The corrected command passes all seven native/filter
+  variants locally. The cancellation fixture explicitly installs the strict
+  inherited-group filter it asserts; ordinary native groups remain allowed.
 
 ## Independent Flang consumer gate (2026-10-21)
 
