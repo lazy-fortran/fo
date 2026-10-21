@@ -178,7 +178,7 @@ contains
     function fs_native_path(path) result(native)
         !! Keep native drive/UNC paths; POSIX backslashes remain filename bytes.
         character(len=*), intent(in) :: path
-        character(len=:), allocatable :: native
+        character(len=len_trim(path)) :: native
         integer :: i
 
         native = trim(path)
