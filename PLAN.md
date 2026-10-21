@@ -341,6 +341,15 @@ compiler bootstrap/focused/consumer logs and exact source manifests.
   and 255.44 seconds after. Warm unchanged installs take 0.09 and 0.08 seconds
   with no compilation output. These single samples are advisory; the earlier
   316.77-second trace used two workers and is not a controlled comparison.
+## Staged pre-commit checks (2026-10-21)
+
+`fo hook pre-commit [--json]` now isolates Git's index, checks formatting,
+reuses exact Gremlin build/fast-test receipts or requires a capped staged build
+and bounded fast affected tests. Unrun tests are reported as DEFERRED.
+See [the design and primary sources](doc/PRECOMMIT_PLAN.md). The gfortran 12.2
+focused gate passes the hook process oracle, formatter and fpm model checks;
+shared receipt/Gremlin checks and deployment receipts are tracked in the
+fohook handoff, with exact source and immutable driver identities.
 
 ## Native CMake Fortran repair (2026-10-21)
 

@@ -382,3 +382,12 @@ main = "test_cmake_scope_cli.f90"
 name = "test_cmake_declared_inputs_cli"
 source-dir = "test"
 main = "test_cmake_declared_inputs_cli.f90"
+
+[[test]]
+name = "test_hook_precommit"
+source-dir = "test"
+main = "test_hook_precommit.f90"
+
+# Process-boundary hook oracle deliberately exercises multi-second budgets.
+[extra.fo.test-groups]
+slow = { tests = ["test_hook_precommit"] }
