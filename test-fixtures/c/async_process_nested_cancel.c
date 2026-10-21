@@ -236,6 +236,9 @@ int main(int argc, char **argv) {
         }
     }
     if (argc == 3 && strcmp(argv[1], "outer") == 0) {
+        /* This oracle exercises the strict inherited-group fallback. Native
+           sessions/groups are allowed by the ordinary ownership filter now. */
+        if (install_async_group_containment(1) != 0) return 99;
         int first, second, first_error, second_error;
         char first_file[PATH_MAX], second_file[PATH_MAX];
         char command[PATH_MAX], outcome[PATH_MAX], line[32];
