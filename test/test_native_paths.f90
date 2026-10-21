@@ -1,7 +1,8 @@
 program test_native_paths
     !! Native path spellings must address real files without a POSIX runtime.
     use, intrinsic :: iso_fortran_env, only: error_unit
-    use fo_fs, only: fs_is_windows, fs_native_path, fs_path_is_absolute
+    use fo_fs, only: fs_is_windows, fs_native_path, fs_path_is_absolute, &
+        fs_path_root_len
     use fo_fs, only: fs_parent_path, fs_make_dir, fs_remove_tree
     use fo_fs, only: fs_realpath, fs_identity, fs_find_executable
     use fo_dep_resolve, only: normalize_path, join_path
@@ -16,6 +17,7 @@ program test_native_paths
     logical :: found, first_ok, second_ok
 
     failures = 0
+    call concurrent_paths()
     call normalize_path('/one/../two/./three', result)
     call check(result == '/two/three', 'lexical relative segments')
     call normalize_path('../../one', result)
@@ -102,6 +104,35 @@ program test_native_paths
     print '(a)', 'native paths PASS'
 
 contains
+
+    subroutine concurrent_paths()
+        integer :: lane, counts(4)
+
+        !$omp parallel do num_threads(4)
+        do lane = 1, 4
+            call varied_paths(lane, counts(lane))
+        end do
+        !$omp end parallel do
+        call check(sum(counts) == 0, &
+            'concurrent native paths retain exact varied-length bytes and root')
+    end subroutine concurrent_paths
+
+    subroutine varied_paths(lane, count)
+        integer, intent(in) :: lane
+        integer, intent(out) :: count
+        character(len=lane*17 + 2) :: path
+        character(len=:), allocatable :: native
+        integer :: iteration
+
+        path = '/'//repeat('p', lane*17)//'/'
+        count = 0
+        do iteration = 1, 10000
+            native = fs_native_path(path)
+            if (len(native) /= len(path)) count = count + 1
+            if (native /= path) count = count + 1
+            if (fs_path_root_len(path) /= 1) count = count + 1
+        end do
+    end subroutine varied_paths
 
     subroutine check(condition, label)
         logical, intent(in) :: condition
