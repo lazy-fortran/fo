@@ -1,8 +1,12 @@
 program test_atomic_link_artifacts
+    use, intrinsic :: iso_c_binding, only: c_long_long
+    use fo_fs, only: fs_identity
+    use fo_build_tree, only: native_output_dir
     use fo_test_harness, only: string_list_t, process_result_t, list_add
     use fo_test_harness, only: make_scratch, join_path, write_text, remove_tree
     use fo_test_harness, only: remove_path, file_exists, assert_process_ok
     use fo_test_harness, only: assert_true, assert_equal_integer, assert_equal_string
+    use fo_test_harness, only: assert_contains
     use fo_test_harness, only: assert_file_exists
     use fo_test_harness, only: finish_assertions, spawn_process, poll_process
     use fo_test_harness, only: terminate_process_group
@@ -100,12 +104,55 @@ program test_atomic_link_artifacts
     call assert_equal_string(result%stdout, '42' // new_line('a'), &
         'recovered archive links and runs')
 
+    call source_files(37, 5)
+    call run_build('wrong', result)
+    call assert_true(result%exit_code /= 0, &
+        'archive with correct member names but wrong object bytes is rejected')
+    call assert_contains(result%stderr, &
+        'archiver output does not contain the expected object members', &
+        'wrong member bytes fail archive validation')
+    call run_build('normal', result)
+    call assert_process_ok(result, 'correct producer recovers after wrong member bytes')
+    call run_program(result)
+    call assert_equal_string(result%stdout, '42' // new_line('a'), &
+        'recovered archive contains the correct objects')
+    call test_profile_copy()
     if (child > 0) call cleanup_child()
     call remove_tree(scratch)
     call finish_assertions()
     write(*, '(a)') 'atomic-link-artifacts: warm, corrupt, concurrent and interrupted paths pass'
 
 contains
+
+    subroutine test_profile_copy()
+        character(:), allocatable :: app_copy
+        integer(c_long_long) :: device_before, inode_before, device_after, inode_after
+        logical :: exists
+
+        call run_build('normal', result, '-O1')
+        call assert_process_ok(result, 'first profile builds')
+        app_copy = native_output_dir(project, '-O1', 'app') // &
+            '/atomic_link_fixture'
+        call fs_identity(app_copy, device_before, inode_before, exists)
+        call assert_true(exists, 'first profile app copy exists')
+        call run_build('normal', result, '-O0')
+        call assert_process_ok(result, 'second profile builds')
+        call run_build('normal', result, '-O1')
+        call assert_process_ok(result, 'first profile builds again')
+        call fs_identity(app_copy, device_after, inode_after, exists)
+        call assert_true(exists .and. device_before == device_after .and. &
+            inode_before == inode_after, 'unchanged profile app copy retains its inode')
+
+        call write_text(app_copy, 'damaged app copy')
+        call run_build('normal', result, '-O0')
+        call assert_process_ok(result, 'switch away from damaged app copy')
+        call run_build('normal', result, '-O1')
+        call assert_process_ok(result, 'damaged app copy is repaired')
+        call run_external(app_copy, string_list_t(), project, result)
+        call assert_process_ok(result, 'repaired app copy runs')
+        call assert_equal_string(result%stdout, '42' // new_line('a'), &
+            'repaired app copy has the expected output')
+    end subroutine test_profile_copy
 
     function words(values) result(list)
         character(len=*), intent(in) :: values(:)
@@ -201,6 +248,9 @@ contains
             when_rcs // 'fail write $ARG2 "partial\n"' // lf // &
             when_rcs // 'fail exit 37' // lf // &
             when_rcs // 'omit exec $FO_TEST_REAL_AR rcs $ARG2' // lf // &
+            when_rcs // 'wrong run $FO_TEST_REAL_AR $@' // lf // &
+            when_rcs // 'wrong copy $ARG4 $FO_TEST_WRONG_OBJECT' // lf // &
+            when_rcs // 'wrong exec $FO_TEST_REAL_AR rcs $ARG2 $FO_TEST_WRONG_OBJECT' // lf // &
             'exec $FO_TEST_REAL_AR $@' // lf)
     end subroutine install_archiver
 
@@ -215,6 +265,8 @@ contains
         call list_add(environment, 'FO_TEST_REAL_AR=' // real_ar)
         call list_add(environment, 'FO_TEST_AR_LOG=' // join_path(scratch, 'ar.log'))
         call list_add(environment, 'FO_TEST_MARKER=' // marker)
+        call list_add(environment, 'FO_TEST_WRONG_OBJECT=' // &
+            join_path(scratch, 'src_model.f90.o'))
     end function build_environment
 
     function environment_value(name) result(value)
@@ -227,12 +279,17 @@ contains
         call get_environment_variable(name, value=value)
     end function environment_value
 
-    subroutine run_build(mode, child_result)
+    subroutine run_build(mode, child_result, flags)
         character(len=*), intent(in) :: mode
         type(process_result_t), intent(out) :: child_result
+        character(len=*), intent(in), optional :: flags
         type(string_list_t) :: command, environment
 
         command = words(['build'])
+        if (present(flags)) then
+            call list_add(command, '--flag')
+            call list_add(command, flags)
+        end if
         environment = build_environment(mode)
         call run_fo(driver, command, project, cache, child_result, environment, 120000)
     end subroutine run_build

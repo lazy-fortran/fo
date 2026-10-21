@@ -1,6 +1,6 @@
 # Fo delivery goals
 
-Updated 2026-10-20; compile-cache qualification `291862c`, Fx `c8d892e`
+Updated 2026-10-21; compile-cache qualification `291862c`, Fx `c8d892e`
 (earlier consolidation qualification `d1b4a69`).
 Issues define observable success and this plan orders delivery. Apply
 [goals and architectural freedom](doc/GOAL_DRIVEN_DEVELOPMENT.md), choose the
@@ -39,6 +39,49 @@ for people and AI agents. Gremlin is its centre.
 
 The product boundary in `CLAUDE.md` still holds: no hermetic environments,
 Nix/Spack replacement, CI/promotion engine or agent orchestrator.
+
+## Self-refresh and install CI repair (2026-10-21)
+
+- [V] The profile-switch reproducer replaces an unchanged app inode on main.
+  Private app publication now retains identical executable copies and repairs
+  damaged ones. Archive validation extracts once into owned scratch, retaining
+  exact membership and per-object byte checks instead of one process per member.
+- [V] Source `a2f22e3`, release driver SHA256
+  `96c0b35c82bb1e64abe32d74181d3b9e5eb8ec3d5e719bf49febd1dd277e3ece`
+  passes native atomic-archive, install, compiler-artifact, CMake-build and
+  fixture-failure-evidence checks. Incorrect member bytes remain rejected.
+- [V] GCC 12.2 rejects resetting a called host-associated procedure pointer.
+  Copying and clearing the teardown hook before calling it compiles on the
+  compiler floor and preserves once-only teardown. CI's install-help step now
+  retains its pinned driver when HOME is isolated.
+- [V] The GCC 12 release image also emitted `cmake --build ... --target -j 4`
+  without the delegated target names after growing the route's string vector
+  through array constructors. The vector now reserves the known target bound
+  once and stores each name directly. The existing
+  duplicate-module consumer is part of the focused CI gate.
+- [V] [PR #220](https://github.com/lazy-fortran/fo/pull/220) owns the complete
+  self-refresh CI and deployment qualification; focused passes alone do not
+  establish a green main run. Evidence and installation receipts belong
+  under `/home/ert/data/handoffs/20261021_cluster_triage/fofix2-logs`.
+- [V] Both GCC 12.2 cluster images pass the same five affected programs;
+  sCluster's cold self-refresh oracle passes in 314.95 seconds. Darwin passes
+  the four repair-specific programs and both smoke consumers; its original
+  installed image reproduces five unrelated relocation-oracle failures.
+- [V] CI run `39553210344` confirms the inode repair but still fails explicit
+  install: the 180-second child cap expires at 483/507 compiled sources.
+  A two-CPU aCluster trace completes cold release installation in 316.77
+  seconds (job `21816920`), without a hang. The controller classifies this as
+  a command safety timeout: the oracle's cold build commands receive a
+  900-second cap, with all behavioral assertions intact. CI `39557841818`
+  then reached install but exhausted its separate 600-second parent cap;
+  this one oracle now receives 1800 seconds within a 40-minute CI job.
+- [H] Cold release-build cost reduction is follow-up work, outside this repair.
+  PR #220 still requires green CI, merge-queue publication and deployment.
+- [V] CI 39560225391 passes the complete Fortran gate, including cold
+  self-refresh, then exposes the standalone C fixture link command's missing
+  fo_sys.c dependency. The corrected command passes all seven native/filter
+  variants locally. The cancellation fixture explicitly installs the strict
+  inherited-group filter it asserts; ordinary native groups remain allowed.
 
 ## Native CMake Fortran repair (2026-10-21)
 

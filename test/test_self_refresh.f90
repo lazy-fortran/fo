@@ -279,11 +279,14 @@ contains
         integer, intent(out) :: exitcode
         real(dp) :: started
 
+        ! A cold 507-source release install took 317 s on GCC 12.2. This is
+        ! a command safety cap, not a performance oracle. Cold profile builds
+        ! also approach 180 s on CI; allow the same bounded headroom for them.
         write (output_unit, '(a)') 'self-refresh stage started: '//log_path
         flush (output_unit)
         started = wall_time_seconds()
         call process_run_argv_logged(root, packed, n_args, log_path, &
-            .false., 180, exitcode)
+            .false., 900, exitcode)
         write (output_unit, '(a,i0,a,f8.2,a)') &
             'self-refresh stage finished: exit ', exitcode, ', ', &
             wall_time_seconds() - started, ' s; '//log_path
