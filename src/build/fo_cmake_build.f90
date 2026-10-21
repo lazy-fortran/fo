@@ -49,7 +49,7 @@ module fo_cmake_build
         integer, allocatable :: obj_target(:), obj_source(:)
     end type target_actions_t
 
-    type, public :: cmake_route_t
+    type :: cmake_route_t
         !! Which targets of the request are built natively or delegated.
         type(cmake_plan_t) :: plan
         logical :: usable = .false.
