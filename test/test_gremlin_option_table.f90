@@ -135,6 +135,7 @@ contains
         !! Out-of-range values are refused, and in-range ones are not, with the
         !! same message on the CLI and over MCP.
         integer :: i
+        type(gremlin_option_t) :: option
         type(json_value_t), allocatable :: replies(:)
         type(process_result_t) :: result, cli_result
         type(string_list_t) :: arguments
@@ -144,24 +145,25 @@ contains
 
         n = 0
         do i = 1, N_GREMLIN_OPTIONS
-            associate (option => GREMLIN_OPTIONS(i))
-                select case (trim(option%kind))
-                case ('int')
-                    if (option%lo >= 0) call add_probe(option, option%lo - 1, .false.)
-                    if (option%hi < int(huge(0), int64)) &
-                        call add_probe(option, option%hi + 1, .false.)
-                    call add_probe(option, max(option%lo, 0_int64), .true.)
-                case ('string')
-                    if (len_trim(option%choices) > 0) then
-                        call add_text_probe(option, 'bogus-value', .false.)
-                        call add_text_probe(option, first_choice(option%choices), .true.)
-                    end if
-                    if (trim(option%key) == 'filter') then
-                        call add_text_probe(option, 'name(', .false.)
-                        call add_text_probe(option, 'affected()', .false.)
-                    end if
-                end select
-            end associate
+            ! GCC 12 misclassifies the CHARACTER component of an associate
+            ! selector in SELECT CASE; a typed copy preserves the same probes.
+            option = GREMLIN_OPTIONS(i)
+            select case (trim(option%kind))
+            case ('int')
+                if (option%lo >= 0) call add_probe(option, option%lo - 1, .false.)
+                if (option%hi < int(huge(0), int64)) &
+                    call add_probe(option, option%hi + 1, .false.)
+                call add_probe(option, max(option%lo, 0_int64), .true.)
+            case ('string')
+                if (len_trim(option%choices) > 0) then
+                    call add_text_probe(option, 'bogus-value', .false.)
+                    call add_text_probe(option, first_choice(option%choices), .true.)
+                end if
+                if (trim(option%key) == 'filter') then
+                    call add_text_probe(option, 'name(', .false.)
+                    call add_text_probe(option, 'affected()', .false.)
+                end if
+            end select
         end do
 
         call assert_true(n > 20, 'the table yields option probes')

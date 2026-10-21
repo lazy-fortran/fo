@@ -650,7 +650,9 @@ contains
         end if
         n_mandatory_selected = 0
         limit = n_priorities + min(GREMLIN_NONMANDATORY_LIMIT, request%random_count)
-        if (limit == 0) then
+        ! An empty eligible inventory has no coverage debt, even when the
+        ! request permits background cases. Coverage epochs require members.
+        if (limit == 0 .or. n_all == 0) then
             ierr = GREMLIN_POLICY_OK
             message = ''
             return

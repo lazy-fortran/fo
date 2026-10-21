@@ -91,6 +91,9 @@ program test_backend_gfortran
         case ('parallel-warm-restore')
             call test_gfortran_parallel_warm_restore()
             call report('backend_gfortran/parallel-warm-restore')
+        case ('parallel-test-loop')
+            call test_gfortran_parallel_test_loop_restores_cached_objects()
+            call report('backend_gfortran/parallel-test-loop')
         case ('external-test-helpers')
             call test_gfortran_named_test_links_helper_modules()
             call test_gfortran_named_test_links_external_helpers()
@@ -657,7 +660,7 @@ contains
         end interface
         character(len=512) :: project_dir, log_file, tmpdir, source, pid_file
         character(len=64) :: selected(1)
-        integer :: u, exitcode, clock, pid, sentinel_pid, env_status
+        integer :: u, exitcode, clock, pid, sentinel_pid, env_status, attempt
         integer(c_int) :: rc
         logical :: alive
 
@@ -706,10 +709,14 @@ contains
             .true., sentinel_pid)
         call run_process_tree_case(project_dir, log_file, selected, 'blocked', .false., &
             .true., sentinel_pid)
-        call run_process_tree_case(project_dir, log_file, selected, 'complete', .true., &
-            .false., sentinel_pid)
-        call run_process_tree_case(project_dir, log_file, selected, 'complete', .false., &
-            .false., sentinel_pid)
+        ! Exercise the completion barrier repeatedly: sending SIGKILL to a
+        ! background child does not mean the child has already stopped.
+        do attempt = 1, 8
+            call run_process_tree_case(project_dir, log_file, selected, 'complete', &
+                .true., .false., sentinel_pid)
+            call run_process_tree_case(project_dir, log_file, selected, 'complete', &
+                .false., .false., sentinel_pid)
+        end do
 
         rc = c_kill(int(sentinel_pid, c_int), 9_c_int)
         call assert(rc == 0, 'stops the exact unrelated sentinel')
