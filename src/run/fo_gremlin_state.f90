@@ -35,7 +35,7 @@ module fo_gremlin_state
     end type gremlin_lease_t
 
     type, public :: gremlin_lease_group_t
-        type(gremlin_lease_t) :: members(LEASE_GROUP_MAX)
+        type(gremlin_lease_t) :: members(LEASE_GROUP_MAX) = gremlin_lease_t()
         integer :: count = 0
         integer :: scope_fd = -1, guardian_pid = 0
         character(len=PATH_LEN) :: scope = '', previous_scope = ''
