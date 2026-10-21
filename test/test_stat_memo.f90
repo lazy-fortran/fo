@@ -37,9 +37,8 @@ contains
 end module stat_memo_parallel_oracle
 
 program test_stat_memo
-    !! The persistent file-hash memo must return the true sha256, reuse it while
-    !! (mtime,size) are unchanged, recompute when the file changes, and reload
-    !! its persisted entries after a save.
+    !! The persistent file-hash observations must return the true current sha256
+    !! despite colliding metadata, concurrent changes, or persisted old entries.
     use fo_util, only: temporary_root
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_long_long, c_null_char
@@ -173,7 +172,7 @@ contains
         call sha256_file(trim(f), direct_h, ierr)
         call assert(trim(memo_h) == trim(direct_h), &
             'memo hash equals direct sha256')
-        ! second call returns the same (served from memo)
+        ! An unchanged file still returns the same content digest.
         call memo_hash_file(trim(f), memo_h, ierr)
         call assert(trim(memo_h) == trim(direct_h), 'repeat hash stable')
         call fs_remove_file(trim(f))
@@ -236,6 +235,8 @@ contains
         call write_text(trim(f), 'same length A')
         call memo_hash_file(trim(f), h1, ierr)
         call assert(ierr == 0, 'hash before same-size restored-mtime edit')
+        call memo_save()
+        call memo_reset()
 
         call write_text(trim(reference), 'reference')
         call copy_mtime(trim(f), trim(reference))
@@ -250,7 +251,7 @@ contains
         call assert(stat_ok .and. before_mtime == after_mtime .and. &
             before_size == after_size, 'edit preserves mtime and size')
         call assert(trim(h1) /= trim(h2), &
-            'ctime invalidates same-size restored-mtime memo entry')
+            'content invalidates persisted same-size restored-mtime entry')
         call assert(trim(h2) == trim(direct), &
             'restored-mtime edit returns the new sha256')
         call assert(ierr == 0 .and. direct_ierr == 0, &

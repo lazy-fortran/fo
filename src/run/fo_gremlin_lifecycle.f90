@@ -2,6 +2,7 @@ module fo_gremlin_lifecycle
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_int64_t, c_null_char
     use, intrinsic :: iso_fortran_env, only: int64
     use fo_fs, only: fs_sleep_ms
+    use fo_exec_service, only: exec_clock_ms
     use fo_cache, only: HASH_LEN, cache_digest
     use fo_gremlin_request, only: gremlin_json_text_valid
     use fo_util, only: json_bool, json_int
@@ -83,13 +84,17 @@ contains
         character(len=*), intent(in) :: path
         logical, intent(out) :: verified
         integer(c_int64_t) :: requested, acknowledged
+        integer(int64) :: deadline_ms
         integer :: ierr, attempt
         verified = .false.
         requested = 0_c_int64_t
         call gremlin_freshness_update(path, 1, requested, ierr)
         if (ierr /= 0) return
+        deadline_ms = exec_clock_ms() + 2000_int64
         ! The owner answers from its poll loop; on a loaded host that can take
         ! well over 200 ms, and a missed answer would report a fresh lane as dirty.
+        ! Sleep scheduling can overrun its requested interval. Bound elapsed
+        ! time too, especially when a stopping owner can no longer answer.
         do attempt = 1, 400
             acknowledged = 0_c_int64_t
             call gremlin_freshness_update(path, 3, acknowledged, ierr)
@@ -97,6 +102,7 @@ contains
                 verified = .true.
                 return
             end if
+            if (exec_clock_ms() >= deadline_ms) return
             call fs_sleep_ms(5)
         end do
     end subroutine gremlin_freshness_check
