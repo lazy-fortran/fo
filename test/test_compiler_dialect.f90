@@ -44,6 +44,9 @@ contains
         call check(index(dialect%module_flags('/tmp/mod'), '-J') > 0, &
             'gfortran uses -J for modules')
         call check(dialect%supports_fuse_ld(), 'gfortran supports fuse-ld')
+        dialect = compiler_dialect('/tmp/iIFxVv/nvidia/flang/gfortran-private-wrapper')
+        call check(dialect%kind == COMPILER_GFORTRAN, &
+            'compiler names in parent directories do not change the dialect')
     end subroutine test_gfortran_policy
 
     subroutine test_nvfortran_policy()

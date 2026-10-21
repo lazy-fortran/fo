@@ -226,6 +226,10 @@ contains
                 n = n + 1
                 call make_action(plan, t, group, built%a(n), reason)
                 if (len(reason) > 0) return
+                if (built%a(n)%language == 'Fortran') then
+                    call source_preprocessing(plan, ninja, t, s, built%a(n), reason)
+                    if (len(reason) > 0) return
+                end if
                 built%source(n) = s
             end do
             if (n == 0 .and. size(built%obj_target) == 0) then
@@ -241,6 +245,68 @@ contains
             end if
         end associate
     end subroutine native_eligible
+
+    subroutine source_preprocessing(plan, ninja, t, s, action, reason)
+        !! The File API omits Fortran_PREPROCESS. Ninja records the resolved
+        !! per-source choice as PREPROCESS_SCAN versus SCAN, even when ON and
+        !! OFF sources share one compile group. Compile the original source
+        !! with the same choice instead of losing CMake's preprocessing step.
+        type(cmake_plan_t), intent(in) :: plan
+        character(len=*), intent(in) :: ninja
+        integer, intent(in) :: t, s
+        type(native_action_t), intent(inout) :: action
+        character(len=:), allocatable, intent(out) :: reason
+        character(len=:), allocatable :: prefix, source, line
+        integer :: start, finish, at
+
+        reason = ''
+        prefix = plan%targets(t)%build_dir
+        if (prefix == plan%build_root) then
+            prefix = ''
+        else if (index(prefix, plan%build_root//'/') == 1) then
+            prefix = prefix(len(plan%build_root) + 2:)//'/'
+        end if
+        prefix = nl//'build '//ninja_path(prefix//'CMakeFiles/'// &
+            plan%targets(t)%name//'.dir/')
+        source = ' '//ninja_path(plan%targets(t)%sources(s)%s)
+        start = 1
+        do
+            at = index(ninja(start:), prefix)
+            if (at == 0) exit
+            start = start + at
+            finish = start + index(ninja(start:), nl) - 2
+            if (finish < start) exit
+            line = ninja(start:finish)
+            start = finish + 1
+            at = index(line, source)
+            if (at == 0) cycle
+            at = at + len(source)
+            if (at <= len(line)) then
+                if (line(at:at) /= ' ') cycle
+            end if
+            if (index(line, ': Fortran_PREPROCESS_SCAN_') > 0) then
+                call add_token(action%argv, '-cpp')
+                return
+            else if (index(line, ': Fortran_SCAN_') > 0) then
+                call add_token(action%argv, '-nocpp')
+                return
+            end if
+        end do
+        reason = 'cannot resolve Fortran preprocessing for '// &
+            plan%targets(t)%sources(s)%s
+    end subroutine source_preprocessing
+
+    function ninja_path(path) result(escaped)
+        character(len=*), intent(in) :: path
+        character(len=:), allocatable :: escaped
+        integer :: i
+
+        escaped = ''
+        do i = 1, len(path)
+            if (index(' $:', path(i:i)) > 0) escaped = escaped//'$'
+            escaped = escaped//path(i:i)
+        end do
+    end function ninja_path
 
     logical function has_custom_commands(plan, ninja, t) result(has)
         !! True when the target's link statement in build.ninja carries
@@ -368,7 +434,9 @@ contains
                 call add_token(argv, '-D'//grp%defines(i)%s)
             end do
             do i = 1, grp%n_includes
-                if (grp%include_system(i)) then
+                ! Fortran module lookup needs -I even for SYSTEM includes;
+                ! -isystem only supplies a preprocessor/header search path.
+                if (grp%include_system(i) .and. grp%language /= 'Fortran') then
                     call add_token(argv, '-isystem')
                     call add_token(argv, grp%includes(i)%s)
                 else
@@ -871,6 +939,8 @@ contains
                     call argv_push(packed, n_args, '-cpp')
                     call argv_push(packed, n_args, '-P')
                     call argv_push_split_nl(packed, n_args, actions(n_units)%argv)
+                    if (index(nl//actions(n_units)%argv//nl, &
+                        nl//'-nocpp'//nl) > 0) n_args = 0
                     ! The compiler, not the optional AST frontend, decides
                     ! what is valid Fortran: a source the frontend cannot
                     ! parse is scanned for module statements instead.

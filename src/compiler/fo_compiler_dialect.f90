@@ -36,8 +36,11 @@ contains
         character(len=*), intent(in) :: command
         type(compiler_dialect_t) :: dialect
         character(len=len(command)) :: lowered
+        integer :: separator
 
-        lowered = lowercase(command)
+        separator = max(index(command, '/', back=.true.), &
+            index(command, achar(92), back=.true.))
+        lowered = lowercase(command(separator + 1:))
         dialect%command = trim(command)
         if (index(lowered, 'nvfortran') > 0 .or. &
             index(lowered, 'nvidia') > 0 .or. index(lowered, 'pgfortran') > 0) then
