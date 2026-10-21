@@ -133,6 +133,18 @@ Nix/Spack replacement, CI/promotion engine or agent orchestrator.
   no relocation assertion, compile count or byte comparison was relaxed.
 - [H] Publication and final combined-platform deployment remain pending.
 
+## Independent Flang consumer gate (2026-10-21)
+
+- [V] The Flang CI job builds and tests native FPM and CMake consumers whose
+  programs verify compiler_version() identifies Flang and check a module result.
+  Both routes pass locally with Flang 23.1.3 through the qualified Fo driver.
+  The job also runs five focused compiler/project-model tests and merge groups.
+- [V] Fo itself is bootstrapped with GNU Fortran: Flang 21 rejects FortFront
+  a34ada8 at type_system_arena.f90:58–376 (duplicate PUBLIC attributes and
+  incomplete constructors). Upstream main has no newer fix. This gate does
+  not claim that the complete Fo/FortFront stack builds with Flang.
+- [H] CI qualification and making both job names required await green main.
+
 ## Native CMake Fortran repair (2026-10-21)
 
 - [V] Source `8734651` retains CMake's per-source preprocessing choice from
