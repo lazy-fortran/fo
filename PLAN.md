@@ -163,11 +163,17 @@ Nix/Spack replacement, CI/promotion engine or agent orchestrator.
   allocation. Job 21817060 passes the four hash/store/cache programs with both
   GCC 12.2 and Flang 21.1.8 at -O3 -fopenmp; the original Flang store/cache
   programs fail (21817058). No validation is bypassed.
-- [H] Full consumer qualification remains in progress. CI now bootstraps Fo
+- [V] Full Fo bootstrap and native FPM/CMake consumers pass with Flang 21.1.8
+  and 22.1.8 (21817061/21817062, COMPLETED 0:0). The Flang 21-built image
+  b16548554d6b71b893c574c465fec68a8cc83545e3edcbbd53eae0704246269d
+  also passes public MCP smoke and a green/quiescent resident lane whose owner
+  exits before scratch cleanup (21817071, COMPLETED 0:0). Initial diagnostic
+  script bounds, cleanup expectations and state/cache isolation were corrected;
+  their failed jobs are not counted as PASS. CI now bootstraps Fo
   itself with each Flang 21 and 22 compiler, then runs the compiler/model and
   real native FPM/CMake consumers. The existing required Flang check aggregates
-  both matrix results and runs on merge groups. Main support and deployment
-  require the resulting native and CI gates.
+  both matrix results and runs on merge groups. Final provider pins, required
+  CI and main deployment remain pending.
 
 ## Concurrent cache follow-up (2026-10-21)
 
