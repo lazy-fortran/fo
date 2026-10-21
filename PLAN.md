@@ -46,7 +46,7 @@ Nix/Spack replacement, CI/promotion engine or agent orchestrator.
   Private app publication now retains identical executable copies and repairs
   damaged ones. Archive validation extracts once into owned scratch, retaining
   exact membership and per-object byte checks instead of one process per member.
-- [V] Driver SHA256
+- [V] Source `b92873d`, driver SHA256
   `d8d52a3f4808b986dcf16f7c9904ec2a527ef10cd330396cbc89bb63272b7829`
   passes native atomic-archive, install, compiler-artifact, CMake-build and
   fixture-failure-evidence checks. Incorrect member bytes remain rejected.
@@ -54,9 +54,9 @@ Nix/Spack replacement, CI/promotion engine or agent orchestrator.
   Copying and clearing the teardown hook before calling it compiles on the
   compiler floor and preserves once-only teardown. CI's install-help step now
   retains its pinned driver when HOME is isolated.
-- [H] Full self-refresh CI and platform deployment qualification are pending
-  in [PR #220](https://github.com/lazy-fortran/fo/pull/220); focused passes do
-  not establish a green main run. Evidence and installation receipts belong
+- [V] [PR #220](https://github.com/lazy-fortran/fo/pull/220) owns the complete
+  self-refresh CI and deployment qualification; focused passes alone do not
+  establish a green main run. Evidence and installation receipts belong
   under `/home/ert/data/handoffs/20261021_cluster_triage/fofix2-logs`.
 
 ## Native CMake Fortran repair (2026-10-21)
