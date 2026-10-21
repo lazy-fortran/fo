@@ -7,6 +7,7 @@ module fo_hook
     use fo_gremlin_context, only: case_identity_capture
     use fo_gremlin_generation, only: generation_t
     use fo_gremlin_request, only: gremlin_json_text_valid
+    use fo_cmake_generation, only: cmake_stage_git
     use fo_hook_evidence, only: hook_input_key, hook_receipt_read, &
         hook_receipt_write, hook_slow_case
     use fo_test_results, only: test_result_entry_t, parse_test_results
@@ -261,6 +262,8 @@ contains
                 backend%cmake%build_root = 'build'
                 backend%cmake%build_root_hint = .true.
                 child_env = 'FO_CMAKE_BUILD_DIR=build'
+                call cmake_stage_git(root, snapshot, status, message)
+                if (status /= 0) exit validation
             end if
             if (backend%kind == BACKEND_NONE) then
                 message = 'no supported staged Fortran project'
