@@ -40,19 +40,6 @@ for people and AI agents. Gremlin is its centre.
 The product boundary in `CLAUDE.md` still holds: no hermetic environments,
 Nix/Spack replacement, CI/promotion engine or agent orchestrator.
 
-## Native path result-length race (2026-10-21)
-
-- [V] fxfix's GCC12 ASan consumer job3318119 finds a heap over-read at
-  `src/util/fo_fs.f90:209`: a 107-byte copy from a 75-byte `fs_native_path`
-  allocation. TSan3317715 reports shared compiler-created `slen.144.0` at
-  the same call while native compile workers construct object paths.
-- [V] `fs_native_path` now returns exactly `len_trim(path)` characters;
-  separator translation preserves this length. The native path test adds
-  four concurrent clients with varied lengths and exact byte/root checks.
-  This does not change the Fx pin or other lanes' serialization work.
-- [H] The repaired consumer still needs its native and ASan qualification;
-  the original allocator abort is not an acceptable consumer result.
-
 ## Self-refresh and install CI repair (2026-10-21)
 
 - [V] The profile-switch reproducer replaces an unchanged app inode on main.
