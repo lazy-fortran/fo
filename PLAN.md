@@ -46,8 +46,8 @@ Nix/Spack replacement, CI/promotion engine or agent orchestrator.
   Private app publication now retains identical executable copies and repairs
   damaged ones. Archive validation extracts once into owned scratch, retaining
   exact membership and per-object byte checks instead of one process per member.
-- [V] Source `b92873d`, driver SHA256
-  `d8d52a3f4808b986dcf16f7c9904ec2a527ef10cd330396cbc89bb63272b7829`
+- [V] Source `a2f22e3`, release driver SHA256
+  `96c0b35c82bb1e64abe32d74181d3b9e5eb8ec3d5e719bf49febd1dd277e3ece`
   passes native atomic-archive, install, compiler-artifact, CMake-build and
   fixture-failure-evidence checks. Incorrect member bytes remain rejected.
 - [V] GCC 12.2 rejects resetting a called host-associated procedure pointer.
@@ -63,6 +63,17 @@ Nix/Spack replacement, CI/promotion engine or agent orchestrator.
   self-refresh CI and deployment qualification; focused passes alone do not
   establish a green main run. Evidence and installation receipts belong
   under `/home/ert/data/handoffs/20261021_cluster_triage/fofix2-logs`.
+- [V] Both GCC 12.2 cluster images pass the same five affected programs;
+  sCluster's cold self-refresh oracle passes in 314.95 seconds. Darwin passes
+  the four repair-specific programs and both smoke consumers; its original
+  installed image reproduces five unrelated relocation-oracle failures.
+- [V] CI run `39553210344` confirms the inode repair but still fails explicit
+  install: the 180-second child cap expires at 483/507 compiled sources.
+  A two-CPU aCluster trace completes cold release installation in 316.77
+  seconds (job `21816920`), without a hang. PR #220 remains a draft; main
+  and all global installations are unchanged. No test deadline was increased.
+- [H] Further cold-build performance work is needed before CI qualification,
+  merge-queue publication and deployment can proceed.
 
 ## Native CMake Fortran repair (2026-10-21)
 
