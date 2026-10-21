@@ -878,6 +878,8 @@ contains
         logical, intent(in), optional :: configured
         logical :: skip_configure
         type(cmake_route_t) :: route
+        character(len=:), allocatable :: saved_targets(:)
+        integer :: i, width
 
         if (native_cmake_selected(context%source_root)) then
             if (len_trim(flags) > 0) then
@@ -912,18 +914,28 @@ contains
             return
         end if
         if (route%n_delegated > 0) then
-            call cmake_delegate_build(context, log_file, exitcode, route%delegated)
+            call move_alloc(context%build_targets, saved_targets)
+            width = 1
+            do i = 1, route%n_delegated
+                width = max(width, len(route%delegated(i)%s))
+            end do
+            allocate (character(len=width) :: &
+                context%build_targets(route%n_delegated))
+            do i = 1, route%n_delegated
+                context%build_targets(i) = route%delegated(i)%s
+            end do
+            call cmake_delegate_build(context, log_file, exitcode)
+            call move_alloc(saved_targets, context%build_targets)
             if (exitcode /= 0) return
         end if
         call cmake_build_native(route, log_file, exitcode)
     end subroutine cmake_build
 
-    subroutine cmake_delegate_build(context, log_file, exitcode, delegated)
+    subroutine cmake_delegate_build(context, log_file, exitcode)
         !! `cmake --build` for the context's build targets (all when none).
         type(cmake_context_t), intent(inout) :: context
         character(len=*), intent(in) :: log_file
         integer, intent(out) :: exitcode
-        type(string_t), intent(in), optional :: delegated(:)
         character(len=:), allocatable :: packed
         character(len=32) :: jobs_text
         integer :: n_args, i
@@ -949,12 +961,7 @@ contains
             call argv_push(packed, n_args, '--config')
             call argv_push(packed, n_args, context%configuration)
         end if
-        if (present(delegated)) then
-            call argv_push(packed, n_args, '--target')
-            do i = 1, size(delegated)
-                call argv_push(packed, n_args, delegated(i)%s)
-            end do
-        else if (allocated(context%build_targets)) then
+        if (allocated(context%build_targets)) then
             if (size(context%build_targets) > 0) then
                 call argv_push(packed, n_args, '--target')
                 do i = 1, size(context%build_targets)

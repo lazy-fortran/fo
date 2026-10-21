@@ -78,7 +78,6 @@ contains
 
         route%usable = .false.
         route%reason = ''
-        allocate (route%delegated(0))
         route_file = cmake_context_build_path(context)//'/.fo-native-cmake'
         call fs_make_dir(trim(route_file))
         route_file = trim(route_file)//'/route.log'
@@ -112,6 +111,7 @@ contains
             return
         end if
         n = size(route%plan%targets)
+        allocate (route%delegated(n))
         allocate (route%mode(n), route%actions(n), wanted(n))
         route%mode = MODE_SKIP
         call wanted_targets(context, route%plan, route%ninja, wanted, message)
@@ -150,7 +150,6 @@ contains
         integer, intent(in) :: t
         character(len=*), intent(in) :: log_file
         character(len=:), allocatable :: reason
-        type(string_t), allocatable :: grown(:)
         integer :: n
 
         reason = ''
@@ -170,10 +169,7 @@ contains
         end if
         route%mode(t) = MODE_DELEGATED
         n = route%n_delegated
-        allocate (grown(n + 1))
-        if (n > 0) grown(1:n) = route%delegated(1:n)
-        grown(n + 1)%s = route%plan%targets(t)%name
-        call move_alloc(grown, route%delegated)
+        route%delegated(n + 1)%s = route%plan%targets(t)%name
         route%n_delegated = n + 1
         call log_line(log_file, 'fo: delegated: '//route%plan%targets(t)%name// &
             ' ('//reason//')')
@@ -727,8 +723,7 @@ contains
                 if (ok) cycle
                 route%mode(t) = MODE_DELEGATED
                 route%n_delegated = route%n_delegated + 1
-                route%delegated = [route%delegated(1:route%n_delegated - 1), &
-                    string_t(route%plan%targets(t)%name)]
+                route%delegated(route%n_delegated)%s = route%plan%targets(t)%name
                 call log_line(log_file, 'fo: delegated: '// &
                     route%plan%targets(t)%name// &
                     ' (consumes objects of a delegated object library)')
@@ -806,8 +801,7 @@ contains
             if (.not. demote(t)) cycle
             route%mode(t) = MODE_DELEGATED
             route%n_delegated = route%n_delegated + 1
-            route%delegated = [route%delegated(1:route%n_delegated - 1), &
-                string_t(route%plan%targets(t)%name)]
+            route%delegated(route%n_delegated)%s = route%plan%targets(t)%name
             call log_line(log_file, 'fo: delegated: '// &
                 route%plan%targets(t)%name// &
                 ' (source built differently or module defined twice across '// &
