@@ -76,3 +76,5 @@ jobs:
           name: fo-performance-audit-${{ github.run_id }}
           path: ${{ runner.temp }}/fo-benchmark-report/results.jsonl
           if-no-files-found: ignore
+    if: >-
+      github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && github.actor != 'github-merge-queue[bot]') || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'full-ci')) || github.event_name == 'schedule'
