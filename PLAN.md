@@ -71,8 +71,10 @@ Nix/Spack replacement, CI/promotion engine or agent orchestrator.
   install: the 180-second child cap expires at 483/507 compiled sources.
   A two-CPU aCluster trace completes cold release installation in 316.77
   seconds (job `21816920`), without a hang. The controller classifies this as
-  a command safety timeout: only the cold install receives a 900-second cap;
-  all behavioral assertions and other command caps remain intact.
+  a command safety timeout: the oracle's cold build commands receive a
+  900-second cap, with all behavioral assertions intact. CI `39557841818`
+  then reached install but exhausted its separate 600-second parent cap;
+  this one oracle now receives 1800 seconds within a 40-minute CI job.
 - [H] Cold release-build cost reduction is follow-up work, outside this repair.
   PR #220 still requires green CI, merge-queue publication and deployment.
 
