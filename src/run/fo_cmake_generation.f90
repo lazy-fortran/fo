@@ -741,15 +741,16 @@ contains
         character(len=*), intent(out) :: message
         type(input_inventory_t), intent(in), optional :: inventory
         character(len=PATH_LEN), allocatable :: files(:)
-        character(len=PATH_LEN) :: normalized, project, build
+        character(len=PATH_LEN) :: normalized, project, build, cmake_root
+        character(len=PATH_LEN) :: toolchain
         character(len=:), allocatable :: text
-        character(:), allocatable :: key, path
+        character(:), allocatable :: key, path, line, kind, value
         type(json_parser_t) :: parser
         type(json_event_t) :: event
-        integer :: n_files, i, j, depth
+        integer :: n_files, i, j, depth, cursor
         character(len=64) :: ancestors(64)
         character(len=PATH_LEN) :: pending_paths(64)
-        logical :: generated(64), captured, exists
+        logical :: generated(64), cmake_input(64), captured, exists, delegated
 
         allocate(files(2048))
         allocate(character(len=1048576) :: text)
@@ -757,6 +758,19 @@ contains
         message = ''
         call canonical_directory(backend%project_dir, project)
         call canonical_directory(cmake_context_build_path(backend%cmake), build)
+        cmake_root = ''
+        toolchain = ''
+        call read_text_file(trim(build)//'/CMakeCache.txt', text)
+        cursor = 1
+        do while (next_cache_line(text, cursor, line))
+            call cache_entry(line, key, kind, value)
+            if (key == 'CMAKE_ROOT' .and. len(value) > 0) &
+                call canonical_directory(value, cmake_root)
+            if (key == 'CMAKE_TOOLCHAIN_FILE' .and. len(value) > 0) then
+                call normalize_path(value, toolchain)
+                call canonical_authored_path(toolchain)
+            end if
+        end do
         call fs_collect_files(trim(build)//'/.cmake/api/v1/reply', '', '.json', &
             '', files, n_files, recursive=.false.)
         if (n_files == 0 .or. n_files == size(files)) then
@@ -774,6 +788,7 @@ contains
             ancestors = ''
             pending_paths = ''
             generated = .false.
+            cmake_input = .false.
             do
                 call json_parser_next(parser, event)
                 if (event%event_type == JSON_END_OF_INPUT) exit
@@ -793,6 +808,7 @@ contains
                     ancestors(depth) = key
                     pending_paths(depth) = ''
                     generated(depth) = .false.
+                    cmake_input(depth) = .false.
                     key = ''
                     cycle
                 case (JSON_ARRAY_END, JSON_OBJECT_END)
@@ -819,16 +835,25 @@ contains
                                 end if
                             end if
                             call canonical_authored_path(normalized)
+                            delegated = .false.
+                            if (index(files(i), '/cmakeFiles-') > 0) then
+                                delegated = cmake_input(depth)
+                                if (trim(normalized) == trim(toolchain)) &
+                                    delegated = .true.
+                                ! Some CMake versions omit isCMake on templates.
+                                if (len_trim(cmake_root) > 0) then
+                                    if (inside(normalized, cmake_root)) &
+                                        delegated = .true.
+                                end if
+                            end if
                             captured = inside(normalized, project) .or. &
                                 inside(normalized, build)
                             do j = 1, size(roots)
                                 if (inside(normalized, roots(j))) captured = .true.
                             end do
-                            ! System compiler/CMake inputs retain the delegated
-                            ! toolchain boundary. External authored inputs must
-                            ! be frozen.
-                            if (inside(normalized, '/usr') .or. &
-                                inside(normalized, '/opt')) captured = .true.
+                            ! CMake's installation and exact toolchain stay delegated.
+                            ! Authored files under /opt or /usr still need capture.
+                            if (delegated) captured = .true.
                             if (.not. captured) then
                                 ierr = 1
                                 message = 'unsupported uncaptured external CMake input: '// &
@@ -837,8 +862,7 @@ contains
                             end if
                             if (present(inventory)) then
                                 if (.not. inside(normalized, build) .and. &
-                                    .not. inside(normalized, '/usr') .and. &
-                                    .not. inside(normalized, '/opt')) then
+                                    .not. delegated) then
                                     if (.not. inventory_has_path(inventory, normalized)) then
                                         ierr = 1
                                         message = 'referenced CMake input is missing or unsupported: '// &
@@ -858,6 +882,9 @@ contains
                 case (JSON_BOOL)
                     if (key == 'isGenerated' .and. depth > 0) &
                         generated(depth) = event%bool_val
+                    if (key == 'isCMake' .and. depth > 0 .and. &
+                        index(files(i), '/cmakeFiles-') > 0) &
+                        cmake_input(depth) = event%bool_val
                     key = ''
                     cycle
                 end select

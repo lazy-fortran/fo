@@ -4,7 +4,7 @@ program test_cmake_project_model
     !! (core <- model <- exe) with one target from a separate source root.
     use fo_fs, only: fs_realpath
     use fo_test_harness, only: string_list_t, process_result_t, make_scratch, &
-        join_path, write_lines, list_add, remove_tree, run_process, &
+        join_path, write_lines, write_text, list_add, remove_tree, run_process, &
         assert_process_ok, assert_true, assert_equal_string, &
         assert_equal_integer, finish_assertions
     use fo_cmake_context, only: cmake_context_t, cmake_context_init, &
@@ -27,6 +27,8 @@ program test_cmake_project_model
     call make_scratch('fo-cmake-model', scratch)
     call fs_realpath(scratch, resolved, ok)
     root = trim(resolved)
+    ! Keep the preset longer than the former 256-byte buffer on every host.
+    root = join_path(root, repeat('long-path-', 8))
     project = join_path(root, 'project')
     dependency = join_path(root, 'dependency')
     build = join_path(root, 'build')
@@ -72,36 +74,34 @@ program test_cmake_project_model
     print '(a)', 'CMake project model PASS'
 contains
     subroutine write_fixture()
-        ! A fixed-length local avoids gfortran 16 sizing a typed one-element
-        ! constructor of a run-time concatenation by its value, not its type.
-        character(len=256) :: preset
-        character(len=160) :: subdir_line
-        subdir_line = 'add_subdirectory("'//dependency//'" dep_build)'
-        call write_lines(join_path(project, 'CMakeLists.txt'), [character(len=160) :: &
-            'cmake_minimum_required(VERSION 3.20)', &
-            'project(pm Fortran)', &
-            subdir_line, &
-            'add_subdirectory(core)', &
-            'add_subdirectory(model)', &
-            'add_executable(exe main.f90)', &
-            'target_link_libraries(exe PRIVATE model)', &
-            'enable_testing()', &
-            'add_test(NAME unit COMMAND exe)', &
+        character(:), allocatable :: preset
+        character, parameter :: nl = new_line('a')
+
+        call write_text(join_path(project, 'CMakeLists.txt'), &
+            'cmake_minimum_required(VERSION 3.20)'//nl// &
+            'project(pm Fortran)'//nl// &
+            'add_subdirectory("'//dependency//'" dep_build)'//nl// &
+            'add_subdirectory(core)'//nl// &
+            'add_subdirectory(model)'//nl// &
+            'add_executable(exe main.f90)'//nl// &
+            'target_link_libraries(exe PRIVATE model)'//nl// &
+            'enable_testing()'//nl// &
+            'add_test(NAME unit COMMAND exe)'//nl// &
             'set_tests_properties(unit PROPERTIES LABELS "fast" TIMEOUT 30 '// &
-            'FIXTURES_REQUIRED fx)', &
-            'add_test(NAME crunch COMMAND exe)', &
-            'set_tests_properties(crunch PROPERTIES LABELS "slow;perf")', &
+            'FIXTURES_REQUIRED fx)'//nl// &
+            'add_test(NAME crunch COMMAND exe)'//nl// &
+            'set_tests_properties(crunch PROPERTIES LABELS "slow;perf")'//nl// &
             'add_test(NAME script COMMAND ${CMAKE_COMMAND} -P '// &
-            '${CMAKE_CURRENT_SOURCE_DIR}/check.cmake)', &
+            '${CMAKE_CURRENT_SOURCE_DIR}/check.cmake)'//nl// &
             'set_tests_properties(script PROPERTIES FIXTURES_SETUP fx '// &
-            'FIXTURES_REQUIRED "a;b")'])
+            'FIXTURES_REQUIRED "a;b")'//nl)
         call write_lines(join_path(project, 'check.cmake'), &
             [character(len=40) :: 'message(STATUS ok)'])
         preset = '{"version":3,"configurePresets":[{"name":"c",'// &
             '"generator":"Ninja","binaryDir":"'//build//'"}],"testPresets":'// &
             '[{"name":"t","configurePreset":"c","filter":{"exclude":'// &
             '{"label":"perf"}}}]}'
-        call write_lines(join_path(project, 'CMakePresets.json'), [preset])
+        call write_text(join_path(project, 'CMakePresets.json'), preset//nl)
         call write_lines(join_path(project, 'core/CMakeLists.txt'), &
             [character(len=160) :: 'add_library(core STATIC core.f90)', &
             'target_link_libraries(core PUBLIC ext)'])

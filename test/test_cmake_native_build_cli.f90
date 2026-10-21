@@ -202,6 +202,9 @@ contains
 
         call list_add(environment, 'FO_BACKEND=cmake')
         call list_add(environment, 'FO_JOBS=2')
+        ! These fixtures choose their compiler, including the counting wrapper.
+        ! A host toolchain can otherwise override CMAKE_Fortran_COMPILER.
+        call list_add(environment, 'CMAKE_TOOLCHAIN_FILE=')
         if (delegate) call list_add(environment, 'FO_CMAKE_DELEGATE_BUILD=1')
         if (.not. with_shims) return
         call list_add(environment, 'PATH='//shim_dir//':'//environment_value('PATH'))

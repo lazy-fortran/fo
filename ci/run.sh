@@ -96,7 +96,7 @@ export FO_DISABLE_SELF_REFRESH=1 FO_SELF_REFRESH=0 FO_JOBS=1
 export TMPDIR="$RUNNER_TEMP/fo-focused-tests"
 mkdir -p "$TMPDIR"
 "$FO_DRIVER_A" test test_project_model test_fpm_project_model \
-  test_cmake_project_model test_project_selection_cli \
+  test_cmake_project_model test_cmake_capture_paths test_project_selection_cli \
   test_project_layering_cli test_gremlin_case_reuse test_gremlin_cmake \
   test_atomic_link_artifacts test_cmake_native_build_cli
 
