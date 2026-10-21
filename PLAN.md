@@ -96,7 +96,7 @@ Nix/Spack replacement, CI/promotion engine or agent orchestrator.
   no debt for that empty inventory. The public oracle waits for inventory
   discovery: the pre-fix driver fails and the repaired driver settles idle.
 - [V] Immutable local driver SHA256
-  `8e5960be92adcd1b716b6cc33af72d483f9bf8e1452213591572d23efeae2347`
+  `3b3ca68e44f7b0c36232793903a961f450facc744dec370bc6c51a5b5409961c`
   passes six affected native programs with retries disabled. GCC 12.2's option
   table SELECT CASE compilation uses a typed copy with unchanged probes.
 - [V] Cluster tracing reproduces a pre-existing parallel link exit 126 on the
@@ -139,7 +139,16 @@ Nix/Spack replacement, CI/promotion engine or agent orchestrator.
   `96b41ec2a22d644ccdb2c58fa4058c724de9f836cc8d0b4d0b8a247b3fefea9b`.
   Independent object and linker probes identify the exact embedded metadata;
   no relocation assertion, compile count or byte comparison was relaxed.
-- [H] Publication and final combined-platform deployment remain pending.
+- [V] Final production tree c04173e passes seven focused programs with
+  retries disabled on GCC 12.2 / FO_JOBS=16, plus 96 additional four-project
+  cold/warm invocations on each cluster: sCluster 3308536 and aCluster 21816957
+  both complete 0:0. Darwin passes six applicable programs; adopted reaping
+  explicitly skips its Linux-only oracle. Local final-image CLI smoke passes.
+  Qualified SHA256 receipts (deployment receipts live in handoff_folife.md):
+  local 9cab03a5cfa5dd29cfc3849530b22af1420e6f41afa05e90fa68e170af822c5c;
+  Darwin 3341f9376f5aaf2c5906545f01e5cb8c89da0c898c6b00ce73ca2fb785171e5a;
+  sCluster 5842a6c135818def1808438f372de77cd7d59ee1d3ca45291747b3e73c315146;
+  aCluster 447e345d6df50c900402b33dad1cae75ae30a1a5c1f687b96ad52ce2808d42be.
 
 ## Independent Flang consumer gate (2026-10-21)
 
@@ -153,7 +162,6 @@ Nix/Spack replacement, CI/promotion engine or agent orchestrator.
   not claim that the complete Fo/FortFront stack builds with Flang.
 - [V] Main b237d63 passes both jobs (CI 39571141426). Ruleset 25437892
   now requires both exact GitHub Actions job names and preserves merge queue.
-  Queue admission and merge under the new requirements are the next check.
 
 ## Native CMake Fortran repair (2026-10-21)
 
