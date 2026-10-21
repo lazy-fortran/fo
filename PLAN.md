@@ -54,6 +54,11 @@ Nix/Spack replacement, CI/promotion engine or agent orchestrator.
   Copying and clearing the teardown hook before calling it compiles on the
   compiler floor and preserves once-only teardown. CI's install-help step now
   retains its pinned driver when HOME is isolated.
+- [V] The GCC 12 release image also emitted `cmake --build ... --target -j 4`
+  without the delegated target names after moving/reallocating the context's
+  deferred-length target array. Delegation now accepts the route's string
+  vector directly and leaves the configured context intact. The existing
+  duplicate-module consumer is part of the focused CI gate.
 - [V] [PR #220](https://github.com/lazy-fortran/fo/pull/220) owns the complete
   self-refresh CI and deployment qualification; focused passes alone do not
   establish a green main run. Evidence and installation receipts belong
