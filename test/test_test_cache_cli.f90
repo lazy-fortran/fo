@@ -154,12 +154,13 @@ contains
         type(process_result_t) :: result
 
         call write_text(join_path(scratch, 'fail_case_c'), 'x')
+        c_base = runs('case_c')
         call fo_test([character(len=16) :: '--rerun'], result)
         call assert_true(result%exit_code /= 0, 'failing case fails the run')
         ! The runner retries a failing case, so a failing run may start the
         ! case more than once: its starts are compared relative.
+        call assert_true(runs('case_c') > c_base, 'the failing case ran')
         c_base = runs('case_c')
-        call assert_true(c_base > 4, 'the failing case ran')
         call assert_equal_integer(runs('case_a'), 5, 'failing run: case_a starts')
         call assert_equal_integer(runs('case_b'), 4, 'failing run: case_b starts')
         call fo_test([character(len=16) :: ], result)
