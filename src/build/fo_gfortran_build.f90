@@ -38,7 +38,7 @@ module fo_gfortran_build
     use fo_fs, only: fs_make_dir, fs_remove_tree, fs_remove_file, fs_append_file, &
         fs_delete_suffix, fs_collect_files, fs_collect_mod_dirs, fs_copy_exec, &
         fs_find_executable, fs_rename, fs_mkdir_excl, fs_identity, fs_path_is_absolute, &
-        fs_is_windows
+        fs_is_windows, fs_realpath
     use fo_progress, only: progress_begin, progress_step, progress_end, &
         progress_note
     use fo_compiler_dialect, only: compiler_dialect, compiler_dialect_t, &
@@ -53,7 +53,8 @@ module fo_gfortran_build
     use fo_build_stamp, only: build_stamp_matches, build_stamp_quick_matches, &
         build_stamp_save
     use fo_compiler_memo, only: compiler_memo_load, compiler_memo_save
-    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char, c_long_long
+    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char, c_long_long, &
+        c_size_t
     use, intrinsic :: iso_fortran_env, only: error_unit, int64
     implicit none
     private
@@ -114,6 +115,12 @@ module fo_gfortran_build
     public :: make_obj_path
 
     interface
+        integer(c_int) function c_darwin_cpu_identity(text, capacity) &
+                bind(C, name='fo_c_darwin_cpu_identity')
+            import :: c_char, c_int, c_size_t
+            character(kind=c_char), intent(out) :: text(*)
+            integer(c_size_t), value :: capacity
+        end function c_darwin_cpu_identity
         integer(c_int) function c_unsetenv(name) bind(C, name='fo_c_unsetenv')
             import :: c_char, c_int
             character(kind=c_char), intent(in) :: name(*)
@@ -305,22 +312,37 @@ contains
         character(len=*), intent(in) :: cwd, compiler, argv, inputs, output
         character(len=*), intent(in) :: log_file
         integer, intent(out) :: exitcode
-        character(len=:), allocatable :: packed
+        character(len=:), allocatable :: packed, effective_argv, link_environment
         character(len=HASH_LEN), allocatable :: parts(:)
         character(len=HASH_LEN) :: action_id
-        character(len=1024) :: stage_dir, staged_output
+        character(len=1024) :: stage_dir, staged_output, canonical_cwd
         type(cache_t) :: cache
         integer :: n_args, n, start, i, cache_ierr, reserve_rc, store_ierr
-        logical :: restored, valid_image, do_cache
+        logical :: restored, valid_image, do_cache, resolved
 
         exitcode = 1
+        effective_argv = argv
+        link_environment = ''
+        if (is_macos() .and. cache_relocatable()) then
+            call fs_realpath(cwd, canonical_cwd, resolved)
+            if (.not. resolved) return
+            ! Mach-O OSO symbols otherwise retain absolute object paths and
+            ! mtimes even when all compiler debug records are relocatable.
+            effective_argv = argv//achar(10)//'-Wl,-oso_prefix,'// &
+                trim(canonical_cwd)//'/'
+            link_environment = 'ZERO_AR_DATE=1'
+        end if
         call cache_init(cache, cache_ierr)
         do_cache = cache_ierr == 0
         if (do_cache) then
             n = 0
             allocate (parts(3 + count_char(inputs, achar(10)) + 1))
             parts(1) = memo_tool_key(compiler)
-            call text_digest(argv, parts(2))
+            if (len(link_environment) > 0) then
+                call text_digest(effective_argv//achar(10)//link_environment, parts(2))
+            else
+                call text_digest(argv, parts(2))
+            end if
             parts(3) = 'fo-cmake-link-1'
             n = 3
             start = 1
@@ -352,11 +374,11 @@ contains
         end if
         n_args = 0
         call argv_push(packed, n_args, compiler)
-        call argv_push_split_nl(packed, n_args, argv)
+        call argv_push_split_nl(packed, n_args, effective_argv)
         call argv_push(packed, n_args, '-o')
         call argv_push(packed, n_args, staged_output)
         call process_run_argv_logged(cwd, packed, n_args, log_file, .true., &
-            build_timeout_seconds(), exitcode)
+            build_timeout_seconds(), exitcode, env_extra=link_environment)
         if (exitcode == 124) call append_build_hang_hint(log_file, &
             'link of '//trim(output), build_timeout_seconds())
         if (exitcode == 0) then
@@ -503,6 +525,12 @@ contains
                     '-gno-record-gcc-switches'
                 normalized = normalized//nl//'-fdebug-prefix-map=<cwd>=.'//nl// &
                     '-gno-record-gcc-switches'
+                ! Darwin's assembler constructs its own DWARF line table;
+                ! GCC's prefix map only changes the compiler's debug records.
+                if (is_macos()) then
+                    tokens = tokens//nl//'-Wa,-fdebug-compilation-dir=.'
+                    normalized = normalized//nl//'-Wa,-fdebug-compilation-dir=.'
+                end if
             end if
         else if (debug_info) then
             normalized = normalized//nl//'debug-cwd'//nl//cwd
@@ -550,6 +578,8 @@ contains
         character(len=:), allocatable :: identity
         character(len=:), allocatable, save :: known
         character(len=8192) :: line
+        character(kind=c_char) :: darwin_cpu(1024)
+        integer(c_int) :: cpu_status
         integer :: unit, ios, stamp(8)
         integer(int64) :: clock
 
@@ -558,6 +588,16 @@ contains
             return
         end if
         identity = ''
+        if (is_macos()) then
+            darwin_cpu = c_null_char
+            cpu_status = c_darwin_cpu_identity(darwin_cpu, size(darwin_cpu, kind=c_size_t))
+            if (cpu_status == 0) then
+                do unit = 1, size(darwin_cpu)
+                    if (darwin_cpu(unit) == c_null_char) exit
+                    identity = identity//darwin_cpu(unit)
+                end do
+            end if
+        end if
         open (newunit=unit, file='/proc/cpuinfo', status='old', action='read', &
             iostat=ios)
         if (ios == 0) then

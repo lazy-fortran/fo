@@ -83,6 +83,24 @@ Nix/Spack replacement, CI/promotion engine or agent orchestrator.
   variants locally. The cancellation fixture explicitly installs the strict
   inherited-group filter it asserts; ordinary native groups remain allowed.
 
+## Darwin relocatable debug results (2026-10-21)
+
+- [V] The original CMake oracle's five Darwin failures have three producers:
+  native CPU identity fell back to a per-process nonce without /proc/cpuinfo;
+  Apple's assembler independently recorded its working directory in DWARF;
+  Mach-O OSO symbols retained object paths and modification times at link.
+- [V] Darwin now supplies CPU type/subtype/family/brand (plus Intel masks),
+  maps the assembler compilation directory, and strips the canonical object
+  prefix with zero OSO timestamps only under FO_CACHE_RELOCATABLE=1. Link
+  cache identity includes the controlled environment. Other hosts retain their
+  existing link keys and flags.
+- [V] On faepmac1 the unchanged original native CMake oracle passes in 80.84 s
+  with release SHA256
+  `96b41ec2a22d644ccdb2c58fa4058c724de9f836cc8d0b4d0b8a247b3fefea9b`.
+  Independent object and linker probes identify the exact embedded metadata;
+  no relocation assertion, compile count or byte comparison was relaxed.
+- [H] Publication and final combined-platform deployment remain pending.
+
 ## Native CMake Fortran repair (2026-10-21)
 
 - [V] Source `8734651` retains CMake's per-source preprocessing choice from
