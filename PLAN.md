@@ -96,9 +96,14 @@ Nix/Spack replacement, CI/promotion engine or agent orchestrator.
   no debt for that empty inventory. The public oracle waits for inventory
   discovery: the pre-fix driver fails and the repaired driver settles idle.
 - [V] Immutable local driver SHA256
-  `cf811d2949d7f300e7a341c096b69a22e37b6d7aa09e06ae730c80161feac870`
+  `f862da4869275382bc9c4bffe95f10d91899c024a0cf25243d32d2a2d4691bdc`
   passes six affected native programs with retries disabled. GCC 12.2's option
   table SELECT CASE compilation uses a typed copy with unchanged probes.
+- [V] Cluster tracing reproduces a pre-existing parallel link exit 126 on the
+  baseline: execve receives an object file as argv[0]. Per-worker compiler
+  detection clears the shared executable path while another worker packs argv.
+  Test workers now reuse the compiler identity resolved before their loop.
+  The original cold/warm parallel regression repeats four fresh projects.
 - [V] Cluster jobs 3300457/3300478 passed the initial focused four-program gate;
   the latter's FO_JOBS=16 suite reports 177 PASS / 7 FAIL, including the empty
   inventory failure repaired above. Job 3301176 compares the exact baseline
