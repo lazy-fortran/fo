@@ -197,9 +197,18 @@ contains
                     exit
                 end do
             end if
-            call relocate_value(value, trim(project_path), &
-                trim(build_path), roots(:n_roots), &
-                bundles(:n_roots), aliases, rewritten)
+            ! Installed package configs derive their SDK prefix from their own
+            ! location. Keep that native hint; module/header fingerprints still
+            ! guard the delegated SDK inputs before build and cached PASS reuse.
+            if (kind == 'PATH' .and. native_package_hint(key, value, &
+                trim(project_path), trim(build_path), roots(:n_roots), &
+                labels(:n_roots))) then
+                rewritten = value
+            else
+                call relocate_value(value, trim(project_path), &
+                    trim(build_path), roots(:n_roots), &
+                    bundles(:n_roots), aliases, rewritten)
+            end if
             ! Find-package results such as Python's headers are often INTERNAL.
             ! Keep only those internal paths pointing into captured headers;
             ! compiler and CMake implementation state remains delegated.
@@ -658,6 +667,45 @@ contains
             end do
         end do
     end subroutine capture_path_aliases
+
+    logical function native_package_hint(key, value, project, build, &
+            roots, labels) result(native)
+        character(len=*), intent(in) :: key, value, project, build, roots(:), labels(:)
+        character(len=PATH_LEN) :: physical
+        logical :: sdk
+        character(len=:), allocatable :: package
+        integer :: i, code
+
+        native = .false.
+        if (len(key) < 5 .or. len_trim(value) == 0) return
+        if (key(len(key) - 3:) /= '_DIR') return
+        if (len(key) > 11) then
+            if (key(len(key) - 10:) == '_SOURCE_DIR') return
+        end if
+        if (inside(value, project) .or. inside(value, build)) return
+        call canonical_directory(value, physical)
+        sdk = .false.
+        do i = 1, size(roots)
+            if (.not. inside(trim(physical), trim(roots(i)))) cycle
+            if (index(labels(i), 'cmake-module:') == 1 .or. &
+                index(labels(i), 'cmake-include:') == 1) then
+                sdk = .true.
+            else
+                ! Declared source providers keep their immutable relocation.
+                return
+            end if
+        end do
+        if (.not. sdk) return
+        package = key(:len(key) - 4)
+        inquire(file=trim(value)//'/'//package//'Config.cmake', exist=native)
+        if (native) return
+        do i = 1, len(package)
+            code = iachar(package(i:i))
+            if (code >= iachar('A') .and. code <= iachar('Z')) &
+                package(i:i) = achar(code + iachar('a') - iachar('A'))
+        end do
+        inquire(file=trim(value)//'/'//package//'-config.cmake', exist=native)
+    end function native_package_hint
 
     subroutine relocate_value(value, project, build, roots, bundles, aliases, relocated)
         character(len=*), intent(in) :: value, project, build, roots(:), bundles(:)
