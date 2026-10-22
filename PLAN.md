@@ -76,6 +76,7 @@ failure detection. The workspace master plan, when present, owns delivery order.
   and passes with driver SHA256
   `1ec2c652f47e78ebf8844c6de5ffb505b1257b756b5e2aeee9aa3619a5726fbe`.
   Its unselected slow target is invalid, independently checking build scope.
+
 ## Native CMake package prefixes (2026-10-22)
 
 - [V] A frozen SIMPLE configure relocates Boost's package config and breaks
@@ -760,3 +761,7 @@ Keep this plan short and update the owning issue when work moves.
   oracles pass. The resident focused generation is green for all four cases.
   The broader native affected gate uses explicitly pinned `FO`/`FO_BIN`.
 - The separate parent/module/private-copy repair remains [#239](https://github.com/lazy-fortran/fo/pull/239).
+CMake configure events: compare the complete current input inventory with the
+last captured closure before configuring again. Recreated identical source links
+then settle without an event/configure loop, while changed CMake inputs still
+reach the native configure oracle and revoke stale PASS evidence.
