@@ -20,7 +20,7 @@ module fo_build_backend
     use fo_cmake_native_model, only: cm_plan_t
     use fo_cmake_native, only: native_cmake_build, native_cmake_test
     use fo_cmake_build, only: cmake_route_t, cmake_build_route, cmake_build_native
-    use fo_input_inventory, only: cmake_headers_revalidate
+    use fo_input_inventory, only: cmake_inputs_revalidate
     implicit none
     private
     public :: backend_t, detect_backend, detect_nproc, detect_jobs
@@ -656,7 +656,7 @@ contains
         character(len=4096) :: header_message
         integer :: n_args, i, line_end
 
-        call cmake_headers_revalidate(context%source_root, exitcode, header_message)
+        call cmake_inputs_revalidate(context%source_root, exitcode, header_message)
         if (exitcode /= 0) then
             write(error_unit, '(a)') trim(header_message)
             return
@@ -887,12 +887,12 @@ contains
 
         ! Project code can force cache hints back to absolute SDK paths. Those
         ! delegated inputs must still match the captured bytes, even on a hit.
-        call cmake_headers_revalidate(context%source_root, exitcode, message)
+        call cmake_inputs_revalidate(context%source_root, exitcode, message)
         if (exitcode == 0) then
             call cmake_build_impl(context, flags, log_file, exitcode, configured)
         end if
         if (exitcode == 0) &
-            call cmake_headers_revalidate(context%source_root, exitcode, message)
+            call cmake_inputs_revalidate(context%source_root, exitcode, message)
         if (len_trim(message) > 0) write(error_unit, '(a)') trim(message)
     end subroutine cmake_build
 

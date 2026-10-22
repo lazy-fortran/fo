@@ -646,6 +646,16 @@ int fo_c_generation_copy_tree_ephemeral(const char *root, const char *dest,
     return rc == 0 ? 0 : (errno == 0 ? 1 : errno);
 }
 
+/* The invocation copy has private inodes; retain the authored mode rather than
+ * the immutable store's read-only mode (which copy tools would propagate). */
+int fo_c_generation_restore_private_mode(const char *path, int mode) {
+    struct stat st;
+    if (lstat(path, &st) != 0) return errno;
+    if (!S_ISREG(st.st_mode)) return EINVAL;
+    if (chmod(path, (mode_t)(mode & 0777)) != 0) return errno;
+    return 0;
+}
+
 /* Materialize one declared regular input without linking it to its source. */
 int fo_c_generation_copy_declared_file(const char *source, const char *dest,
                                        int writable) {

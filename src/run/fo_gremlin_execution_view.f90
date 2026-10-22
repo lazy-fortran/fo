@@ -3,7 +3,7 @@ module fo_gremlin_execution_view
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
     use fo_fs, only: fs_collect_files, fs_copy_exec, fs_make_dir, &
         fs_mkdir_excl, fs_remove_tree, fs_rename, fs_write_text
-    use fo_input_inventory, only: input_entry_t, input_inventory_t, INPUT_FILE, &
+    use fo_input_inventory, only: input_inventory_t, INPUT_FILE, &
         INPUT_DIRECTORY, safe_relative_path
     use fo_process, only: process_getpid
     use fo_util, only: make_tmpfile, delete_tmpfile, temporary_root
@@ -51,6 +51,13 @@ module fo_gremlin_execution_view
             import :: c_char, c_int
             character(kind=c_char), intent(in) :: source(*), destination(*), manifest(*)
         end function generation_copy_tree_ephemeral
+
+        integer(c_int) function restore_private_mode(path, mode) &
+                bind(C, name='fo_c_generation_restore_private_mode')
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: path(*)
+            integer(c_int), value :: mode
+        end function restore_private_mode
 
         integer(c_int) function copy_declared_file(source, destination, writable) &
                 bind(C, name='fo_c_generation_copy_declared_file')
@@ -237,6 +244,25 @@ contains
                     ierr, message)
                 return
             end if
+            do i = 1, inventory%entry_count
+                if (inventory%entries(i)%kind /= INPUT_FILE) cycle
+                root_index = find_root(inventory, inventory%entries(i)%root_alias)
+                if (root_index == 0) cycle
+                do j = 1, inventory%roots(root_index)%alias_count
+                    if (inventory%roots(root_index)%aliases(j) /= &
+                        inventory%entries(i)%root_alias) cycle
+                    destination = trim(view%root)//'/'// &
+                        trim(inventory%roots(root_index)%bundle_paths(j))//'/'// &
+                        trim(inventory%entries(i)%relative_path)
+                    tree_rc = restore_private_mode(trim(destination)//c_null_char, &
+                        int(inventory%entries(i)%mode, c_int))
+                    if (tree_rc /= 0) then
+                        call reject_view(view, 'cannot restore private input mode: '// &
+                            trim(inventory%entries(i)%relative_path), ierr, message)
+                        return
+                    end if
+                end do
+            end do
             view%cwd = trim(view%root)//'/project'
             inquire (file=trim(view%cwd), exist=already_materialized)
             if (.not. already_materialized) then
