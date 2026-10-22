@@ -76,6 +76,15 @@ failure detection. The workspace master plan, when present, owns delivery order.
   and passes with driver SHA256
   `1ec2c652f47e78ebf8844c6de5ffb505b1257b756b5e2aeee9aa3619a5726fbe`.
   Its unselected slow target is invalid, independently checking build scope.
+## Native CMake package prefixes (2026-10-22)
+
+- [V] A frozen SIMPLE configure relocates Boost's package config and breaks
+  its self-relative include prefix (`boost_headers-config.cmake:24`).
+- Preserve standard external package hints while retaining package/module
+  fingerprints, header guards and immutable declared-source relocation.
+- [V] The synthetic CamelCase/hyphenated package fixture fails on 4c86209 and
+  passes with the fix, including rejection of a changed SDK's cached PASS.
+  Existing parent-module and capture-input regressions pass.
 
 ## Destination
 
