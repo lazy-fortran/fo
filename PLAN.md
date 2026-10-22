@@ -67,6 +67,16 @@ failure detection. The workspace master plan, when present, owns delivery order.
   the real FortFEM circulant consumer. The synthetic transitive/dev-dependency
   execution oracle fails against the original driver and passes the repair.
 
+## Explicit slow cases in scoped Gremlin builds (2026-10-22)
+
+- [V] A minimal native CMake project reproduces rejection of a required slow
+  case when a lane also has a label scope. The build now forwards and honors
+  `--all`, and scoped discovery preserves explicitly required slow cases.
+- [V] `test_gremlin_cmake_explicit_selection` fails with the upstream driver
+  and passes with driver SHA256
+  `1ec2c652f47e78ebf8844c6de5ffb505b1257b756b5e2aeee9aa3619a5726fbe`.
+  Its unselected slow target is invalid, independently checking build scope.
+
 ## Destination
 
 Fo is the simplest, fastest and most trustworthy Fortran build and test tool

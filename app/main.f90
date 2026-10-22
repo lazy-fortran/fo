@@ -906,6 +906,7 @@ contains
             request%exclude_labels(0), request%layers(0))
         n = 0
         request%filter = ''
+        request%all = has_arg('--all')
         do i = 2, command_argument_count() - 1
             call get_command_argument(i, arg)
             select case (trim(arg))
