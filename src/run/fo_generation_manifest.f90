@@ -20,7 +20,7 @@ module fo_generation_manifest
     use fo_cache, only: HASH_LEN, cache_digest
     use fo_input_inventory, only: input_inventory_t, input_root_t, &
         input_entry_t, input_declaration_t, INPUT_FILE, INPUT_DIRECTORY, &
-        INPUT_SYMLINK, input_inventory_revalidate, alias_root, hex_value, &
+        INPUT_SYMLINK, input_inventory_revalidate, hex_value, &
         safe_relative_path
     use fo_fs, only: fs_make_dir
     use fo_util, only: make_tmpfile, delete_tmpfile, int_text
@@ -30,6 +30,11 @@ module fo_generation_manifest
     integer, parameter :: PATH_LEN = 4096
     integer, parameter :: MANIFEST_VERSION = 2
     character(len=*), parameter :: HEADER = 'fo-generation-manifest'
+
+    type :: materialized_entry_t
+        character(len=:), allocatable :: path
+        integer :: entry = 0
+    end type materialized_entry_t
 
     type, public :: generation_manifest_metadata_t
         character(len=:), allocatable :: execution_identity
@@ -860,6 +865,8 @@ contains
         type(immutable_store_t) :: store
         character(len=PATH_LEN) :: destination
         integer :: status, i, j, root_index
+        integer(int64) :: destinations
+        type(materialized_entry_t), allocatable :: materialized(:)
         logical :: used_clone, already_materialized
 
         ierr = 1
@@ -876,6 +883,19 @@ contains
             message = 'cannot initialize immutable generation object store'
             return
         end if
+        ! Bound the load factor before inserting any logical destination.
+        destinations = 0_int64
+        do i = 1, inventory%entry_count
+            call entry_destination(inventory, inventory%entries(i), &
+                trim(bundle_root), destination, root_index, status, message)
+            if (status /= 0) return
+            destinations = destinations + inventory%roots(root_index)%alias_count
+        end do
+        if (destinations > int((huge(0) - 1)/2, int64)) then
+            message = 'generation destination index exceeds supported size'
+            return
+        end if
+        allocate (materialized(2*int(destinations) + 1))
         do i = 1, inventory%root_count
             do j = 1, inventory%roots(i)%alias_count
                 if (.not. safe_bundle_path( &
@@ -905,8 +925,8 @@ contains
                 end if
                 already_materialized = .false.
                 call duplicate_materialized_entry(inventory, i, &
-                    trim(inventory%roots(root_index)%bundle_paths(j)), &
-                    already_materialized, status, message)
+                    trim(destination), materialized, already_materialized, &
+                    status, message)
                 if (status /= 0) return
                 if (already_materialized) cycle
                 select case (inventory%entries(i)%kind)
@@ -1259,49 +1279,40 @@ contains
         message = ''
     end subroutine entry_destination
 
-    subroutine duplicate_materialized_entry(inventory, current, bundle_path, &
-            duplicate, ierr, message)
+    subroutine duplicate_materialized_entry(inventory, current, path, &
+            materialized, duplicate, ierr, message)
         type(input_inventory_t), intent(in) :: inventory
         integer, intent(in) :: current
-        character(len=*), intent(in) :: bundle_path
+        character(len=*), intent(in) :: path
+        type(materialized_entry_t), intent(inout) :: materialized(:)
         logical, intent(out) :: duplicate
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
-        integer :: current_root, prior_root, i, j
-        character(len=:), allocatable :: current_path, prior_path
+        character(len=HASH_LEN) :: digest
+        integer :: slot, prior, attempt
+        integer(int64) :: hash_index
 
         duplicate = .false.
         ierr = 0
         message = ''
-        current_root = alias_root(inventory, &
-            trim(inventory%entries(current)%root_alias))
-        if (current_root == 0) then
-            ierr = 1
-            message = 'generation entry lost its physical root alias'
-            return
-        end if
-        current_path = join_path(trim(bundle_path), &
-            trim(inventory%entries(current)%relative_path))
-        do i = 1, current - 1
-            prior_root = alias_root(inventory, &
-                trim(inventory%entries(i)%root_alias))
-            if (prior_root == 0) then
-                ierr = 1
-                message = 'generation entry lost its physical root alias'
+        digest = sha256_string(path)
+        read (digest(:15), '(z15)') hash_index
+        slot = 1 + int(modulo(hash_index, int(size(materialized), int64)))
+        do attempt = 1, size(materialized)
+            prior = materialized(slot)%entry
+            if (prior == 0) then
+                materialized(slot)%path = path
+                materialized(slot)%entry = current
                 return
             end if
-            do j = 1, inventory%roots(prior_root)%alias_count
-                prior_path = join_path(&
-                    trim(inventory%roots(prior_root)%bundle_paths(j)), &
-                    trim(inventory%entries(i)%relative_path))
-                if (trim(prior_path) /= trim(current_path)) cycle
-                if (inventory%entries(i)%kind /= &
+            if (materialized(slot)%path == path) then
+                if (inventory%entries(prior)%kind /= &
                         inventory%entries(current)%kind .or. &
-                    inventory%entries(i)%mode /= &
+                    inventory%entries(prior)%mode /= &
                         inventory%entries(current)%mode .or. &
-                    inventory%entries(i)%content_digest /= &
+                    inventory%entries(prior)%content_digest /= &
                         inventory%entries(current)%content_digest .or. &
-                    inventory%entries(i)%link_target /= &
+                    inventory%entries(prior)%link_target /= &
                         inventory%entries(current)%link_target) then
                     ierr = 1
                     message = 'logical path has conflicting generation input records'
@@ -1309,8 +1320,11 @@ contains
                 end if
                 duplicate = .true.
                 return
-            end do
+            end if
+            slot = 1 + modulo(slot, size(materialized))
         end do
+        ierr = 1
+        message = 'generation destination index is full'
     end subroutine duplicate_materialized_entry
 
     subroutine validate_loaded_aliases(inventory, ierr, message)
