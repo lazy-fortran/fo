@@ -750,3 +750,7 @@ Keep this plan short and update the owning issue when work moves.
   oracles pass. The resident focused generation is green for all four cases.
   The broader native affected gate uses explicitly pinned `FO`/`FO_BIN`.
 - The separate parent/module/private-copy repair remains [#239](https://github.com/lazy-fortran/fo/pull/239).
+CMake configure events: compare the complete current input inventory with the
+last captured closure before configuring again. Recreated identical source links
+then settle without an event/configure loop, while changed CMake inputs still
+reach the native configure oracle and revoke stale PASS evidence.
