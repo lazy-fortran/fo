@@ -688,3 +688,15 @@ UCRT64 at `C:\fo\msys64\ucrt64`. Rebuild from current sources.
 Deployment history, evidence roots, exact driver digests and earlier
 qualification records are in [the prior plan](https://github.com/lazy-fortran/fo/blob/342da71/PLAN.md).
 Keep this plan short and update the owning issue when work moves.
+
+## Large generation materialization (2026-10-22)
+
+- [V] A SIMPLE CMake capture has 74,350 entries. A live stack reaches the
+  all-prior-entry scan in `fo_generation_manifest.f90:1284`, making destination
+  deduplication quadratic even with node-local storage.
+- Replace that scan with a bounded-load destination index. Preserve exact
+  payload/mode/link conflict rejection and identical alias reuse.
+- [V] Synthetic aliased payloads and existing manifest, generation and inventory
+  oracles pass. The resident focused generation is green for all four cases.
+  The broader native affected gate uses explicitly pinned `FO`/`FO_BIN`.
+- The separate parent/module/private-copy repair remains [#239](https://github.com/lazy-fortran/fo/pull/239).
