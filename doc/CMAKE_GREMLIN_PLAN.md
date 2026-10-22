@@ -205,6 +205,15 @@ headers, are captured and fingerprinted. Frozen cache hints retain internal
 find-package header paths. Original header trees must also remain unchanged
 through configuration and building: project code can force absolute SDK paths
 despite those hints. Changed trees fail explicitly, including on a cache hit.
+Authored configure inputs also declare external CMake module directories.
+Sibling module trees and explicitly declared source roots retain
+their parent-relative layout, so a standalone subproject can include `../cmake`
+and compile declared shared `../src` files from its frozen view. Module trees are
+fingerprinted and revalidated before configuration, building and cached test
+reuse, including when project code forces an absolute module path. Module
+directories containing the project itself remain unsupported.
+Private invocation copies retain authored file modes independently of the
+read-only stored bundle, so copied case fixtures can be edited in owned scratch.
 Repository-root projects also retain shallow, self-contained Git metadata so
 configure-time and runtime revision/dirty-state queries use the frozen sources.
 Arbitrary provider protocols, uncaptured external authored inputs, metadata

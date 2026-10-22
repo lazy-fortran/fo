@@ -72,7 +72,7 @@ module fo_input_inventory
 
     public :: input_inventory_discover, input_inventory_declarations_from_config
     public :: input_inventory_revalidate, input_inventory_discover_cmake
-    public :: cmake_headers_revalidate
+    public :: cmake_inputs_revalidate
     public :: input_inventory_rediscover
     public :: alias_root, hex_value, safe_relative_path
 
@@ -93,17 +93,21 @@ module fo_input_inventory
 contains
 
     subroutine input_inventory_discover_cmake(project_dir, sources, bundles, &
-            labels, metadata_dir, inventory, ierr, message, freeze_headers)
+            labels, metadata_dir, inventory, ierr, message, freeze_inputs)
         character(len=*), intent(in) :: project_dir, sources(:), bundles(:)
         character(len=*), intent(in) :: labels(:), metadata_dir
         type(input_inventory_t), intent(out) :: inventory
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
-        logical, intent(in), optional :: freeze_headers
-        integer :: root_index, i, j, newline_at, header_unit, closed
+        logical, intent(in), optional :: freeze_inputs
+        integer :: root_index, i, j, newline_at, header_unit, closed, group
         character(len=PATH_LEN) :: build_directory
         character(len=HASH_LEN) :: header_digest
         character(:), allocatable :: headers
+        character(len=7), parameter :: input_groups(2) = &
+            [character(len=7) :: 'include', 'module']
+        character(len=7), parameter :: manifests(2) = &
+            [character(len=7) :: 'headers', 'modules']
         logical :: provider_dir_exists
         type(input_entry_t) :: provider_dir
         character(len=7), parameter :: provider_dirs(2) = &
@@ -154,36 +158,40 @@ contains
             end if
             if (ierr /= 0) return
         end do
-        if (present(freeze_headers)) then
-            if (freeze_headers) then
-                headers = ''
-                do i = 1, size(sources)
-                    if (index(labels(i), 'cmake-include:') /= 1) cycle
-                    if (index(sources(i), new_line('a')) > 0) then
-                        ierr = 1
-                        message = 'CMake header directory contains a newline'
-                        return
+        if (present(freeze_inputs)) then
+            if (freeze_inputs) then
+                do group = 1, size(input_groups)
+                    headers = ''
+                    do i = 1, size(sources)
+                        if (index(labels(i), 'cmake-'// &
+                            trim(input_groups(group))//':') /= 1) cycle
+                        if (index(sources(i), new_line('a')) > 0) then
+                            ierr = 1
+                            message = 'CMake input directory contains a newline'
+                            return
+                        end if
+                        call cmake_input_digest(trim(sources(i)), header_digest, &
+                            ierr, message)
+                        if (ierr /= 0) return
+                        headers = headers//header_digest//' '//trim(sources(i))// &
+                            new_line('a')
+                    end do
+                    if (len(headers) > 0) then
+                        open(newunit=header_unit, file=trim(metadata_dir)//'/'// &
+                            trim(manifests(group))//'.txt', &
+                            status='replace', access='stream', form='unformatted', &
+                            iostat=ierr)
+                        if (ierr == 0) then
+                            write(header_unit, iostat=ierr) headers
+                            close(header_unit, iostat=closed)
+                            if (ierr == 0) ierr = closed
+                        end if
+                        if (ierr /= 0) then
+                            message = 'cannot write captured CMake input fingerprints'
+                            return
+                        end if
                     end if
-                    call cmake_header_digest(trim(sources(i)), header_digest, &
-                        ierr, message)
-                    if (ierr /= 0) return
-                    headers = headers//header_digest//' '//trim(sources(i))// &
-                        new_line('a')
                 end do
-                if (len(headers) > 0) then
-                    open(newunit=header_unit, file=trim(metadata_dir)//'/headers.txt', &
-                        status='replace', access='stream', form='unformatted', &
-                        iostat=ierr)
-                    if (ierr == 0) then
-                        write(header_unit, iostat=ierr) headers
-                        close(header_unit, iostat=closed)
-                        if (ierr == 0) ierr = closed
-                    end if
-                    if (ierr /= 0) then
-                        message = 'cannot write captured CMake header fingerprints'
-                        return
-                    end if
-                end if
             end if
         end if
         call add_root(inventory, 'cmake-context', metadata_dir, root_index, &
@@ -197,7 +205,7 @@ contains
         inventory%valid = .true.
     end subroutine input_inventory_discover_cmake
 
-    subroutine cmake_header_digest(root, digest, ierr, message)
+    subroutine cmake_input_digest(root, digest, ierr, message)
         character(len=*), intent(in) :: root
         character(len=*), intent(out) :: digest, message
         integer, intent(out) :: ierr
@@ -216,10 +224,21 @@ contains
         if (ierr /= 0) return
         call canonicalize_inventory(headers, ierr, message)
         digest = headers%digest
-    end subroutine cmake_header_digest
+    end subroutine cmake_input_digest
 
-    subroutine cmake_headers_revalidate(project, ierr, message)
+    subroutine cmake_inputs_revalidate(project, ierr, message)
         character(len=*), intent(in) :: project
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+
+        call cmake_roots_revalidate(project, 'headers', ierr, message)
+        if (ierr /= 0) return
+        call cmake_roots_revalidate(project, 'modules', ierr, message)
+    end subroutine cmake_inputs_revalidate
+
+    subroutine cmake_roots_revalidate(project, group, ierr, message)
+        character(len=*), intent(in) :: project
+        character(len=*), intent(in) :: group
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
         character(len=PATH_LEN + HASH_LEN + 1) :: line
@@ -229,12 +248,12 @@ contains
 
         ierr = 0
         message = ''
-        inquire(file=project//'/.fo-cmake/headers.txt', exist=exists)
+        inquire(file=project//'/.fo-cmake/'//group//'.txt', exist=exists)
         if (.not. exists) return
-        open(newunit=unit, file=project//'/.fo-cmake/headers.txt', &
+        open(newunit=unit, file=project//'/.fo-cmake/'//group//'.txt', &
             status='old', action='read', iostat=ierr)
         if (ierr /= 0) then
-            message = 'cannot read captured CMake header fingerprints'
+            message = 'cannot read captured CMake '//group//' fingerprints'
             return
         end if
         do
@@ -242,22 +261,22 @@ contains
             if (ios /= 0) exit
             if (len_trim(line) <= HASH_LEN + 1) then
                 ierr = 1
-                message = 'invalid captured CMake header fingerprint'
+                message = 'invalid captured CMake '//group//' fingerprint'
                 exit
             end if
-            call cmake_header_digest(trim(line(HASH_LEN + 2:)), digest, ierr, message)
+            call cmake_input_digest(trim(line(HASH_LEN + 2:)), digest, ierr, message)
             if (ierr /= 0 .or. digest /= line(:HASH_LEN)) then
                 ierr = 1
-                message = 'captured CMake headers changed: '//trim(line(HASH_LEN + 2:))
+                message = 'captured CMake '//group//' changed: '//trim(line(HASH_LEN + 2:))
                 exit
             end if
         end do
         close(unit)
         if (ios > 0) then
             ierr = 1
-            message = 'cannot read captured CMake header fingerprints'
+            message = 'cannot read captured CMake '//group//' fingerprints'
         end if
-    end subroutine cmake_headers_revalidate
+    end subroutine cmake_roots_revalidate
 
     subroutine input_inventory_discover(project_dir, declarations, inventory, &
             ierr, message)

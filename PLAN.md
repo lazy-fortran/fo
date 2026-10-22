@@ -7,6 +7,36 @@ Issues define observable success and this plan orders delivery. Apply
 smallest complete change, and preserve supported behaviour and independent
 failure detection. The workspace master plan, when present, owns delivery order.
 
+## Standalone subproject CMake modules (2026-10-22)
+
+- [V] Deployed driver `99c98f8a` rejects the parent `cmake/Util.cmake`
+  on [NEO-RT #244](https://github.com/itpplasma/NEO-RT/pull/244), head
+  `f4d9fac`. Main `7a1fa9e` also fails the synthetic parent-module oracle.
+- [V] Authored configure inputs now declare module directories. Sibling
+  directories retain their relative bundle paths, and module fingerprints
+  reject live edits before configure/build and cached test reuse. Directories
+  containing the project remain unsupported.
+- [V] After module capture succeeds, POTATO also needs its shared `../src`
+  declared through the existing `*_SOURCE_DIR` input contract. A synthetic
+  declared sibling source fails frozen configuration before the layout repair;
+  declared source roots now retain the same sibling layout as modules.
+- [V] Driver SHA256
+  `b04b65c3e0a3bed04b80b3a857d8c8f99de4e2590e26ca77df64296f3f23466c`
+  passes seven focused programs and the three-case resident capture gate.
+  `fo verify` passes all 183 selected ordinary programs and all stages with
+  normal retry policy. The earlier forced-zero-retry run invalidated five
+  retry-behavior oracles. Two existing formatting warnings remain advisory.
+- [V] Follow-up driver SHA256
+  `2b4b385e772998c5701a85b329f062f1bc1fc5b6f8c43f38df49de158b8bc3b6`
+  passes the seven focused programs and every `fo verify` stage, including
+  its six selected affected tests. The extended synthetic oracle checks both
+  parent module inputs and a declared sibling Fortran source with literal paths.
+- [V] Frozen CTest execution also exposed copied-fixture permission failures:
+  private invocation copies inherited the store's read-only modes. Restoring
+  their authored inventory modes preserves the immutable bundle and allows
+  normal configure/copy/edit fixtures. Driver `871722e9` passes eight focused
+  programs, including the extended copied-fixture and execution-view oracles.
+
 ## CMake capture repair (2026-10-21)
 
 - [V] Driver `8244a858` reproduces the uv Python header rejection in
