@@ -36,39 +36,45 @@ program test_gremlin_runner_report
         '"summary":{"passed":0,"failed":0,"skipped":1,"total_seconds":0.0},'// &
         '"exit_code":0}', 'SKIP', 'disabled native case has valid skip metadata')
     call invalid_skip_fields('', 'skip requires the producer summary and exit code')
-    call invalid_skip_fields(',"summary":{"failed":0,"skipped":1}', &
+    call invalid_skip_fields(',"summary":{"passed":0,"failed":0,"skipped":1}', &
         'skip requires the producer exit code')
     call invalid_skip_fields(',"exit_code":0', 'skip requires the producer summary')
-    call invalid_skip_fields(',"summary":{"skipped":1},"exit_code":0', &
+    call invalid_skip_fields(',"summary":{"passed":0,"skipped":1},"exit_code":0', &
         'skip requires the producer failed count')
-    call invalid_skip_fields(',"summary":{"failed":0},"exit_code":0', &
+    call invalid_skip_fields(',"summary":{"passed":0,"failed":0},"exit_code":0', &
         'skip requires the producer skipped count')
-    call invalid_skip_fields(',"summary":{"failed":0,"skipped":1},"exit_code":1', &
-        'nonzero report exit contradicts the skipped case')
-    call invalid_skip_fields(',"summary":{"failed":1,"skipped":1},"exit_code":0', &
-        'failed report count contradicts the skipped case')
-    call invalid_skip_fields(',"summary":{"failed":0,"skipped":0},"exit_code":0', &
-        'zero skipped count contradicts the skipped case')
-    call invalid_skip_fields(',"summary":{"failed":0,"skipped":-1},"exit_code":0', &
-        'negative skipped count cannot qualify a skip')
-    call invalid_skip_fields(',"summary":{"failed":0,"skipped":1},'// &
+    call invalid_skip_fields(',"summary":{"passed":1,"failed":0,"skipped":1},'// &
+        '"exit_code":0', 'passed report count contradicts the skipped case')
+    call invalid_skip_fields(',"summary":{"failed":0,"skipped":1},"exit_code":0', &
+        'skip requires the producer passed count')
+    call invalid_skip_fields(',"summary":{"passed":0,"failed":0,"skipped":1},'// &
+        '"exit_code":1', 'nonzero report exit contradicts the skipped case')
+    call invalid_skip_fields(',"summary":{"passed":0,"failed":1,"skipped":1},'// &
+        '"exit_code":0', 'failed report count contradicts the skipped case')
+    call invalid_skip_fields(',"summary":{"passed":0,"failed":0,"skipped":0},'// &
+        '"exit_code":0', 'zero skipped count contradicts the skipped case')
+    call invalid_skip_fields(',"summary":{"passed":0,"failed":0,"skipped":-1},'// &
+        '"exit_code":0', 'negative skipped count cannot qualify a skip')
+    call invalid_skip_fields(',"summary":{"passed":0,"failed":0,"skipped":1},'// &
         '"exit_code":0.0', 'skip report exit code must be an integer')
     call invalid_skip_fields(',"summary":[],"exit_code":0', &
         'skip summary must be an object')
-    call invalid_skip_fields(',"summary":{"failed":"0","skipped":1},'// &
+    call invalid_skip_fields(',"summary":{"passed":0,"failed":"0","skipped":1},'// &
         '"exit_code":0', 'skip failed count must be an integer')
-    call invalid_skip_fields(',"summary":{"failed":0,"skipped":true},'// &
+    call invalid_skip_fields(',"summary":{"passed":0,"failed":0,"skipped":true},'// &
         '"exit_code":0', 'skip skipped count must be an integer')
-    call invalid_skip_fields(',"summary":{"failed":0,"skipped":1},'// &
+    call invalid_skip_fields(',"summary":{"passed":0,"failed":0,"skipped":1},'// &
         '"exit_code":0,"exit_code":0', 'duplicate skip report exit code is invalid')
-    call invalid_skip_fields(',"summary":{"failed":0,"skipped":1},'// &
-        '"summary":{"failed":0,"skipped":1},"exit_code":0', &
+    call invalid_skip_fields(',"summary":{"passed":0,"failed":0,"skipped":1},'// &
+        '"summary":{"passed":0,"failed":0,"skipped":1},"exit_code":0', &
         'duplicate skip summary is invalid')
-    call invalid_skip_fields(',"summary":{"failed":0,"failed":0,"skipped":1},'// &
+    call invalid_skip_fields(',"summary":{'// &
+        '"passed":0,"failed":0,"failed":0,"skipped":1},'// &
         '"exit_code":0', 'duplicate skip failed count is invalid')
-    call invalid_skip_fields(',"summary":{"failed":0,"skipped":1,"skipped":1},'// &
+    call invalid_skip_fields(',"summary":{'// &
+        '"passed":0,"failed":0,"skipped":1,"skipped":1},'// &
         '"exit_code":0', 'duplicate skip skipped count is invalid')
-    call invalid_skip_fields(',"summary":{"failed":0,"skipped":1},'// &
+    call invalid_skip_fields(',"summary":{"passed":0,"failed":0,"skipped":1},'// &
         '"exit_code":0,"ex\u0069t_code":0', &
         'decoded duplicate skip report exit code is invalid')
     call check('{"tests":[{"name":"test_relative_pass","status":"fail",'// &

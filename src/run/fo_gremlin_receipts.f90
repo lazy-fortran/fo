@@ -1046,8 +1046,9 @@ contains
 
     logical function runner_skip_metadata_valid(report) result(valid)
         character(len=*), intent(in) :: report
-        character(len=9), parameter :: fields(3) = &
-            [character(len=9) :: 'exit_code', 'failed', 'skipped']
+        ! A per-case report that skipped its one case passed and failed nothing.
+        character(len=9), parameter :: fields(4) = &
+            [character(len=9) :: 'exit_code', 'passed', 'failed', 'skipped']
         character(len=:), allocatable :: summary, raw
         type(json_event_t) :: event
         integer :: i, count, ierr, value
@@ -1070,7 +1071,7 @@ contains
             if (event%event_type /= JSON_INTEGER) return
             read(raw, *, iostat=ierr) value
             if (ierr /= 0) return
-            if (i < 3) then
+            if (i < size(fields)) then
                 if (value /= 0) return
             else
                 if (value < 1) return
