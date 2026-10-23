@@ -131,6 +131,8 @@ slice against actual GORILLA, then the maintained profile families below;
   ordering, serial/resource constraints, processors and supported launchers.
 - Preserve reference verdicts: regex rules, WILL_FAIL, skip/disabled/missing
   files, timeouts and fixture failures cannot be replaced by raw exit codes.
+  Native skips complete coverage and gate obligations as distinct skipped counts,
+  never as passes, and do not clear a failure or supply a reusable PASS.
 - Preserve last-compilable testing during candidate failure, incremental reuse,
   exact generation evidence, completed receipts and unrelated active work.
 - Expose partial/interrupted results and output fidelity honestly. Build-only

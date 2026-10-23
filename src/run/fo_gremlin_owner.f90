@@ -509,10 +509,11 @@ contains
             else
                 o%state = 'testing'
                 outcome = runner_case_outcome(o%tests(slot)%job%log_file, &
-                    o%tests(slot)%case_name)
+                    o%tests(slot)%case_name, exitcode)
             end if
             call execution_view_release(o%tests(slot)%execution_view, &
-                exitcode /= 0 .or. trim(outcome) /= 'PASS', status, detail)
+                exitcode /= 0 .or. (trim(outcome) /= 'PASS' .and. &
+                trim(outcome) /= 'SKIP'), status, detail)
             o%sequence = o%sequence + 1
             call record_receipt(o%session, o%request, o%active, &
                 o%tests(slot)%case_name, exitcode, trim(outcome), o%sequence, &
@@ -1505,6 +1506,8 @@ contains
             coverage%epoch /= previous%epoch .or. &
             coverage%cursor /= previous%epoch_cursor .or. &
             readiness%ordinary_passed /= previous%ordinary_passed .or. &
+            readiness%ordinary_skipped /= previous%ordinary_skipped .or. &
+            readiness%full_skipped /= previous%full_skipped .or. &
             readiness%ordinary_required /= previous%ordinary_required .or. &
             readiness%ordinary_failures /= previous%ordinary_failures
         if (coverage_changed) call emit('coverage_updated', active%identity)
@@ -1537,11 +1540,14 @@ contains
             event%fully_verified = readiness%fully_verified
             event%gate_required = readiness%gate_required
             event%gate_passed = readiness%gate_passed
+            event%gate_skipped = readiness%gate_skipped
             event%ordinary_required = readiness%ordinary_required
             event%ordinary_passed = readiness%ordinary_passed
+            event%ordinary_skipped = readiness%ordinary_skipped
             event%ordinary_failures = readiness%ordinary_failures
             event%full_required = readiness%full_required
             event%full_passed = readiness%full_passed
+            event%full_skipped = readiness%full_skipped
             event%full_failures = readiness%full_failures
             if (have_coverage) then
                 event%epoch = coverage%epoch

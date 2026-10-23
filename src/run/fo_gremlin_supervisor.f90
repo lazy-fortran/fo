@@ -858,7 +858,7 @@ contains
                 outcome = 'INFRA_ERROR'
                 call gremlin_generation_pin_at(generation%root, .true., status, detail)
             else
-                outcome = runner_case_outcome(log_file, request%case_id)
+                outcome = runner_case_outcome(log_file, request%case_id, test_exit)
             end if
             call append_execution_provenance(log_file, case_view)
         end if

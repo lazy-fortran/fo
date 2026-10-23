@@ -1,5 +1,6 @@
 program test_gremlin_readiness
-    use fo_util, only: temporary_root
+    use fo_util, only: temporary_root, make_tmpfile
+    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
     use, intrinsic :: iso_fortran_env, only: output_unit, int64
     use fo_gremlin_readiness
     use fo_gremlin_lifecycle
@@ -7,8 +8,26 @@ program test_gremlin_readiness
         coverage_record, coverage_view, COVERAGE_OK
     use fo_gremlin_coverage_view, only: gremlin_coverage_view_t
     use fo_gremlin_request, only: gremlin_request_t, parse_request
+    use fo_gremlin_receipts, only: compute_readiness
+    use fo_gremlin_journal, only: journal_append, JOURNAL_OK
+    use fo_gremlin_session, only: gremlin_get_session_journal_path
+    use fo_gremlin_state, only: gremlin_session_t, gremlin_session_acquire, &
+        gremlin_session_release
+    use fo_fs, only: fs_make_dir, fs_remove_tree
     use fo_cache, only: HASH_LEN
     implicit none
+
+    interface
+        integer(c_int) function c_setenv(name, value, overwrite) bind(C, name='setenv')
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: name(*), value(*)
+            integer(c_int), value :: overwrite
+        end function c_setenv
+        integer(c_int) function c_unsetenv(name) bind(C, name='unsetenv')
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: name(*)
+        end function c_unsetenv
+    end interface
 
     integer :: passed, failed
 
@@ -16,6 +35,8 @@ program test_gremlin_readiness
     failed = 0
     call test_partial_gate_and_verification_levels()
     call test_failure_and_generation_freshness()
+    call test_native_skip_readiness()
+    call test_mixed_session_skip_dispositions()
     call test_gate_token_binding()
     call test_wait_request_parser()
     call test_ordinary_and_full_inventory_counts()
@@ -73,6 +94,194 @@ contains
         call check(gremlin_wait_satisfied(GREMLIN_WAIT_FULLY_VERIFIED, readiness), &
             'full semantic wait observes full verification')
     end subroutine test_partial_gate_and_verification_levels
+
+    subroutine test_native_skip_readiness()
+        type(gremlin_readiness_input_t) :: input
+        type(gremlin_readiness_t) :: readiness
+        type(gremlin_lifecycle_event_t) :: event
+        character(len=:), allocatable :: json
+        character(len=256) :: message
+        integer :: ierr, at
+
+        call exact_gate(input)
+        input%gate_required = 43
+        input%gate_passed = 41
+        input%gate_skipped = 2
+        input%ordinary_required = 43
+        input%ordinary_passed = 41
+        input%ordinary_skipped = 2
+        input%full_required = 43
+        input%full_passed = 41
+        input%full_skipped = 2
+        call gremlin_readiness_compute(input, readiness)
+        call check(readiness%fully_verified .and. readiness%local_gate_green .and. &
+            readiness%gate_passed == 41 .and. readiness%gate_skipped == 2, &
+            'native-parity readiness completes skips without calling them passes')
+        input%gate_skipped = 1
+        call gremlin_readiness_compute(input, readiness)
+        call check(.not. readiness%local_gate_green, &
+            'one outstanding gate case remains an obligation')
+        input%gate_skipped = 2
+        input%failure_observed = .true.
+        call gremlin_readiness_compute(input, readiness)
+        call check(.not. readiness%local_gate_green .and. .not. readiness%fully_verified, &
+            'a skip does not resolve previously observed failure evidence')
+        event%event_type = 'coverage_updated'
+        event%gate_required = 43
+        event%gate_passed = 41
+        event%gate_skipped = 2
+        event%ordinary_skipped = 2
+        event%full_skipped = 2
+        event%event_id = gremlin_lifecycle_make_id('skip-fixture', event)
+        call gremlin_lifecycle_encode(event, json, ierr, message)
+        call check(ierr == LIFECYCLE_OK .and. index(json, '"gate_skipped":2') > 0, &
+            'lifecycle events retain distinct native skip counts')
+        at = index(json, ',"gate_skipped":')
+        call check(at > 0, 'new lifecycle event carries additive skip counters')
+        if (at > 0) then
+            json = json(:at - 1)//'}'
+            call check(gremlin_lifecycle_validate(json) == LIFECYCLE_OK, &
+                'historical lifecycle events without skip fields remain valid')
+            json = json(:len(json) - 1)//',"gate_skipped":""}'
+            call check(gremlin_lifecycle_validate(json) == LIFECYCLE_INVALID, &
+                'a present malformed skip count is not treated as absent')
+        end if
+        event%full_skipped = -1
+        call gremlin_lifecycle_encode(event, json, ierr, message)
+        call check(ierr == LIFECYCLE_INVALID, 'negative lifecycle skip counts are invalid')
+    end subroutine test_native_skip_readiness
+
+    subroutine test_mixed_session_skip_dispositions()
+        type(gremlin_session_t) :: session
+        type(coverage_epoch_t) :: epoch
+        type(gremlin_coverage_view_t) :: view
+        type(gremlin_readiness_t) :: readiness
+        character(len=*), parameter :: generation = repeat('a', HASH_LEN)
+        character(len=*), parameter :: requirement = repeat('c', HASH_LEN)
+        character(len=16), parameter :: names(1) = ['test_mixed_gate ']
+        character(len=512) :: project, journal, ledger, coverage_path
+        character(len=256) :: message
+        character(len=32) :: lane
+        character(len=4) :: current, previous, current_outcome, previous_outcome
+        character(len=:), allocatable :: status_text, shared_fields, record, old_state
+        integer :: trial, ierr, release_error, env_status, env_length
+        logical :: all_released
+
+        call make_tmpfile('fo-readiness-mixed-session', project)
+        call fs_make_dir(trim(project), ierr)
+        call check(ierr == 0, 'creates an isolated mixed-session project')
+        if (ierr /= 0) return
+        call get_environment_variable('FO_GREMLIN_STATE_DIR', &
+            length=env_length, status=env_status)
+        if (env_status == 0) then
+            allocate(character(len=env_length) :: old_state)
+            call get_environment_variable('FO_GREMLIN_STATE_DIR', old_state)
+        end if
+        ierr = c_setenv('FO_GREMLIN_STATE_DIR'//c_null_char, &
+            trim(project)//'/state'//c_null_char, 1_c_int)
+        call check(ierr == 0, 'isolates all mixed-session state and journals')
+        if (ierr /= 0) then
+            call fs_remove_tree(trim(project))
+            return
+        end if
+        all_released = .true.
+        do trial = 1, 2
+            write(lane, '(a,i1)') 'mixed-skip-', trial
+            call gremlin_session_acquire(trim(project), trim(lane), session, &
+                ierr, message)
+            call check(ierr == 0 .and. session%owner, &
+                'acquires the isolated mixed-session fixture lane')
+            if (ierr /= 0 .or. .not. session%owner) then
+                all_released = .false.
+                cycle
+            end if
+            fixture: block
+                call gremlin_get_session_journal_path(trim(project), trim(lane), &
+                    session%session_id, journal, ierr, message)
+                call check(ierr == 0, 'resolves the current-session journal')
+                if (ierr /= 0) exit fixture
+                ledger = session%state_dir//'/campaign-journal.jsonl'
+                coverage_path = session%state_dir//'/coverage-'//generation//'.state'
+                current = 'PASS'
+                previous = 'SKIP'
+                current_outcome = 'pass'
+                previous_outcome = 'skip'
+                if (trial == 2) then
+                    current = 'SKIP'
+                    previous = 'PASS'
+                    current_outcome = 'skip'
+                    previous_outcome = 'pass'
+                end if
+                call coverage_open(trim(coverage_path), generation, names, 1, &
+                    17, epoch, ierr, message)
+                call check(ierr == COVERAGE_OK, 'opens mixed-session coverage')
+                if (ierr /= COVERAGE_OK) exit fixture
+                call coverage_record(epoch, trim(names(1)), current, ierr, message)
+                call check(ierr == COVERAGE_OK, 'records the current disposition')
+                if (ierr /= COVERAGE_OK) exit fixture
+                call coverage_view(epoch, view)
+                status_text = '{"state":"quiescent","active_generation":"'// &
+                    generation//'","candidate_generation":"'//generation// &
+                    '","requirement_digest":"'//requirement// &
+                    '","event_epoch":0,"gate_required":1,"input_changed":false}'
+                shared_fields = ',"generation":"'//generation// &
+                    '","case_id":"'//trim(names(1))// &
+                    '","gate_required":true,"requirement_digest":"'//requirement//'"'
+                record = '{"completion_id":"build","generation":"'// &
+                    generation//'","case_id":"<build>",'// &
+                    '"status":"BUILD_PASS","outcome":"pass"}'
+                call journal_append(trim(journal), 'build', record, ierr, message)
+                call check(ierr == JOURNAL_OK, 'records a current build pass')
+                if (ierr /= JOURNAL_OK) exit fixture
+                record = '{"completion_id":"older-gate",'// &
+                    '"session_id":"older-owner"'//shared_fields// &
+                    ',"status":"'//previous//'","outcome":"'//previous_outcome//'"}'
+                call journal_append(trim(ledger), 'older-gate', record, ierr, message)
+                call check(ierr == JOURNAL_OK, 'records the older gate disposition')
+                if (ierr /= JOURNAL_OK) exit fixture
+                record = '{"completion_id":"current-gate","session_id":"'// &
+                    session%session_id//'"'//shared_fields// &
+                    ',"status":"'//current//'","outcome":"'//current_outcome//'"}'
+                call journal_append(trim(journal), 'current-gate', record, &
+                    ierr, message)
+                call check(ierr == JOURNAL_OK, 'records the current gate disposition')
+                if (ierr /= JOURNAL_OK) exit fixture
+                call compute_readiness(session, status_text, view, .true., &
+                    readiness, ierr, message, freshness_verified=.true.)
+                call check(ierr == 0 .and. readiness%fully_verified .and. &
+                    readiness%gate_required == 1 .and. &
+                    readiness%gate_passed == 2 - trial .and. &
+                    readiness%gate_skipped == trial - 1, &
+                    'current '//current//' overrides older '//previous// &
+                    ' for one deduplicated gate case')
+                record = '{"completion_id":"older-failure",'// &
+                    '"session_id":"older-owner"'//shared_fields// &
+                    ',"status":"FAIL","outcome":"fail"}'
+                call journal_append(trim(ledger), 'older-failure', record, &
+                    ierr, message)
+                call check(ierr == JOURNAL_OK, &
+                    'records a genuine same-generation failure')
+                if (ierr /= JOURNAL_OK) exit fixture
+                call compute_readiness(session, status_text, view, .true., &
+                    readiness, ierr, message, freshness_verified=.true.)
+                call check(ierr == 0 .and. readiness%failure_observed .and. &
+                    .not. readiness%local_gate_green .and. &
+                    .not. readiness%fully_verified, &
+                    'current '//current//' cannot clear the older generation failure')
+            end block fixture
+            call gremlin_session_release(session, release_error, message)
+            call check(release_error == 0, 'releases the mixed-session fixture lane')
+            all_released = all_released .and. release_error == 0
+        end do
+        if (allocated(old_state)) then
+            ierr = c_setenv('FO_GREMLIN_STATE_DIR'//c_null_char, &
+                old_state//c_null_char, 1_c_int)
+        else
+            ierr = c_unsetenv('FO_GREMLIN_STATE_DIR'//c_null_char)
+        end if
+        call check(ierr == 0, 'restores the preceding Gremlin state directory')
+        if (all_released) call fs_remove_tree(trim(project))
+    end subroutine test_mixed_session_skip_dispositions
 
     subroutine test_failure_and_generation_freshness()
         type(gremlin_readiness_input_t) :: input
