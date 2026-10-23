@@ -949,6 +949,10 @@ contains
         call validate_native_deps(project_dir, exitcode)
         if (exitcode /= 0) return
         call merge_dep_link_libs(project_dir, config)
+        ! Acquired dependency manifests can add an OpenMP runtime requirement.
+        flag_text = request_flags
+        call merge_flags(config, flag_text)
+        call append_array_temporary_warning_flag(fc_command(), flag_text)
 
         call find_dep_artifacts(project_dir, config, dep_includes, n_dep_includes, &
             dep_objs, n_dep_objs, .true.)
