@@ -1,7 +1,9 @@
 program test_cmake_capture_inputs
+    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
     use fo_test_harness, only: make_directory, write_text, read_text, &
         assert_true, assert_contains, assert_process_ok, finish_assertions, &
-        string_list_t, process_result_t, list_add, make_symlink
+        string_list_t, process_result_t, list_add, make_symlink, &
+        current_directory, run_process
     use fo_test_gremlin_oracle, only: gremlin_setup
     use fo_test_cli, only: run_fo
     use fo_build_backend, only: backend_t, detect_backend
@@ -14,7 +16,7 @@ program test_cmake_capture_inputs
     use fo_gremlin_execution_view, only: execution_view_t, execution_view_create, &
         execution_view_release
     implicit none
-    character(:), allocatable :: driver, scratch, project, cache, state, sdk
+    character(:), allocatable :: driver, scratch, project, cache, state, sdk, cwd
     character(len=*), parameter :: nl = new_line('a')
     character(len=4096) :: message
     type(backend_t) :: backend
@@ -26,6 +28,12 @@ program test_cmake_capture_inputs
     type(process_result_t) :: process
     integer :: ierr, cleanup_status, i
     logical :: header_found, generated_found, present
+    interface
+        integer(c_int) function chdir(path) bind(C, name='fo_test_chdir')
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: path(*)
+        end function chdir
+    end interface
 
     call gremlin_setup(driver, scratch, project, cache, state)
     sdk = scratch//'/sdk/include'
@@ -33,29 +41,46 @@ program test_cmake_capture_inputs
     call write_text(sdk//'/nested/value.h', '#define VALUE 19'//nl)
     call make_symlink(sdk, scratch//'/include-alias')
     call make_directory(project//'/.venv/include')
+    call make_directory(project//'/include')
     call make_directory(project//'/optional')
     call write_text(project//'/.venv/include/local.h', '#define LOCAL 3'//nl)
+    call write_text(project//'/include/public.h', '#define PUBLIC 11'//nl)
     call write_text(project//'/CMakeLists.txt', &
         'cmake_minimum_required(VERSION 3.22)'//nl// &
         'project(capture_inputs LANGUAGES C)'//nl// &
         'include(CTest)'//nl// &
+        'include(GNUInstallDirs)'//nl// &
         'set(SDK_INCLUDE "'//scratch//'/include-alias" CACHE INTERNAL "headers")'//nl// &
         'set(LOCAL_INCLUDE "${CMAKE_SOURCE_DIR}/.venv/include" CACHE PATH "local")'//nl// &
+        'add_library(headers INTERFACE)'//nl// &
+        'target_include_directories(headers INTERFACE '// &
+        '"$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>")'//nl// &
+        'install(TARGETS headers EXPORT headers)'//nl// &
+        'install(EXPORT headers DESTINATION lib/cmake/headers)'//nl// &
+        'install(FILES .venv/include/local.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})'//nl// &
         'configure_file(seed.in "${CMAKE_CURRENT_SOURCE_DIR}/generated.h" @ONLY)'//nl// &
         'add_executable(probe main.c)'//nl// &
         'target_include_directories(probe PRIVATE '// &
         '"${CMAKE_SOURCE_DIR}/optional/include" '// &
+        '"${CMAKE_SOURCE_DIR}/include" '// &
         '"${SDK_INCLUDE}" "${LOCAL_INCLUDE}")'//nl// &
         'add_test(NAME header_value COMMAND probe)'//nl)
     call write_text(project//'/seed.in', '#define GENERATED 7'//nl)
     call write_text(project//'/main.c', &
         '#include "nested/value.h"'//nl//'#include "generated.h"'//nl// &
-        '#include "local.h"'//nl// &
-        'int main(void) { return VALUE == 19 && GENERATED == 7 && LOCAL == 3 ? 0 : 1; }'//nl)
+        '#include "local.h"'//nl//'#include "public.h"'//nl// &
+        'int main(void) { return VALUE == 19 && GENERATED == 7 && '// &
+        'LOCAL == 3 && PUBLIC == 11 ? 0 : 1; }'//nl)
     backend = detect_backend(project)
+    call current_directory(cwd)
+    ierr = int(chdir(project//c_null_char))
+    call assert_true(ierr == 0, 'capture from the configured project directory')
     call cmake_capture_inventory(backend, inventory, ierr, message)
+    cleanup_status = int(chdir(cwd//c_null_char))
+    call assert_true(cleanup_status == 0, 'restore the fixture working directory')
     call assert_true(ierr == 0, 'capture external headers: '//trim(message))
     if (ierr == 0) then
+        call install_headers(project, 'live')
         header_found = .false.
         generated_found = .false.
         do i = 1, inventory%entry_count
@@ -115,6 +140,7 @@ program test_cmake_capture_inputs
             timeout_ms=30000)
         call assert_process_ok(process, &
             'relocated build ignores later live include directory')
+        call install_headers(trim(view%cwd), 'frozen')
         call write_text(sdk//'/nested/value.h', '#define VALUE 31'//nl)
         call list_add(environment, 'FO_TEST_RERUN=0')
         call run_fo(driver, args, trim(view%cwd), cache, process, &
@@ -146,6 +172,26 @@ program test_cmake_capture_inputs
     call reject_include(project//'/.fo-cmake/absent', 'absent capture-output include')
     call finish_assertions()
 contains
+    subroutine install_headers(source, label)
+        character(len=*), intent(in) :: source, label
+        type(string_list_t) :: command
+        type(process_result_t) :: result
+        character(:), allocatable :: prefix
+
+        prefix = scratch//'/'//label//'-install'
+        call list_add(command, 'cmake')
+        call list_add(command, '--install')
+        call list_add(command, source//'/'//backend%cmake%build_root)
+        call list_add(command, '--prefix')
+        call list_add(command, prefix)
+        call run_process(command, source, result, timeout_ms=30000)
+        call assert_process_ok(result, label//' native install succeeds')
+        call assert_contains(read_text(prefix//'/include/local.h'), &
+            '#define LOCAL 3', label//' header uses the relative include destination')
+        call assert_contains(read_text(prefix//'/lib/cmake/headers/headers.cmake'), &
+            '${_IMPORT_PREFIX}/include', label//' export remains prefix-relative')
+    end subroutine install_headers
+
     subroutine reject_include(path, label)
         character(len=*), intent(in) :: path, label
         character(len=:), allocatable :: authored
