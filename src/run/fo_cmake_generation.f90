@@ -7,7 +7,8 @@ module fo_cmake_generation
     use fo_cmake_native_model, only: cm_plan_t
     use fo_cmake_native_snapshot, only: native_snapshot_write
     use fo_input_inventory, only: input_inventory_t, input_inventory_discover_cmake, &
-        input_inventory_cmake_reference
+        input_inventory_cmake_reference, input_inventory_cmake_missing_include, &
+        input_inventory_cmake_include_search
     use fo_fs, only: fs_make_dir, fs_write_text, fs_collect_files, fs_remove_tree, &
         fs_realpath
     use fo_util, only: make_tmpfile, delete_tmpfile, read_text_file, &
@@ -864,6 +865,19 @@ contains
                             call canonical_authored_path(normalized)
                             include_path = any(ancestors(:depth) == 'includes')
                             if (include_path) then
+                                ! CMake permits absent search directories. The
+                                ! project scan detects their later creation.
+                                if (input_inventory_cmake_missing_include( &
+                                        trim(project), trim(authored))) then
+                                    if (present(inventory)) then
+                                        call input_inventory_cmake_include_search( &
+                                            inventory, trim(authored), ierr, message)
+                                        if (ierr /= 0) return
+                                    end if
+                                    depth = depth - 1
+                                    key = ''
+                                    cycle
+                                end if
                                 call canonical_directory(normalized, physical)
                                 normalized = physical
                             end if
