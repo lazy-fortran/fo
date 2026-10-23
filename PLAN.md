@@ -56,6 +56,17 @@ failure detection. The workspace master plan, when present, owns delivery order.
   two unchanged formatting warnings remain advisory. Full project/profile
   parity remains unclaimed.
 
+## Transitive OpenMP runtime (2026-10-23)
+
+- [V] FortFEM's circulant test failed at link time because dependency OpenMP
+  requirements were absent from the root test configuration. Propagate those
+  requirements after acquisition for compilation and final application/test links.
+- [V] Private candidate SHA256
+  `fbba60bdaf0dbb02518a351e815ecf480296d4584256d28b702e1ce8c1116d8c`
+  passes six focused dependency, registry, profile and shared-link checks, plus
+  the real FortFEM circulant consumer. The synthetic transitive/dev-dependency
+  execution oracle fails against the original driver and passes the repair.
+
 ## Destination
 
 Fo is the simplest, fastest and most trustworthy Fortran build and test tool
