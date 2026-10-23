@@ -6,7 +6,8 @@ module fo_cmake_generation
     use fo_cmake_native_config, only: native_cmake_selected, native_cmake_configure
     use fo_cmake_native_model, only: cm_plan_t
     use fo_cmake_native_snapshot, only: native_snapshot_write
-    use fo_input_inventory, only: input_inventory_t, input_inventory_discover_cmake
+    use fo_input_inventory, only: input_inventory_t, input_inventory_discover_cmake, &
+        input_inventory_cmake_reference
     use fo_fs, only: fs_make_dir, fs_write_text, fs_collect_files, fs_remove_tree, &
         fs_realpath
     use fo_util, only: make_tmpfile, delete_tmpfile, read_text_file, &
@@ -757,11 +758,11 @@ contains
         character(len=*), intent(inout) :: roots(:)
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
-        type(input_inventory_t), intent(in), optional :: inventory
+        type(input_inventory_t), intent(inout), optional :: inventory
         integer, intent(inout), optional :: n_roots
         character(len=*), intent(inout), optional :: bundles(:), labels(:), names(:)
         character(len=PATH_LEN), allocatable :: files(:)
-        character(len=PATH_LEN) :: normalized, project, build, physical
+        character(len=PATH_LEN) :: normalized, authored, project, build, physical
         character(len=PATH_LEN) :: cmake_root, toolchain
         character(len=PATH_LEN) :: digest_parts(1)
         character(len=HASH_LEN) :: digest
@@ -859,6 +860,7 @@ contains
                                     cycle
                                 end if
                             end if
+                            authored = normalized
                             call canonical_authored_path(normalized)
                             include_path = any(ancestors(:depth) == 'includes')
                             if (include_path) then
@@ -930,6 +932,9 @@ contains
                             if (present(inventory)) then
                                 if (.not. inside(normalized, build) .and. &
                                     .not. delegated) then
+                                    call input_inventory_cmake_reference( &
+                                        inventory, trim(authored), ierr, message)
+                                    if (ierr /= 0) return
                                     if (.not. inventory_has_path(inventory, normalized)) then
                                         ierr = 1
                                         message = 'referenced CMake input is missing or unsupported: '// &

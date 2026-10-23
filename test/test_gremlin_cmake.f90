@@ -17,6 +17,7 @@ program test_gremlin_cmake
     character(:), allocatable :: provider, provider_source, revision, raw_archive
     character(:), allocatable :: child_builds, generation_builds, child_runs
     character(:), allocatable :: first_model, first_model_generation
+    character(:), allocatable :: authored_model
     type(string_list_t) :: args
     type(process_result_t) :: process
     type(json_value_t) :: reply
@@ -98,7 +99,8 @@ program test_gremlin_cmake
                     new_line('a')// &
                     'add_executable(unselected_generated_target EXCLUDE_FROM_ALL '// &
                     'unselected_generated.f90)'//new_line('a')// &
-                    'add_executable(marker marker.f90)'//new_line('a')// &
+                    'add_executable(marker marker.f90 .venv/native/hidden.f90)'// &
+                    new_line('a')// &
                     'add_executable(probe EXCLUDE_FROM_ALL probe.f90)'// &
                     new_line('a')// &
                     'add_test(NAME excluded_probe COMMAND probe)'//new_line('a')// &
@@ -109,7 +111,8 @@ program test_gremlin_cmake
                     'target_link_libraries(marker PRIVATE value_dep raw_dep)'// &
                     new_line('a')// &
                   'target_include_directories(marker PRIVATE "${CMAKE_BINARY_DIR}" '// &
-                    '"${VALUE_PROVIDER_BUILD}/include")'// &
+                    '"${VALUE_PROVIDER_BUILD}/include" '// &
+                    '"${CMAKE_CURRENT_SOURCE_DIR}/.venv/include")'// &
                     new_line('a')// &
                  'file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/sandbox")'//new_line('a')// &
                     'add_test(NAME setup COMMAND "${CMAKE_COMMAND}" '// &
@@ -126,6 +129,14 @@ program test_gremlin_cmake
                     'WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/sandbox" '// &
                     'PASS_REGULAR_EXPRESSION "text never printed")'//new_line('a'))
     call write_text(project//'/broken.f90', 'unselected target is intentionally invalid')
+    call make_directory(project//'/.venv/include')
+    call make_directory(project//'/.venv/include/nested')
+    call make_directory(project//'/.venv/native')
+    call write_text(project//'/.venv/native/hidden.f90', &
+        'module hidden_input'//new_line('a')//'implicit none'//new_line('a')// &
+        'integer, parameter :: hidden_value = 23'//new_line('a')// &
+        'end module hidden_input')
+    call write_hidden_header(31)
     call write_text(project//'/probe.f90', 'program probe'//new_line('a')// &
         'print *, "probe passed"'//new_line('a')//'end program probe'//new_line('a'))
     call write_marker(.false.)
@@ -227,6 +238,14 @@ program test_gremlin_cmake
     call write_provider(17)
     call wait_result(previous, 'PASS', generation)
     previous = generation
+    call write_hidden_header(37)
+    call wait_result(previous, 'FAIL', generation)
+    call assert_true(generation /= previous, &
+        'explicit header beneath an excluded directory wakes resident')
+    previous = generation
+    call write_hidden_header(31)
+    call wait_result(previous, 'PASS', generation)
+    previous = generation
     call write_text(project//'/CMakeLists.txt', &
         read_text(project//'/CMakeLists.txt')//'# model input edit'//new_line('a'))
     call wait_result(previous, 'PASS', generation)
@@ -235,6 +254,34 @@ program test_gremlin_cmake
     call assert_true(status_field('active_model') /= first_model, &
         'the refreshed model has a new identity')
     previous = generation
+    call write_text(scratch//'/outside-hidden.inc', &
+        read_text(project//'/.venv/include/hidden.inc'))
+    rc = c_unlink(project//'/.venv/include/hidden.inc'//c_null_char)
+    call assert_true(rc == 0, 'referenced hidden header can be replaced')
+    rc = c_symlink(scratch//'/outside-hidden.inc'//c_null_char, &
+        project//'/.venv/include/hidden.inc'//c_null_char)
+    call assert_true(rc == 0, 'hidden header escape fixture exists')
+    call wait_result(previous, 'CAPTURE_FAIL', generation, &
+        'cannot enumerate declared input root: project')
+    call assert_equal_string(generation, previous, &
+        'a hidden header escape retains the last compiled generation')
+    rc = c_unlink(project//'/.venv/include/hidden.inc'//c_null_char)
+    call write_hidden_header(31)
+    call restart_cmake_lane()
+    authored_model = read_text(project//'/CMakeLists.txt')
+    rc = c_symlink('include'//c_null_char, &
+        project//'/.venv/alias'//c_null_char)
+    call assert_true(rc == 0, 'hidden intermediate directory alias exists')
+    call write_text(project//'/CMakeLists.txt', authored_model// &
+        'target_include_directories(marker PRIVATE '// &
+        '"${CMAKE_CURRENT_SOURCE_DIR}/.venv/alias/nested")'//new_line('a'))
+    call wait_result(previous, 'CAPTURE_FAIL', generation, &
+        'unsupported referenced CMake directory alias')
+    call assert_equal_string(generation, previous, &
+        'an uncaptured hidden directory alias retains the last generation')
+    rc = c_unlink(project//'/.venv/alias'//c_null_char)
+    call write_text(project//'/CMakeLists.txt', authored_model)
+    call restart_cmake_lane()
     call write_text(scratch//'/outside.f90', read_text(dependency//'/value.f90'))
     rc = c_unlink(dependency//'/package/leaf.f90'//c_null_char)
     call assert_true(rc == 0, 'referenced link can be changed in the fixture')
@@ -250,6 +297,17 @@ program test_gremlin_cmake
                            allow_terminal_error=.true.)
     call finish_assertions()
 contains
+    subroutine restart_cmake_lane()
+        ! Capture failures are terminal. Recover the fixture with a new owner.
+        call gremlin_stop_lane(driver, project, cache, state, 'cmake', owner, &
+            allow_terminal_error=.true.)
+        call gremlin_json(driver, project, cache, state, args, reply, process, 20000)
+        call assert_process_ok(process, 'restored CMake resident request starts')
+        owner = gremlin_field(reply, 'session_id')
+        call wait_result('', 'PASS', generation)
+        previous = generation
+    end subroutine restart_cmake_lane
+
     subroutine install_tool_trap()
         !! cmake and ctest on PATH log each call and exec the real tool. Case
         !! children carry FO_GREMLIN_EXECUTION_CWD; the generation build not.
@@ -665,6 +723,13 @@ contains
                       'integer, parameter :: result = '//trim(number)//new_line('a')// &
                         'end module values'//new_line('a'))
     end subroutine write_dependency
+    subroutine write_hidden_header(value)
+        integer, intent(in) :: value
+        character(len=8) :: number
+        write(number, '(i0)') value
+        call write_text(project//'/.venv/include/hidden.inc', &
+            'integer, parameter :: hidden_header = '//trim(number))
+    end subroutine write_hidden_header
     subroutine write_marker(broken)
         logical, intent(in) :: broken
         if (broken) then
@@ -674,9 +739,13 @@ contains
         call write_text(project//'/marker.f90', &
                         'program marker'//new_line('a')//'use values, only: result'// &
                         new_line('a')//'use raw_values, only: raw_result'// &
+                        new_line('a')//'use hidden_input, only: hidden_value'// &
                         new_line('a')//'implicit none'//new_line('a')// &
                         'logical :: exists'//new_line('a')// &
                         'include "provider.inc"'//new_line('a')// &
+                        'include "hidden.inc"'//new_line('a')// &
+                        'if (hidden_header /= 31 .or. hidden_value /= 23) '// &
+                        'error stop "hidden input changed"'//new_line('a')// &
                         'if (provider_header /= 17) error stop "provider changed"'// &
                         new_line('a')// &
                         'inquire(file="setup.ran", exist=exists)'//new_line('a')// &
@@ -685,9 +754,10 @@ contains
             'if (raw_result /= 11) error stop "populated source lost"'//new_line('a')// &
                         'print *, "marker passed"'//new_line('a')//'end program marker')
     end subroutine write_marker
-    subroutine wait_result(old, outcome, current)
+    subroutine wait_result(old, outcome, current, capture_diagnostic)
         character(len=*), intent(in) :: old, outcome
         character(:), allocatable, intent(out) :: current
+        character(len=*), intent(in), optional :: capture_diagnostic
         integer :: i
         type(string_list_t) :: query
         type(json_value_t) :: status, failure
@@ -721,9 +791,15 @@ contains
             if (outcome == 'CAPTURE_FAIL' .and. &
                 (gremlin_field(status, 'state') == 'capture_failed' .or. &
                  gremlin_field(status, 'state') == 'error')) then
-                call assert_true(index(gremlin_field(status, 'diagnostic'), &
-                    'referenced CMake input is missing or unsupported') > 0, &
-                    'referenced unsafe alias has an explicit closure diagnostic')
+                if (present(capture_diagnostic)) then
+                    call assert_true(index(gremlin_field(status, 'diagnostic'), &
+                        capture_diagnostic) > 0, &
+                        'referenced hidden escape has an explicit diagnostic')
+                else
+                    call assert_true(index(gremlin_field(status, 'diagnostic'), &
+                        'referenced CMake input is missing or unsupported') > 0, &
+                        'referenced unsafe alias has an explicit closure diagnostic')
+                end if
                 return
             end if
             if (gremlin_field(status, 'state') == 'error') exit

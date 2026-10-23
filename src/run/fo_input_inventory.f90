@@ -11,7 +11,7 @@ module fo_input_inventory
     use fo_dep_resolve, only: normalize_path, join_path, resolved_src_t, &
         resolve_dev_dep_srcs, MAX_RESOLVED
     use fo_registry, only: registry_resolve, registry_config_path
-    use fo_fs, only: fs_identity, fs_path_is_absolute
+    use fo_fs, only: fs_identity, fs_path_is_absolute, fs_realpath
     use fo_util, only: make_tmpfile, delete_tmpfile, read_text_file
     use fx_action_result_store, only: action_result_file_mode, ACTION_RESULT_OK
     implicit none
@@ -73,6 +73,7 @@ module fo_input_inventory
     public :: input_inventory_discover, input_inventory_declarations_from_config
     public :: input_inventory_revalidate, input_inventory_discover_cmake
     public :: cmake_inputs_revalidate
+    public :: input_inventory_cmake_reference
     public :: input_inventory_rediscover
     public :: alias_root, hex_value, safe_relative_path
 
@@ -91,6 +92,91 @@ module fo_input_inventory
     end interface
 
 contains
+
+    subroutine input_inventory_cmake_reference(inventory, path, ierr, message)
+        !! CMake may explicitly compile inputs in a directory omitted from the
+        !! ordinary project scan, such as NumPy headers in .venv. Capture only
+        !! the referenced file or include subtree, with the usual strict links.
+        type(input_inventory_t), intent(inout) :: inventory
+        character(len=*), intent(in) :: path
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+        character(len=:), allocatable :: root, relative, first
+        character(len=PATH_LEN) :: canonical_root, parent
+        type(input_declaration_t) :: declaration
+        type(input_declaration_t), allocatable :: grown(:)
+        type(input_entry_t) :: entry
+        integer :: i, j, slash, separator
+        logical :: directory, ok
+
+        ierr = 0
+        message = ''
+        do i = 1, inventory%root_count
+            if (inventory%roots(i)%canonical_alias /= 'project') cycle
+            root = trim(inventory%roots(i)%physical_path)
+            call fs_realpath(root, canonical_root, ok)
+            if (.not. ok) return
+            if (index(path, root//'/') == 1) then
+                relative = path(len(root) + 2:)
+            else if (index(path, trim(canonical_root)//'/') == 1) then
+                relative = path(len_trim(canonical_root) + 2:)
+            else
+                return
+            end if
+            if (.not. safe_relative_path(relative)) return
+            slash = index(relative, '/')
+            first = relative
+            if (slash > 0) first = relative(:slash - 1)
+            select case (first)
+            case ('.cache', '.venv', 'cache', 'caches', 'session', &
+                    'sessions', 'log', 'logs')
+            case default
+                return
+            end select
+            ! Never promote an ignored directory wholesale: the File API must
+            ! identify a particular file or include subtree beneath it.
+            if (slash == 0) return
+            separator = index(relative, '/', back=.true.)
+            call fs_realpath(root//'/'//relative(:separator - 1), parent, ok)
+            if (.not. ok .or. trim(parent) /= &
+                    trim(canonical_root)//'/'//relative(:separator - 1)) then
+                ierr = 1
+                message = 'unsupported referenced CMake directory alias: '//trim(path)
+                return
+            end if
+            declaration = input_declaration_t()
+            declaration%root_alias = 'project'
+            declaration%relative_path = relative
+            declaration%role = 'cmake-referenced-input'
+            do j = 1, size(inventory%declarations)
+                if (inventory%declarations(j)%relative_path == relative) return
+            end do
+            inquire(file=root//'/'//relative//'/.', exist=directory)
+            if (directory) then
+                declaration%expected_kind = INPUT_DIRECTORY
+                call scan_tree(inventory, i, 'project', root, relative, &
+                    'cmake-project-input', .false., ierr, message)
+                if (ierr /= 0) return
+                entry = input_entry_t()
+                entry%root_alias = 'project'
+                entry%relative_path = relative
+                entry%role = 'cmake-project-input'
+                entry%kind = INPUT_DIRECTORY
+                entry%mode = 0
+                call append_entry(inventory, entry, ierr, message)
+            else
+                call add_file_entry(inventory, i, 'project', relative, &
+                    'cmake-project-input', .false., ierr, message)
+            end if
+            if (ierr /= 0) return
+            allocate(grown(size(inventory%declarations) + 1))
+            grown(:size(inventory%declarations)) = inventory%declarations
+            grown(size(grown)) = declaration
+            call move_alloc(grown, inventory%declarations)
+            call canonicalize_inventory(inventory, ierr, message)
+            return
+        end do
+    end subroutine input_inventory_cmake_reference
 
     subroutine input_inventory_discover_cmake(project_dir, sources, bundles, &
             labels, metadata_dir, inventory, ierr, message, freeze_inputs)
@@ -585,6 +671,19 @@ contains
         end do
         call input_inventory_discover_cmake(project_dir, sources(:n), bundles(:n), &
             labels(:n), trim(metadata_dir), observed, ierr, message)
+        if (ierr /= 0) return
+        if (.not. allocated(expected%declarations)) return
+        do i = 1, size(expected%declarations)
+            if (expected%declarations(i)%root_alias /= 'project' .or. &
+                expected%declarations(i)%role /= 'cmake-referenced-input') then
+                ierr = 1
+                message = 'unsupported captured CMake input declaration'
+                return
+            end if
+            call input_inventory_cmake_reference(observed, trim(project_dir)//'/'// &
+                trim(expected%declarations(i)%relative_path), ierr, message)
+            if (ierr /= 0) return
+        end do
     end subroutine input_inventory_rediscover
 
     subroutine input_inventory_revalidate(project_dir, declarations, expected, &

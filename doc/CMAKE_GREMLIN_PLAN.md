@@ -216,6 +216,12 @@ Private invocation copies retain authored file modes independently of the
 read-only stored bundle, so copied case fixtures can be edited in owned scratch.
 Repository-root projects also retain shallow, self-contained Git metadata so
 configure-time and runtime revision/dirty-state queries use the frozen sources.
+File API references to regular inputs or include subtrees beneath excluded
+project directories, such as NumPy headers in `.venv`, capture those inputs
+without capturing the whole environment. External header subtrees can use an
+explicit cached `*_SOURCE_DIR` declaration. Also set the public include-path
+cache variable used by the finder (for example `Python_INCLUDE_DIR`) so a
+relocated configure uses the frozen headers rather than rediscovering them.
 Arbitrary provider protocols, uncaptured external authored inputs, metadata
 capacity overflow and unsupported referenced symlinks fail explicitly.
 
