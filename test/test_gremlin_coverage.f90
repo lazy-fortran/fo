@@ -354,6 +354,18 @@ contains
             'skips cannot hide a genuine infrastructure failure')
         call fs_remove_file(trim(path))
         call fs_remove_file(trim(path)//'.lock')
+
+        call coverage_open(trim(path), repeat('d', 64), names(1:3), 3, &
+            17, epoch, status, message)
+        do j = 1, 3
+            call coverage_record(epoch, names(j), 'SKIP', status, message)
+        end do
+        call coverage_view(epoch, skipped)
+        call check(skipped%full_coverage .and. skipped%skip_count == 3 .and. &
+            skipped%pass_count == 0 .and. .not. skipped%green, &
+            'an inventory of only native skips is complete but not green')
+        call fs_remove_file(trim(path))
+        call fs_remove_file(trim(path)//'.lock')
     end subroutine check_native_skips
 
     subroutine corrupt_outcome_file(filename)

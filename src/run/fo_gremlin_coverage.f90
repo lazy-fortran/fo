@@ -633,7 +633,8 @@ contains
         view%ordinary_complete = ordinary_remaining == 0
         view%full_coverage = view%eligible_count > 0 .and. &
             view%remaining_count == 0
-        view%green = view%full_coverage .and. &
+        ! Authored skips complete their cases, but an all-skip inventory proves nothing.
+        view%green = view%full_coverage .and. view%pass_count > 0 .and. &
             view%pass_count + view%skip_count == view%eligible_count
     end subroutine coverage_view
 

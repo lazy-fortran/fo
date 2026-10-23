@@ -125,20 +125,20 @@ contains
             len_trim(input%requirement_digest) == HASH_LEN .and. input%event_epoch >= 0
         readiness%local_gate_green = fresh .and. &
             readiness%gate_required > 0 .and. &
-            readiness%gate_passed + readiness%gate_skipped == &
-            readiness%gate_required .and. &
+            counts_complete(readiness%gate_passed, readiness%gate_skipped, &
+            readiness%gate_required) .and. &
             .not. input%gate_failure .and. .not. input%failure_observed .and. &
             readiness%ordinary_failures == 0 .and. readiness%full_failures == 0
 
         ordinary_verified = readiness%local_gate_green .and. &
             .not. readiness%failure_observed .and. &
             readiness%full_required > 0 .and. &
-            readiness%ordinary_passed + readiness%ordinary_skipped == &
-            readiness%ordinary_required .and. &
+            counts_complete(readiness%ordinary_passed, &
+            readiness%ordinary_skipped, readiness%ordinary_required) .and. &
             readiness%ordinary_failures == 0
         full_verified = ordinary_verified .and. readiness%full_required > 0 .and. &
-            readiness%full_passed + readiness%full_skipped == &
-            readiness%full_required .and. &
+            counts_complete(readiness%full_passed, readiness%full_skipped, &
+            readiness%full_required) .and. &
             readiness%full_failures == 0
         readiness%fully_verified = full_verified
         if (full_verified) then
@@ -167,6 +167,13 @@ contains
             readiness%health = GREMLIN_HEALTH_UNKNOWN
         end if
     end subroutine gremlin_readiness_compute
+
+    ! Authored skips complete their cases, but a nonempty set needs one pass.
+    pure logical function counts_complete(passed, skipped, required)
+        integer, intent(in) :: passed, skipped, required
+        counts_complete = passed + skipped == required .and. &
+            (passed > 0 .or. required == 0)
+    end function counts_complete
 
     logical function gremlin_wait_satisfied(until_kind, readiness)
         integer, intent(in) :: until_kind

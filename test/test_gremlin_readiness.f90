@@ -117,6 +117,24 @@ contains
         call check(readiness%fully_verified .and. readiness%local_gate_green .and. &
             readiness%gate_passed == 41 .and. readiness%gate_skipped == 2, &
             'native-parity readiness completes skips without calling them passes')
+        input%gate_passed = 0
+        input%gate_skipped = 43
+        call gremlin_readiness_compute(input, readiness)
+        call check(.not. readiness%local_gate_green .and. .not. readiness%fully_verified, &
+            'a gate of only native skips is not green')
+        input%gate_passed = 41
+        input%gate_skipped = 2
+        input%full_passed = 0
+        input%full_skipped = 43
+        input%ordinary_passed = 0
+        input%ordinary_skipped = 43
+        call gremlin_readiness_compute(input, readiness)
+        call check(readiness%local_gate_green .and. .not. readiness%fully_verified, &
+            'an inventory of only native skips is not fully verified')
+        input%full_passed = 41
+        input%full_skipped = 2
+        input%ordinary_passed = 41
+        input%ordinary_skipped = 2
         input%gate_skipped = 1
         call gremlin_readiness_compute(input, readiness)
         call check(.not. readiness%local_gate_green, &
@@ -248,7 +266,9 @@ contains
                 if (ierr /= JOURNAL_OK) exit fixture
                 call compute_readiness(session, status_text, view, .true., &
                     readiness, ierr, message, freshness_verified=.true.)
-                call check(ierr == 0 .and. readiness%fully_verified .and. &
+                ! With one gate case, a current SKIP leaves no pass and is not green.
+                call check(ierr == 0 .and. &
+                    (readiness%fully_verified .eqv. trial == 1) .and. &
                     readiness%gate_required == 1 .and. &
                     readiness%gate_passed == 2 - trial .and. &
                     readiness%gate_skipped == trial - 1, &
