@@ -589,6 +589,10 @@ contains
                 view%pass_count = view%pass_count + 1
                 if (.not. is_slow_test(trim(state%inventory(i)))) &
                     view%ordinary_pass_count = view%ordinary_pass_count + 1
+            case ('SKIP')
+                view%skip_count = view%skip_count + 1
+                if (.not. is_slow_test(trim(state%inventory(i)))) &
+                    view%ordinary_skip_count = view%ordinary_skip_count + 1
             case ('FAIL')
                 view%fail_count = view%fail_count + 1
                 if (.not. is_slow_test(trim(state%inventory(i)))) &
@@ -624,11 +628,13 @@ contains
             view%ordinary_timeout_count + view%ordinary_flaky_count + &
             view%ordinary_infra_count
         ordinary_remaining = view%ordinary_eligible_count - &
-            view%ordinary_pass_count - view%ordinary_failure_count
+            view%ordinary_pass_count - view%ordinary_skip_count - &
+            view%ordinary_failure_count
         view%ordinary_complete = ordinary_remaining == 0
         view%full_coverage = view%eligible_count > 0 .and. &
             view%remaining_count == 0
-        view%green = view%full_coverage .and. view%pass_count == view%eligible_count
+        view%green = view%full_coverage .and. &
+            view%pass_count + view%skip_count == view%eligible_count
     end subroutine coverage_view
 
     subroutine coverage_save(state, status, message)
@@ -769,7 +775,7 @@ contains
     pure logical function outcome_valid(outcome)
         character(len=*), intent(in) :: outcome
         select case (trim(outcome))
-        case ('UNKNOWN', 'RUNNING', 'CANCELLED', 'PASS', 'FAIL', 'TIMEOUT', &
+        case ('UNKNOWN', 'RUNNING', 'CANCELLED', 'PASS', 'SKIP', 'FAIL', 'TIMEOUT', &
                 'FLAKY', 'INFRA', 'INFRA_ERROR')
             outcome_valid = .true.
         case default
@@ -780,7 +786,7 @@ contains
     pure logical function outcome_attempted(outcome)
         character(len=*), intent(in) :: outcome
         select case (trim(outcome))
-        case ('PASS', 'FAIL', 'TIMEOUT', 'FLAKY', 'INFRA', 'INFRA_ERROR')
+        case ('PASS', 'SKIP', 'FAIL', 'TIMEOUT', 'FLAKY', 'INFRA', 'INFRA_ERROR')
             outcome_attempted = .true.
         case default
             outcome_attempted = .false.

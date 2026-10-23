@@ -266,7 +266,8 @@ static int parse_receipt(const char *text, size_t length, receipt_fields_t *fiel
     if (parser.offset != parser.length || !fields->have_id || !fields->have_outcome)
         return 1;
     if (strcmp(fields->outcome, "pass") != 0 &&
-        strcmp(fields->outcome, "fail") != 0) return 1;
+        strcmp(fields->outcome, "fail") != 0 &&
+        strcmp(fields->outcome, "skip") != 0) return 1;
     return 0;
 }
 

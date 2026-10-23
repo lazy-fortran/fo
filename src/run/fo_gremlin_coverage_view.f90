@@ -13,6 +13,8 @@ module fo_gremlin_coverage_view
         integer :: completed_count = 0
         integer :: pass_count = 0
         integer :: ordinary_pass_count = 0
+        integer :: skip_count = 0
+        integer :: ordinary_skip_count = 0
         integer :: fail_count = 0
         integer :: ordinary_failure_count = 0
         integer :: timeout_count = 0

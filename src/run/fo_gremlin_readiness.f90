@@ -42,11 +42,14 @@ module fo_gremlin_readiness
         logical :: failure_observed = .false.
         integer :: gate_required = 0
         integer :: gate_passed = 0
+        integer :: gate_skipped = 0
         integer :: ordinary_required = 0
         integer :: ordinary_passed = 0
+        integer :: ordinary_skipped = 0
         integer :: ordinary_failures = 0
         integer :: full_required = 0
         integer :: full_passed = 0
+        integer :: full_skipped = 0
         integer :: full_failures = 0
     end type gremlin_readiness_input_t
 
@@ -67,11 +70,14 @@ module fo_gremlin_readiness
         logical :: fully_verified = .false.
         integer :: gate_required = 0
         integer :: gate_passed = 0
+        integer :: gate_skipped = 0
         integer :: ordinary_required = 0
         integer :: ordinary_passed = 0
+        integer :: ordinary_skipped = 0
         integer :: ordinary_failures = 0
         integer :: full_required = 0
         integer :: full_passed = 0
+        integer :: full_skipped = 0
         integer :: full_failures = 0
     end type gremlin_readiness_t
 
@@ -97,11 +103,14 @@ contains
         readiness%dirty = input%dirty
         readiness%gate_required = max(0, input%gate_required)
         readiness%gate_passed = max(0, input%gate_passed)
+        readiness%gate_skipped = max(0, input%gate_skipped)
         readiness%ordinary_required = max(0, input%ordinary_required)
         readiness%ordinary_passed = max(0, input%ordinary_passed)
+        readiness%ordinary_skipped = max(0, input%ordinary_skipped)
         readiness%ordinary_failures = max(0, input%ordinary_failures)
         readiness%full_required = max(0, input%full_required)
         readiness%full_passed = max(0, input%full_passed)
+        readiness%full_skipped = max(0, input%full_skipped)
         readiness%full_failures = max(0, input%full_failures)
 
         readiness%gate_failure = input%gate_failure
@@ -116,17 +125,20 @@ contains
             len_trim(input%requirement_digest) == HASH_LEN .and. input%event_epoch >= 0
         readiness%local_gate_green = fresh .and. &
             readiness%gate_required > 0 .and. &
-            readiness%gate_passed == readiness%gate_required .and. &
+            readiness%gate_passed + readiness%gate_skipped == &
+            readiness%gate_required .and. &
             .not. input%gate_failure .and. .not. input%failure_observed .and. &
             readiness%ordinary_failures == 0 .and. readiness%full_failures == 0
 
         ordinary_verified = readiness%local_gate_green .and. &
             .not. readiness%failure_observed .and. &
             readiness%full_required > 0 .and. &
-            readiness%ordinary_passed == readiness%ordinary_required .and. &
+            readiness%ordinary_passed + readiness%ordinary_skipped == &
+            readiness%ordinary_required .and. &
             readiness%ordinary_failures == 0
         full_verified = ordinary_verified .and. readiness%full_required > 0 .and. &
-            readiness%full_passed == readiness%full_required .and. &
+            readiness%full_passed + readiness%full_skipped == &
+            readiness%full_required .and. &
             readiness%full_failures == 0
         readiness%fully_verified = full_verified
         if (full_verified) then
