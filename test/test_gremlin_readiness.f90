@@ -15,6 +15,7 @@ program test_gremlin_readiness
     passed = 0
     failed = 0
     call test_partial_gate_and_verification_levels()
+    call test_native_skips()
     call test_failure_and_generation_freshness()
     call test_gate_token_binding()
     call test_wait_request_parser()
@@ -73,6 +74,32 @@ contains
         call check(gremlin_wait_satisfied(GREMLIN_WAIT_FULLY_VERIFIED, readiness), &
             'full semantic wait observes full verification')
     end subroutine test_partial_gate_and_verification_levels
+
+    subroutine test_native_skips()
+        type(gremlin_readiness_input_t) :: input
+        type(gremlin_readiness_t) :: readiness
+
+        call exact_gate(input)
+        input%gate_required = 2
+        input%gate_passed = 1
+        input%gate_skipped = 1
+        input%ordinary_required = 2
+        input%ordinary_passed = 1
+        input%ordinary_skipped = 1
+        input%full_required = 2
+        input%full_passed = 1
+        input%full_skipped = 1
+        call gremlin_readiness_compute(input, readiness)
+        call check(readiness%fully_verified .and. readiness%gate_passed == 1 .and. &
+            readiness%gate_skipped == 1, 'native skip completes coverage without becoming PASS')
+        input%gate_failure = .true.
+        call gremlin_readiness_compute(input, readiness)
+        call check(.not. readiness%local_gate_green, 'native skips cannot hide a real failure')
+        input%gate_failure = .false.
+        input%gate_skipped = 2
+        call gremlin_readiness_compute(input, readiness)
+        call check(.not. readiness%local_gate_green, 'excess skip credit cannot satisfy a gate')
+    end subroutine test_native_skips
 
     subroutine test_failure_and_generation_freshness()
         type(gremlin_readiness_input_t) :: input
@@ -300,8 +327,11 @@ contains
         event%health = 'healthy'
         event%dirty = .false.
         event%local_gate_green = .true.
-        event%gate_required = 1
+        event%gate_required = 2
         event%gate_passed = 1
+        event%gate_skipped = 1
+        event%ordinary_skipped = 1
+        event%full_skipped = 1
         event%event_id = gremlin_lifecycle_make_id('session-fixture', event)
         call gremlin_lifecycle_encode(event, json, ierr, message)
         call gremlin_lifecycle_append(trim(path), event, ierr, message)
@@ -312,6 +342,9 @@ contains
             'pagination resumes at the next complete lifecycle event')
         if (n_events == 1) call check(page(1)%event_type == 'local_gate_green', &
             'pagination restores the resumed event type')
+        if (n_events == 1) call check(page(1)%gate_passed == 1 .and. &
+            page(1)%gate_skipped == 1 .and. page(1)%ordinary_skipped == 1 .and. &
+            page(1)%full_skipped == 1, 'lifecycle roundtrip preserves separate skip counts')
 
         conflicting = event
         conflicting%phase = 'quiescent'

@@ -98,6 +98,7 @@ program test_gremlin_coverage
         'a new epoch begins only through the explicit transition')
 
     call check_mixed_outcomes()
+    call check_native_skips()
     call check_stale_writers()
     call check_cursor_rewinds_39_of_40()
 
@@ -109,6 +110,32 @@ program test_gremlin_coverage
     write(*, '(a)') 'Gremlin coverage behavioral oracle: PASS'
 
 contains
+
+    subroutine check_native_skips()
+        type(coverage_epoch_t) :: mixed, recovered
+        type(gremlin_coverage_view_t) :: mixed_view
+        character(len=16) :: mixed_names(2)
+        character(len=*), parameter :: skip_path = 'gremlin-coverage-skips.state'
+
+        mixed_names = [character(len=16) :: 'native_pass', 'native_skip']
+        call fs_remove_file(skip_path)
+        call coverage_open(skip_path, repeat('d', 64), mixed_names, 2, 19, &
+            mixed, status, message)
+        call coverage_record(mixed, mixed_names(1), 'PASS', status, message)
+        call check(status == COVERAGE_OK, 'records native PASS')
+        call coverage_record(mixed, mixed_names(2), 'SKIP', status, message)
+        call check(status == COVERAGE_OK, 'records native SKIP')
+        call coverage_open(skip_path, repeat('d', 64), mixed_names, 2, 19, &
+            recovered, status, message)
+        call check(status == COVERAGE_OK, 'native skip survives durable reopen')
+        call coverage_view(recovered, mixed_view)
+        call check(mixed_view%pass_count == 1 .and. mixed_view%skip_count == 1, &
+            'native skip is never counted as PASS')
+        call check(mixed_view%green .and. mixed_view%ordinary_complete .and. &
+            coverage_remaining(recovered) == 0, 'native pass and skip complete coverage')
+        call fs_remove_file(skip_path)
+        call fs_remove_file(skip_path//'.lock')
+    end subroutine check_native_skips
 
     subroutine check_stale_writers()
         type(coverage_epoch_t) :: first, second, latest

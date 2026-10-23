@@ -87,6 +87,13 @@ failure detection. The workspace master plan, when present, owns delivery order.
   passes with the fix, including rejection of a changed SDK's cached PASS.
   Existing parent-module and capture-input regressions pass.
 
+## Native CTest skip results (2026-10-23)
+
+Preserve CTest's successful declared SKIP in runner receipts, durable coverage
+and readiness, with separate skip counts. The mixed native PASS/SKIP oracle
+also edits a passing test into a failure, which must revoke the green gate.
+Skipped evidence never becomes a reusable PASS or resolves a prior failure.
+
 ## Destination
 
 Fo is the simplest, fastest and most trustworthy Fortran build and test tool

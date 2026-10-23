@@ -31,6 +31,10 @@ program test_gremlin_runner_report
         pass_record//']}', 'PASS', 'finds the requested case among report entries')
     call check('{"tests":[{"name":"another_case","status":"pass"}]}', &
         'INFRA_ERROR', 'unrelated successful case cannot credit requested case')
+    call check('{"tests":[{"name":"test_relative_pass","status":"skip"}]}', &
+        'SKIP', 'native skip remains distinct from PASS and infrastructure failure')
+    call invalid('{"tests":[{"name":"test_relative_pass","status":"skip",'// &
+        '"status":"pass"}]}', 'duplicate skip verdict cannot forge PASS')
     call invalid('{"tests":['//pass_record//','//pass_record//']}', &
         'duplicate requested case')
     call invalid('{"tests":['//pass_record//'],"tests":[]}', 'duplicate tests key')

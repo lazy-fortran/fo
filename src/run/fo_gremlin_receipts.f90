@@ -99,8 +99,8 @@ contains
         character(len=NAME_LEN) :: status_name, case_id, raw, receipt_session
         character(len=PATH_LEN) :: journal_path, campaign_state_dir
         character(len=NAME_LEN) :: gate_cases(MAX_NODES)
-        character(len=NAME_LEN) :: gate_pass_cases(MAX_NODES)
-        integer :: i, ios, gate_count, gate_passed, journal_index
+        character(len=NAME_LEN) :: gate_verified_cases(MAX_NODES)
+        integer :: i, ios, gate_count, gate_passed, gate_skipped, verified, journal_index
         logical :: build_passed, gate_failure
 
         ierr = 0
@@ -145,9 +145,11 @@ contains
         if (have_coverage .and. trim(coverage%generation_id) == trim(active_id)) then
             input%ordinary_required = coverage%ordinary_eligible_count
             input%ordinary_passed = coverage%ordinary_pass_count
+            input%ordinary_skipped = coverage%ordinary_skip_count
             input%ordinary_failures = coverage%ordinary_failure_count
             input%full_required = coverage%eligible_count
             input%full_passed = coverage%pass_count
+            input%full_skipped = coverage%skip_count
             input%full_failures = coverage%fail_count + coverage%timeout_count + &
                 coverage%flaky_count + coverage%infra_count
         end if
@@ -180,9 +182,10 @@ contains
         build_passed = .false.
         gate_failure = .false.
         gate_cases = ''
-        gate_pass_cases = ''
+        gate_verified_cases = ''
         gate_count = 0
         gate_passed = 0
+        gate_skipped = 0
         if (.not. allocated(session%project_key) .or. &
             .not. allocated(session%lane_id) .or. &
             .not. allocated(session%session_id)) then
@@ -234,11 +237,16 @@ contains
                     gate_count = gate_count + 1
                     gate_cases(gate_count) = trim(case_id)
                 end if
-                if (trim(status_name) == 'PASS' .and. .not. any( &
-                    gate_pass_cases(:gate_passed) == trim(case_id)) .and. &
-                    gate_passed < size(gate_cases)) then
-                    gate_passed = gate_passed + 1
-                    gate_pass_cases(gate_passed) = trim(case_id)
+                verified = gate_passed + gate_skipped
+                if ((trim(status_name) == 'PASS' .or. trim(status_name) == 'SKIP') &
+                    .and. .not. any(gate_verified_cases(:verified) == trim(case_id)) &
+                    .and. verified < size(gate_cases)) then
+                    gate_verified_cases(verified + 1) = trim(case_id)
+                    if (trim(status_name) == 'PASS') then
+                        gate_passed = gate_passed + 1
+                    else
+                        gate_skipped = gate_skipped + 1
+                    end if
                 end if
             end do
         end do
@@ -247,6 +255,7 @@ contains
         input%build_passed = build_passed
         input%gate_required = max(input%gate_required, gate_count)
         input%gate_passed = min(input%gate_required, gate_passed)
+        input%gate_skipped = min(input%gate_required, gate_skipped)
         input%gate_failure = gate_failure
         call gremlin_readiness_compute(input, readiness)
     end subroutine compute_readiness
@@ -283,7 +292,8 @@ contains
         gate_receipt_matches = trim(receipt_generation) == trim(generation) .and. &
             trim(receipt_requirement) == trim(requirement) .and. &
             trim(gate_required) == 'true' .and. len_trim(case_name) > 0 .and. &
-            (trim(outcome) == 'PASS' .or. status_is_failure(trim(outcome)))
+            (trim(outcome) == 'PASS' .or. trim(outcome) == 'SKIP' .or. &
+            status_is_failure(trim(outcome)))
     end function gate_receipt_matches
 
     subroutine record_receipt(session, request, generation, case_name, exitcode, &
@@ -379,6 +389,8 @@ contains
         end if
         if (outcome == 'PASS' .or. outcome == 'BUILD_PASS') then
             call json_key_string(jb, 'outcome', 'pass')
+        else if (outcome == 'SKIP') then
+            call json_key_string(jb, 'outcome', 'skip')
         else
             call json_key_string(jb, 'outcome', 'fail')
         end if
@@ -886,7 +898,7 @@ contains
 
     logical function coverage_outcome(status)
         character(len=*), intent(in) :: status
-        coverage_outcome = status == 'PASS' .or. status == 'FAIL' .or. &
+        coverage_outcome = status == 'PASS' .or. status == 'SKIP' .or. status == 'FAIL' .or. &
             status == 'TIMEOUT' .or. status == 'FLAKY' .or. &
             status == 'INFRA' .or. status == 'INFRA_ERROR' .or. &
             status == 'CANCELLED'
@@ -995,6 +1007,8 @@ contains
                         select case (trim(verdict))
                         case ('pass')
                             outcome = 'PASS'
+                        case ('skip')
+                            outcome = 'SKIP'
                         case ('fail')
                             outcome = 'FAIL'
                         case ('timeout')

@@ -92,6 +92,12 @@ test-wall-timeout = 900  # wall-clock cap per test
 CPU time is read from `/proc` on Linux. Elsewhere the budget stays a
 wall-clock limit.
 
+Gremlin retains a native CTest skip as `SKIP`, with separate `gate_skipped`,
+`ordinary_skipped` and `full_skipped` counts. A declared native skip completes
+that case's current-generation obligation without becoming a PASS or a reusable
+PASS result. Failures, unknown results, missing receipts and changed inputs
+still prevent verification.
+
 ### Cases, retries and SLOW
 
 An executable that implements the fo listing protocol is run case by case:

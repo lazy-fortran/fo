@@ -34,11 +34,14 @@ module fo_gremlin_lifecycle
         logical :: fully_verified = .false.
         integer :: gate_required = 0
         integer :: gate_passed = 0
+        integer :: gate_skipped = 0
         integer :: ordinary_required = 0
         integer :: ordinary_passed = 0
+        integer :: ordinary_skipped = 0
         integer :: ordinary_failures = 0
         integer :: full_required = 0
         integer :: full_passed = 0
+        integer :: full_skipped = 0
         integer :: full_failures = 0
         integer :: event_epoch = 0
         character(len=HASH_LEN) :: requirement_digest = ''
@@ -133,9 +136,12 @@ contains
             .not. valid_health(event%health) .or. &
             .not. valid_verification(event%verification_level)) return
         if (event%gate_required < 0 .or. event%gate_passed < 0 .or. &
+            event%gate_skipped < 0 .or. &
             event%ordinary_required < 0 .or. event%ordinary_passed < 0 .or. &
+            event%ordinary_skipped < 0 .or. &
             event%ordinary_failures < 0 .or. event%full_required < 0 .or. &
-            event%full_passed < 0 .or. event%full_failures < 0 .or. &
+            event%full_passed < 0 .or. &
+            event%full_skipped < 0 .or. event%full_failures < 0 .or. &
             event%epoch < 0 .or. event%epoch_cursor < 0) return
         json = '{"event_version":1,"event_id":"'// &
             trim(json_escape_string(event%event_id))//'","event_type":"'// &
@@ -151,11 +157,14 @@ contains
             '","fully_verified":'//trim(json_bool(event%fully_verified))// &
             ',"gate_required":'//trim(json_int(event%gate_required))// &
             ',"gate_passed":'//trim(json_int(event%gate_passed))// &
+            ',"gate_skipped":'//trim(json_int(event%gate_skipped))// &
             ',"ordinary_required":'//trim(json_int(event%ordinary_required))// &
             ',"ordinary_passed":'//trim(json_int(event%ordinary_passed))// &
+            ',"ordinary_skipped":'//trim(json_int(event%ordinary_skipped))// &
             ',"ordinary_failures":'//trim(json_int(event%ordinary_failures))// &
             ',"full_required":'//trim(json_int(event%full_required))// &
             ',"full_passed":'//trim(json_int(event%full_passed))// &
+            ',"full_skipped":'//trim(json_int(event%full_skipped))// &
             ',"full_failures":'//trim(json_int(event%full_failures))// &
             ',"event_epoch":'//trim(json_int(event%event_epoch))// &
             ',"requirement_digest":"'//trim(event%requirement_digest)// &
@@ -190,9 +199,12 @@ contains
             return
         end if
         if (event%gate_required < 0 .or. event%gate_passed < 0 .or. &
+            event%gate_skipped < 0 .or. &
             event%ordinary_required < 0 .or. event%ordinary_passed < 0 .or. &
+            event%ordinary_skipped < 0 .or. &
             event%ordinary_failures < 0 .or. event%full_required < 0 .or. &
-            event%full_passed < 0 .or. event%full_failures < 0 .or. &
+            event%full_passed < 0 .or. &
+            event%full_skipped < 0 .or. event%full_failures < 0 .or. &
             event%epoch < 0 .or. event%epoch_cursor < 0) then
             return
         end if
@@ -472,15 +484,21 @@ contains
         if (ios /= 0) return
         call read_integer_field(json, 'gate_passed', event%gate_passed, ios)
         if (ios /= 0) return
+        call read_optional_integer_field(json, 'gate_skipped', event%gate_skipped, ios)
+        if (ios /= 0) return
         call read_integer_field(json, 'ordinary_required', event%ordinary_required, ios)
         if (ios /= 0) return
         call read_integer_field(json, 'ordinary_passed', event%ordinary_passed, ios)
+        if (ios /= 0) return
+        call read_optional_integer_field(json, 'ordinary_skipped', event%ordinary_skipped, ios)
         if (ios /= 0) return
         call read_integer_field(json, 'ordinary_failures', event%ordinary_failures, ios)
         if (ios /= 0) return
         call read_integer_field(json, 'full_required', event%full_required, ios)
         if (ios /= 0) return
         call read_integer_field(json, 'full_passed', event%full_passed, ios)
+        if (ios /= 0) return
+        call read_optional_integer_field(json, 'full_skipped', event%full_skipped, ios)
         if (ios /= 0) return
         call read_integer_field(json, 'full_failures', event%full_failures, ios)
         if (ios /= 0) return
@@ -506,6 +524,17 @@ contains
         read(raw, *, iostat=ierr) value
     end subroutine read_integer_field
 
+    subroutine read_optional_integer_field(json, name, value, ierr)
+        character(len=*), intent(in) :: json, name
+        integer, intent(out) :: value, ierr
+        character(len=64) :: raw
+
+        call extract_event_field(json, name, raw)
+        value = 0
+        ierr = 0
+        if (len_trim(raw) > 0) read(raw, *, iostat=ierr) value
+    end subroutine read_optional_integer_field
+
     function event_facts(event) result(facts)
         type(gremlin_lifecycle_event_t), intent(in) :: event
         character(len=8192) :: facts
@@ -523,6 +552,10 @@ contains
             int_text(event%epoch_cursor)//'|'//int_text(event%event_epoch)//'|'// &
             event%requirement_digest//'|'//event%gate_token//'|'// &
             trim(event%diagnostic)
+        ! Keep existing zero-skip event identities readable after the extension.
+        if (event%gate_skipped + event%ordinary_skipped + event%full_skipped > 0) &
+            facts = trim(facts)//'|skips:'//int_text(event%gate_skipped)//'|'// &
+                int_text(event%ordinary_skipped)//'|'//int_text(event%full_skipped)
     end function event_facts
 
     logical function valid_event_type(value)
