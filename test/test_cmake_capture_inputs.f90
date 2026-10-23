@@ -1,5 +1,5 @@
 program test_cmake_capture_inputs
-    use fo_test_harness, only: make_directory, write_text, &
+    use fo_test_harness, only: make_directory, write_text, read_text, &
         assert_true, assert_contains, assert_process_ok, finish_assertions, &
         string_list_t, process_result_t, list_add, make_symlink
     use fo_test_gremlin_oracle, only: gremlin_setup
@@ -10,6 +10,7 @@ program test_cmake_capture_inputs
     use fo_gremlin_generation, only: generation_context_t, generation_t, &
         generation_capture
     use fo_cache, only: cache_file_digest
+    use fo_fs, only: fs_remove_tree, fs_remove_file
     use fo_gremlin_execution_view, only: execution_view_t, execution_view_create, &
         execution_view_release
     implicit none
@@ -24,7 +25,7 @@ program test_cmake_capture_inputs
     type(string_list_t) :: args, environment
     type(process_result_t) :: process
     integer :: ierr, cleanup_status, i
-    logical :: header_found, generated_found
+    logical :: header_found, generated_found, present
 
     call gremlin_setup(driver, scratch, project, cache, state)
     sdk = scratch//'/sdk/include'
@@ -32,6 +33,7 @@ program test_cmake_capture_inputs
     call write_text(sdk//'/nested/value.h', '#define VALUE 19'//nl)
     call make_symlink(sdk, scratch//'/include-alias')
     call make_directory(project//'/.venv/include')
+    call make_directory(project//'/optional')
     call write_text(project//'/.venv/include/local.h', '#define LOCAL 3'//nl)
     call write_text(project//'/CMakeLists.txt', &
         'cmake_minimum_required(VERSION 3.22)'//nl// &
@@ -41,7 +43,9 @@ program test_cmake_capture_inputs
         'set(LOCAL_INCLUDE "${CMAKE_SOURCE_DIR}/.venv/include" CACHE PATH "local")'//nl// &
         'configure_file(seed.in "${CMAKE_CURRENT_SOURCE_DIR}/generated.h" @ONLY)'//nl// &
         'add_executable(probe main.c)'//nl// &
-        'target_include_directories(probe PRIVATE "${SDK_INCLUDE}" "${LOCAL_INCLUDE}")'//nl// &
+        'target_include_directories(probe PRIVATE '// &
+        '"${CMAKE_SOURCE_DIR}/optional/include" '// &
+        '"${SDK_INCLUDE}" "${LOCAL_INCLUDE}")'//nl// &
         'add_test(NAME header_value COMMAND probe)'//nl)
     call write_text(project//'/seed.in', '#define GENERATED 7'//nl)
     call write_text(project//'/main.c', &
@@ -71,6 +75,20 @@ program test_cmake_capture_inputs
         context%input_inventory = inventory
         call generation_capture(project, state, context, generation, ierr, message)
         call assert_true(ierr == 0, 'stable configured inventory: '//trim(message))
+        call make_symlink(project//'/unavailable', project//'/optional/include')
+        call input_inventory_revalidate(project, inventory%declarations, inventory, &
+            ierr, message)
+        call assert_true(ierr /= 0, 'materialized dangling include link is rejected')
+        call assert_contains(trim(message), 'include-search path', &
+            'retained absent include detects dangling link during rediscovery')
+        call fs_remove_file(project//'/optional/include')
+        call make_symlink(sdk, project//'/optional/include')
+        call input_inventory_revalidate(project, inventory%declarations, inventory, &
+            ierr, message)
+        call assert_true(ierr /= 0, 'materialized directory include link is rejected')
+        call assert_contains(trim(message), 'include-search path', &
+            'retained absent include detects directory alias during rediscovery')
+        call fs_remove_file(project//'/optional/include')
         call write_text(sdk//'/nested/value.h', '#define VALUE 31'//nl)
         call input_inventory_revalidate(project, inventory%declarations, inventory, &
             ierr, message)
@@ -89,9 +107,14 @@ program test_cmake_capture_inputs
         call assert_contains(process%stderr//process%stdout, &
             'captured CMake headers changed', 'forced SDK mismatch is explicit')
         call write_text(sdk//'/nested/value.h', '#define VALUE 19'//nl)
+        inquire(file=trim(view%cwd)//'/optional/include', exist=present)
+        call assert_true(.not. present, 'absent include stays absent in relocated view')
+        call make_directory(project//'/optional/include')
+        call write_text(project//'/optional/include/local.h', '#define LOCAL 99'//nl)
         call run_fo(driver, args, trim(view%cwd), cache, process, &
             timeout_ms=30000)
-        call assert_process_ok(process, 'matching recorded SDK builds and tests')
+        call assert_process_ok(process, &
+            'relocated build ignores later live include directory')
         call write_text(sdk//'/nested/value.h', '#define VALUE 31'//nl)
         call list_add(environment, 'FO_TEST_RERUN=0')
         call run_fo(driver, args, trim(view%cwd), cache, process, &
@@ -102,6 +125,8 @@ program test_cmake_capture_inputs
         call write_text(sdk//'/nested/value.h', '#define VALUE 19'//nl)
         call execution_view_release(view, .false., cleanup_status, message)
         call assert_true(cleanup_status == 0, 'private view cleaned')
+        call fs_remove_tree(project//'/optional/include', cleanup_status)
+        call assert_true(cleanup_status == 0, 'live optional include fixture cleaned')
         call write_text(project//'/generated.h', '#define GENERATED 9'//nl)
         call input_inventory_revalidate(project, inventory%declarations, inventory, &
             ierr, message)
@@ -111,5 +136,29 @@ program test_cmake_capture_inputs
     end if
     call cmake_capture_cleanup(inventory, cleanup_status)
     call assert_true(cleanup_status == 0, 'owned capture metadata cleaned')
+    call make_symlink(project//'/unavailable', project//'/dangling-include')
+    call reject_include(project//'/dangling-include', 'dangling include link')
+    call make_directory(project//'/ordinary')
+    call make_symlink(project//'/ordinary', project//'/include-alias')
+    call reject_include(project//'/include-alias/absent', &
+        'absent include below a directory alias')
+    call reject_include(scratch//'/undeclared-absent', 'absent external include')
+    call reject_include(project//'/.fo-cmake/absent', 'absent capture-output include')
     call finish_assertions()
+contains
+    subroutine reject_include(path, label)
+        character(len=*), intent(in) :: path, label
+        character(len=:), allocatable :: authored
+        type(input_inventory_t) :: rejected
+
+        authored = read_text(project//'/CMakeLists.txt')
+        call write_text(project//'/CMakeLists.txt', authored// &
+            'target_include_directories(probe PRIVATE "'//path//'" )'//nl)
+        backend = detect_backend(project)
+        call cmake_capture_inventory(backend, rejected, ierr, message)
+        call assert_true(ierr /= 0, label//' is rejected')
+        call cmake_capture_cleanup(rejected, cleanup_status)
+        call assert_true(cleanup_status == 0, label//' capture metadata cleaned')
+        call write_text(project//'/CMakeLists.txt', authored)
+    end subroutine reject_include
 end program test_cmake_capture_inputs

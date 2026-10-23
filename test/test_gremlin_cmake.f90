@@ -111,6 +111,7 @@ program test_gremlin_cmake
                     'target_link_libraries(marker PRIVATE value_dep raw_dep)'// &
                     new_line('a')// &
                   'target_include_directories(marker PRIVATE "${CMAKE_BINARY_DIR}" '// &
+                    '"${CMAKE_CURRENT_SOURCE_DIR}/optional/include" '// &
                     '"${VALUE_PROVIDER_BUILD}/include" '// &
                     '"${CMAKE_CURRENT_SOURCE_DIR}/.venv/include")'// &
                     new_line('a')// &
@@ -207,6 +208,27 @@ program test_gremlin_cmake
     rc = c_unlink(child_runs//c_null_char)
     rc = c_unlink(generation_builds//c_null_char)
     call scoped_lane_phase()
+    call make_directory(project//'/optional/include')
+    call write_text(project//'/optional/include/hidden.inc', &
+        'integer, parameter :: hidden_header = 37')
+    call wait_result(previous, 'FAIL', generation)
+    call assert_true(generation /= previous, &
+        'materialized include directory wakes resident and changes compilation')
+    previous = generation
+    call write_text(project//'/optional/include/hidden.inc', &
+        'integer, parameter :: hidden_header = 31')
+    call wait_result(previous, 'PASS', generation)
+    call assert_true(generation /= previous, &
+        'materialized header remains a captured input')
+    previous = generation
+    rc = c_unlink(project//'/optional/include/hidden.inc'//c_null_char)
+    call assert_true(rc == 0, 'optional header can restore the fallback include')
+    call wait_result(previous, 'PASS', generation)
+    first_model = status_field('active_model')
+    first_model_generation = status_field('active_model_generation')
+    previous = generation
+    rc = c_unlink(child_runs//c_null_char)
+    rc = c_unlink(generation_builds//c_null_char)
     call write_marker(.true.)
     call wait_result(previous, 'BUILD_FAIL', generation)
     call assert_equal_string(generation, previous, &
@@ -785,9 +807,8 @@ contains
                     .and. json_string_value(json_member(failure, 'case_id')) == &
                     'registered_marker') return
             end if
-            if (gremlin_field(status, 'last_outcome') == outcome) then
-                if (outcome == 'BUILD_FAIL' .or. current /= old) return
-            end if
+            if (outcome == 'BUILD_FAIL' .and. &
+                gremlin_field(status, 'last_outcome') == outcome) return
             if (outcome == 'CAPTURE_FAIL' .and. &
                 (gremlin_field(status, 'state') == 'capture_failed' .or. &
                  gremlin_field(status, 'state') == 'error')) then

@@ -201,7 +201,12 @@ targets while `--target` selects registered test names; neither changes native
 project flags. Declared prebuilt `*_BUILD` providers capture their include/lib
 inputs and real Git HEAD provenance for the observed CMakeCache source probe.
 Explicit target include directories, including system and virtual-environment
-headers, are captured and fingerprinted. Frozen cache hints retain internal
+headers, are captured and fingerprinted.
+Absent include-search directories under ordinary captured project subtrees
+remain absent in frozen views; their later creation changes the generation.
+Accepted search paths are rechecked without following links during rediscovery.
+Missing referenced files, directory symlinks and undeclared external roots
+retain their strict input checks. Frozen cache hints retain internal
 find-package header paths. Original header trees must also remain unchanged
 through configuration and building: project code can force absolute SDK paths
 despite those hints. Changed trees fail explicitly, including on a cache hit.

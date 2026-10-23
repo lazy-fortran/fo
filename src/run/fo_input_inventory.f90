@@ -74,10 +74,18 @@ module fo_input_inventory
     public :: input_inventory_revalidate, input_inventory_discover_cmake
     public :: cmake_inputs_revalidate
     public :: input_inventory_cmake_reference
+    public :: input_inventory_cmake_missing_include
+    public :: input_inventory_cmake_include_search
     public :: input_inventory_rediscover
     public :: alias_root, hex_value, safe_relative_path
 
     interface
+        integer(c_int) function c_project_path_state(root, relative) &
+                bind(C, name='fo_c_generation_project_path_state')
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: root(*), relative(*)
+        end function c_project_path_state
+
         integer(c_int) function c_list_input_tree(root, manifest, &
                 exclude_root_outputs) bind(C, name='fo_c_generation_list_input_tree')
             import :: c_char, c_int
@@ -92,6 +100,62 @@ module fo_input_inventory
     end interface
 
 contains
+
+    logical function input_inventory_cmake_missing_include(project, path) &
+            result(missing)
+        character(len=*), intent(in) :: project, path
+
+        missing = cmake_include_state(project, path) == 1
+    end function input_inventory_cmake_missing_include
+
+    integer function cmake_include_state(project, path) result(state)
+        character(len=*), intent(in) :: project, path
+        character(len=:), allocatable :: relative
+
+        state = -1
+        if (index(path, trim(project)//'/') /= 1) return
+        relative = path(len_trim(project) + 2:)
+        if (.not. safe_relative_path(relative)) return
+        ! Only ordinary project subtrees are rediscovered by the whole-tree
+        ! scan. An omitted environment/cache subtree still needs declaration.
+        if (ignored_input_path(relative, .true., .true.)) return
+        if (inside_cmake_output(project, relative)) return
+        state = int(c_project_path_state(trim(project)//c_null_char, &
+            relative//c_null_char))
+    end function cmake_include_state
+
+    subroutine input_inventory_cmake_include_search(inventory, path, ierr, message)
+        type(input_inventory_t), intent(inout) :: inventory
+        character(len=*), intent(in) :: path
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+        character(len=:), allocatable :: project, relative
+        type(input_declaration_t) :: declaration
+        type(input_declaration_t), allocatable :: grown(:)
+        integer :: root_index, i
+
+        ierr = 1
+        message = 'unsupported captured CMake include-search path: '//path
+        root_index = alias_root(inventory, 'project')
+        if (root_index == 0) return
+        project = trim(inventory%roots(root_index)%physical_path)
+        if (cmake_include_state(project, path) < 0) return
+        relative = path(len(project) + 2:)
+        ierr = 0
+        message = ''
+        do i = 1, size(inventory%declarations)
+            if (inventory%declarations(i)%role /= 'cmake-include-search') cycle
+            if (inventory%declarations(i)%relative_path == relative) return
+        end do
+        declaration%root_alias = 'project'
+        declaration%relative_path = relative
+        declaration%role = 'cmake-include-search'
+        declaration%expected_kind = INPUT_DIRECTORY
+        allocate(grown(size(inventory%declarations) + 1))
+        grown(:size(inventory%declarations)) = inventory%declarations
+        grown(size(grown)) = declaration
+        call move_alloc(grown, inventory%declarations)
+    end subroutine input_inventory_cmake_include_search
 
     subroutine input_inventory_cmake_reference(inventory, path, ierr, message)
         !! CMake may explicitly compile inputs in a directory omitted from the
@@ -674,6 +738,14 @@ contains
         if (ierr /= 0) return
         if (.not. allocated(expected%declarations)) return
         do i = 1, size(expected%declarations)
+            if (expected%declarations(i)%root_alias == 'project' .and. &
+                expected%declarations(i)%role == 'cmake-include-search') then
+                call input_inventory_cmake_include_search(observed, &
+                    trim(project_dir)//'/'// &
+                    trim(expected%declarations(i)%relative_path), ierr, message)
+                if (ierr /= 0) return
+                cycle
+            end if
             if (expected%declarations(i)%root_alias /= 'project' .or. &
                 expected%declarations(i)%role /= 'cmake-referenced-input') then
                 ierr = 1
