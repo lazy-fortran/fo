@@ -989,7 +989,7 @@ contains
         type(execution_view_t), intent(in) :: view
 
         integer :: unit, ios
-        character(len=8) :: completeness
+        character(len=len('incomplete')) :: completeness
 
         completeness = 'complete'
         if (.not. view%complete) completeness = 'incomplete'
