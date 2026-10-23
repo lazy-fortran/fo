@@ -10,7 +10,7 @@ module fo_cmake_generation
         input_inventory_cmake_reference, input_inventory_cmake_missing_include, &
         input_inventory_cmake_include_search
     use fo_fs, only: fs_make_dir, fs_write_text, fs_collect_files, fs_remove_tree, &
-        fs_realpath
+        fs_realpath, fs_path_is_absolute
     use fo_util, only: make_tmpfile, delete_tmpfile, read_text_file, &
         read_text_file_alloc
     use fo_dep_resolve, only: normalize_path
@@ -192,7 +192,7 @@ contains
                 kind /= 'FILEPATH' .and. kind /= 'INTERNAL') cycle
             if (key == 'CMAKE_INSTALL_PREFIX') cycle
             if (index(key, 'CMAKE_FIND_PACKAGE_REDIRECTS_DIR') == 1) cycle
-            if (kind == 'PATH' .and. len(value) > 0) then
+            if (kind == 'PATH' .and. fs_path_is_absolute(value)) then
                 call canonical_directory(value, normalized)
                 do i = 1, n_roots
                     if (trim(normalized) /= trim(roots(i))) cycle
