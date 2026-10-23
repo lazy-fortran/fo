@@ -162,7 +162,10 @@ contains
         integer :: poll
 
         found = .false.
+        ! The default status document is a summary; coverage needs full detail.
         call arguments('status')
+        call list_add(args, '--detail')
+        call list_add(args, 'full')
         do poll = 1, 1200
             call gremlin_json(driver, project, cache, state, args, reply, process)
             if (process%exit_code /= 0) return
