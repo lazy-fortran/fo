@@ -118,6 +118,12 @@ program test_gremlin_campaign_resolution
     call prior_generation_case_passed(read_session, changed, 'probe', passed, ierr, message)
     call assert_true(.not. passed, &
         'incompatible earlier PASS cannot confirm regression')
+    call receipt('descendant-skip', second, oracle, 'SKIP')
+    call campaign_failures(session, failures, ierr, message)
+    call assert_true(ierr == JOURNAL_OK .and. size(failures) == 1, &
+        'a native skip adds no separate failure history')
+    call assert_true(failures(1)%pending, &
+        'a compatible descendant SKIP cannot repair a failure')
     call receipt('repair', second, oracle, 'PASS')
     call campaign_failures(session, failures, ierr, message)
     call assert_true(.not. failures(1)%pending, &
@@ -220,6 +226,7 @@ contains
 
         outcome = 'fail'
         if (verdict == 'PASS') outcome = 'pass'
+        if (verdict == 'SKIP') outcome = 'skip'
         record = '{"completion_id":"'//id//'","case_id":"probe",'// &
             '"generation":"'//generation//'","oracle_identity":"'// &
             identity//'","status":"'//verdict//'","outcome":"'//outcome//'"}'
