@@ -794,7 +794,7 @@ contains
         character(:), allocatable :: key, path, line, kind, value, module_root
         type(json_parser_t) :: parser
         type(json_event_t) :: event
-        integer :: n_files, i, j, depth, count, cursor
+        integer :: n_files, i, j, depth, count, cursor, provider_root
         character(len=64) :: ancestors(64)
         character(len=PATH_LEN) :: pending_paths(64)
         logical :: generated(64), cmake_input(64), captured, exists, include_path
@@ -907,8 +907,20 @@ contains
                             if (include_path .and. present(n_roots) .and. &
                                 .not. inside(normalized, build)) then
                                 captured = trim(physical) == trim(project)
+                                provider_root = 0
                                 do j = 1, count
-                                    if (inside(physical, roots(j))) captured = .true.
+                                    if (.not. inside(physical, roots(j))) cycle
+                                    if (index(labels(j), 'cmake-provider:') == 1 .and. &
+                                        trim(physical) /= trim(roots(j))) then
+                                        ! Providers freeze their include/lib only.
+                                        if (.not. inside(physical, trim(roots(j))// &
+                                            '/include') .and. .not. inside(physical, &
+                                            trim(roots(j))//'/lib')) then
+                                            provider_root = j
+                                            cycle
+                                        end if
+                                    end if
+                                    captured = .true.
                                 end do
                                 if (.not. captured) then
                                     digest_parts(1) = physical
@@ -918,6 +930,11 @@ contains
                                         ierr, message, .false.)
                                     if (ierr /= 0) return
                                     labels(n_roots) = 'cmake-include:'//digest(:16)
+                                    if (provider_root > 0) then
+                                        j = len_trim(roots(provider_root)) + 1
+                                        bundles(n_roots) = &
+                                            trim(bundles(provider_root))//physical(j:)
+                                    end if
                                     count = n_roots
                                 end if
                             end if
