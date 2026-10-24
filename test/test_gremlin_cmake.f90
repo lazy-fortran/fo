@@ -2,7 +2,8 @@ program test_gremlin_cmake
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
     use, intrinsic :: iso_fortran_env, only: int64
     use fo_test_harness, only: string_list_t, process_result_t, list_add, &
-              make_directory, write_text, read_text, assert_true, assert_equal_string, &
+              make_directory, remove_tree, write_text, read_text, assert_true, &
+                               assert_equal_string, &
                                assert_equal_integer, &
                                finish_assertions, run_process, assert_process_ok
     use fo_test_gremlin_oracle, only: gremlin_setup, gremlin_json, &
@@ -113,6 +114,7 @@ program test_gremlin_cmake
                   'target_include_directories(marker PRIVATE "${CMAKE_BINARY_DIR}" '// &
                     '"${CMAKE_CURRENT_SOURCE_DIR}/optional/include" '// &
                     '"${VALUE_PROVIDER_BUILD}/include" '// &
+                    '"${VALUE_PROVIDER_BUILD}/_deps/nested-build/include" '// &
                     '"${CMAKE_CURRENT_SOURCE_DIR}/.venv/include")'// &
                     new_line('a')// &
                  'file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/sandbox")'//new_line('a')// &
@@ -165,6 +167,7 @@ program test_gremlin_cmake
         new_line('a')//'endif()'//new_line('a')// &
         'file(TOUCH "${OUTPUT}")'//new_line('a'))
     call initialize_project_git()
+    call native_provider_reference()
     call install_tool_trap()
     ! The build counts below observe the delegated `cmake --build` through the
     ! trap; the native route (fo_cmake_build) never invokes it.
@@ -258,6 +261,14 @@ program test_gremlin_cmake
     call assert_true(generation /= previous, 'prebuilt provider edit wakes resident')
     previous = generation
     call write_provider(17)
+    call wait_result(previous, 'PASS', generation)
+    previous = generation
+    call write_nested_provider(41)
+    call wait_result(previous, 'FAIL', generation)
+    call assert_true(generation /= previous, &
+        'referenced nested provider header edit wakes resident')
+    previous = generation
+    call write_nested_provider(29)
     call wait_result(previous, 'PASS', generation)
     previous = generation
     call write_hidden_header(37)
@@ -687,6 +698,34 @@ contains
         call write_text(project//'/tracked.txt', 'captured dirty state')
     end subroutine initialize_project_git
 
+    subroutine native_provider_reference()
+        type(string_list_t) :: command
+        type(process_result_t) :: observed
+        call list_add(command, 'cmake')
+        call list_add(command, '--preset')
+        call list_add(command, 'cpu')
+        call run_process(command, project, observed)
+        call assert_process_ok(observed, 'native provider consumer configures')
+        command = string_list_t()
+        call list_add(command, 'cmake')
+        call list_add(command, '--build')
+        call list_add(command, 'build')
+        call list_add(command, '--target')
+        call list_add(command, 'marker')
+        call run_process(command, project, observed)
+        call assert_process_ok(observed, 'native provider consumer builds')
+        command = string_list_t()
+        call list_add(command, 'ctest')
+        call list_add(command, '--test-dir')
+        call list_add(command, 'build')
+        call list_add(command, '-R')
+        call list_add(command, '^registered_marker$')
+        call list_add(command, '--output-on-failure')
+        call run_process(command, project, observed)
+        call assert_process_ok(observed, 'native nested provider header passes')
+        call remove_tree(project//'/build')
+    end subroutine native_provider_reference
+
     subroutine make_provider()
         type(string_list_t) :: command
         type(process_result_t) :: observed
@@ -694,6 +733,7 @@ contains
         call make_directory(provider_source)
         call make_directory(provider//'/include')
         call make_directory(provider//'/lib')
+        call make_directory(provider//'/_deps/nested-build/include')
         call write_text(provider_source//'/README', 'prebuilt provider provenance')
         call list_add(command, 'git')
         call list_add(command, 'init')
@@ -726,6 +766,7 @@ contains
         call write_text(provider//'/CMakeCache.txt', &
             'CMAKE_HOME_DIRECTORY:INTERNAL='//provider_source//new_line('a'))
         call write_provider(17)
+        call write_nested_provider(29)
     end subroutine make_provider
 
     subroutine write_provider(value)
@@ -735,6 +776,14 @@ contains
         call write_text(provider//'/include/provider.inc', &
             'integer, parameter :: provider_header = '//trim(number))
     end subroutine write_provider
+
+    subroutine write_nested_provider(value)
+        integer, intent(in) :: value
+        character(len=8) :: number
+        write(number, '(i0)') value
+        call write_text(provider//'/_deps/nested-build/include/nested.inc', &
+            'integer, parameter :: nested_provider_header = '//trim(number))
+    end subroutine write_nested_provider
 
     subroutine write_dependency(value)
         integer, intent(in) :: value
@@ -765,11 +814,14 @@ contains
                         new_line('a')//'implicit none'//new_line('a')// &
                         'logical :: exists'//new_line('a')// &
                         'include "provider.inc"'//new_line('a')// &
+                        'include "nested.inc"'//new_line('a')// &
                         'include "hidden.inc"'//new_line('a')// &
                         'if (hidden_header /= 31 .or. hidden_value /= 23) '// &
                         'error stop "hidden input changed"'//new_line('a')// &
                         'if (provider_header /= 17) error stop "provider changed"'// &
                         new_line('a')// &
+                        'if (nested_provider_header /= 29) '// &
+                        'error stop "nested provider changed"'//new_line('a')// &
                         'inquire(file="setup.ran", exist=exists)'//new_line('a')// &
            'if (.not. exists) error stop "CTest fixture or cwd lost"'//new_line('a')// &
             'if (result /= 7) error stop "dependency result changed"'//new_line('a')// &
