@@ -8,7 +8,7 @@ module fo_cmake_generation
     use fo_cmake_native_snapshot, only: native_snapshot_write
     use fo_input_inventory, only: input_inventory_t, input_inventory_discover_cmake, &
         input_inventory_cmake_reference, input_inventory_cmake_missing_include, &
-        input_inventory_cmake_include_search
+        input_inventory_cmake_include_search, input_inventory_cmake_provider_file
     use fo_fs, only: fs_make_dir, fs_write_text, fs_collect_files, fs_remove_tree, &
         fs_realpath, fs_path_is_absolute
     use fo_util, only: make_tmpfile, delete_tmpfile, read_text_file, &
@@ -16,7 +16,9 @@ module fo_cmake_generation
     use fo_dep_resolve, only: normalize_path
     use fo_cache, only: cache_digest, HASH_LEN
     use fo_process, only: argv_push, process_run_argv_logged
-    use fo_cmake_model, only: cmake_model_load_cases
+    use fo_cmake_model, only: cmake_model_load_cases, cmake_plan_load, &
+        cmake_plan_t, cmake_split_fragment
+    use fx_string, only: string_t
     use fo_project_model, only: project_model_t, model_init
     use fx_json_parse, only: json_parser_t, json_event_t, json_parser_init_strict, &
         json_parser_next, JSON_KEY, JSON_STRING, JSON_BOOL, JSON_ERROR, &
@@ -248,10 +250,52 @@ contains
         call input_inventory_discover_cmake(backend%project_dir, roots(:n_roots), &
             bundles(:n_roots), labels(:n_roots), trim(metadata_dir), inventory, &
             ierr, message, freeze_inputs=.true.)
+        if (ierr == 0) call capture_provider_link_inputs(backend, inventory, &
+            ierr, message)
         if (ierr == 0) call validate_cmake_paths(backend, roots(:n_roots), &
             ierr, message, inventory)
         if (ierr /= 0) call fs_remove_tree(trim(metadata_dir), cleanup_status)
     end subroutine cmake_capture_inventory
+
+    subroutine capture_provider_link_inputs(backend, inventory, ierr, message)
+        type(backend_t), intent(inout) :: backend
+        type(input_inventory_t), intent(inout) :: inventory
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+        type(cmake_plan_t) :: plan
+        type(string_t), allocatable :: words(:)
+        character(:), allocatable :: detail, path
+        integer :: i, j, k, n
+
+        ierr = 0
+        message = ''
+        do i = 1, inventory%root_count
+            if (index(inventory%roots(i)%canonical_alias, 'cmake-provider:') == 1) exit
+        end do
+        if (i > inventory%root_count) return
+        call cmake_plan_load(backend%cmake, plan, detail)
+        if (len(detail) > 0) then
+            ierr = 1
+            message = detail
+            return
+        end if
+        do i = 1, size(plan%targets)
+            do j = 1, plan%targets(i)%n_link
+                if (plan%targets(i)%link_roles(j)%s /= 'libraries') cycle
+                call cmake_split_fragment(plan%targets(i)%link_fragments(j)%s, words, n)
+                do k = 1, n
+                    path = words(k)%s
+                    if (len(path) == 0) cycle
+                    if (path(1:1) == '-') cycle
+                    if (.not. fs_path_is_absolute(path)) &
+                        path = plan%build_root//'/'//path
+                    call input_inventory_cmake_provider_file(inventory, path, &
+                        ierr, message)
+                    if (ierr /= 0) return
+                end do
+            end do
+        end do
+    end subroutine capture_provider_link_inputs
 
     subroutine capture_populated_sources(backend, base, n, roots, bundles, &
             labels, names, ierr, message)

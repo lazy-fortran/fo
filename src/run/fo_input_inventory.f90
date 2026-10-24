@@ -11,7 +11,7 @@ module fo_input_inventory
     use fo_dep_resolve, only: normalize_path, join_path, resolved_src_t, &
         resolve_dev_dep_srcs, MAX_RESOLVED
     use fo_registry, only: registry_resolve, registry_config_path
-    use fo_fs, only: fs_identity, fs_path_is_absolute, fs_realpath
+    use fo_fs, only: fs_identity, fs_path_is_absolute, fs_realpath, fs_collect_files
     use fo_util, only: make_tmpfile, delete_tmpfile, read_text_file
     use fx_action_result_store, only: action_result_file_mode, ACTION_RESULT_OK
     implicit none
@@ -73,7 +73,7 @@ module fo_input_inventory
     public :: input_inventory_discover, input_inventory_declarations_from_config
     public :: input_inventory_revalidate, input_inventory_discover_cmake
     public :: cmake_inputs_revalidate
-    public :: input_inventory_cmake_reference
+    public :: input_inventory_cmake_reference, input_inventory_cmake_provider_file
     public :: input_inventory_cmake_missing_include
     public :: input_inventory_cmake_include_search
     public :: input_inventory_rediscover
@@ -242,6 +242,101 @@ contains
         end do
     end subroutine input_inventory_cmake_reference
 
+    subroutine input_inventory_cmake_provider_file(inventory, path, ierr, message)
+        !! Only File-API-referenced provider artifacts extend the prebuilt input
+        !! boundary. Directory aliases and nonregular leaves remain unsupported.
+        type(input_inventory_t), intent(inout) :: inventory
+        character(len=*), intent(in) :: path
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+        character(:), allocatable :: root, relative, alias
+        character(len=PATH_LEN) :: canonical_root, parent
+        type(input_declaration_t), allocatable :: grown(:)
+        integer :: i, j, slash
+        logical :: ok
+
+        ierr = 0
+        message = ''
+        do i = 1, inventory%root_count
+            alias = trim(inventory%roots(i)%canonical_alias)
+            if (index(alias, 'cmake-provider:') /= 1) cycle
+            root = trim(inventory%roots(i)%physical_path)
+            call fs_realpath(root, canonical_root, ok)
+            if (.not. ok) cycle
+            if (index(path, root//'/') == 1) then
+                relative = path(len(root) + 2:)
+            else if (index(path, trim(canonical_root)//'/') == 1) then
+                relative = path(len_trim(canonical_root) + 2:)
+            else
+                cycle
+            end if
+            if (.not. safe_relative_path(relative)) then
+                ierr = 1
+                message = 'unsafe referenced CMake provider file: '//path
+                return
+            end if
+            do j = 1, inventory%entry_count
+                if (inventory%entries(j)%root_alias == alias .and. &
+                    inventory%entries(j)%relative_path == relative) return
+            end do
+            slash = index(relative, '/', back=.true.)
+            parent = canonical_root
+            if (slash > 0) then
+                call fs_realpath(root//'/'//relative(:slash - 1), parent, ok)
+                if (.not. ok .or. trim(parent) /= &
+                    trim(canonical_root)//'/'//relative(:slash - 1)) then
+                    ierr = 1
+                    message = 'unsupported referenced CMake provider alias: '//path
+                    return
+                end if
+            end if
+            call add_file_entry(inventory, i, alias, relative, &
+                'cmake-provider-input', .false., ierr, message)
+            if (ierr /= 0) return
+            allocate(grown(size(inventory%declarations) + 1))
+            grown(:size(inventory%declarations)) = inventory%declarations
+            grown(size(grown)) = input_declaration_t()
+            grown(size(grown))%root_alias = alias
+            grown(size(grown))%relative_path = relative
+            grown(size(grown))%role = 'cmake-provider-link-input'
+            call move_alloc(grown, inventory%declarations)
+            call canonicalize_inventory(inventory, ierr, message)
+            return
+        end do
+    end subroutine input_inventory_cmake_provider_file
+
+    subroutine capture_provider_modules(inventory, root_index, ierr, message)
+        !! Native Fortran providers commonly emit interface files in their build
+        !! root. Capture regular interfaces there without scanning build outputs.
+        type(input_inventory_t), intent(inout) :: inventory
+        integer, intent(in) :: root_index
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+        character(len=PATH_LEN), allocatable :: files(:)
+        character(len=5), parameter :: suffixes(2) = &
+            [character(len=5) :: '.mod', '.smod']
+        character(:), allocatable :: root, alias
+        integer :: i, j, n
+
+        root = trim(inventory%roots(root_index)%physical_path)
+        alias = trim(inventory%roots(root_index)%canonical_alias)
+        allocate(files(2048))
+        do i = 1, size(suffixes)
+            call fs_collect_files(root, '', trim(suffixes(i)), '', files, n, &
+                recursive=.false., ierr=ierr)
+            if (ierr /= 0) then
+                message = 'cannot enumerate CMake provider module interfaces'
+                return
+            end if
+            do j = 1, n
+                call add_file_entry(inventory, root_index, alias, &
+                    trim(files(j)(len(root) + 2:)), 'cmake-provider-input', &
+                    .false., ierr, message)
+                if (ierr /= 0) return
+            end do
+        end do
+    end subroutine capture_provider_modules
+
     subroutine input_inventory_discover_cmake(project_dir, sources, bundles, &
             labels, metadata_dir, inventory, ierr, message, freeze_inputs)
         character(len=*), intent(in) :: project_dir, sources(:), bundles(:)
@@ -284,6 +379,8 @@ contains
                 message, bundles(i))
             if (ierr /= 0) return
             if (index(labels(i), 'cmake-provider:') == 1) then
+                call capture_provider_modules(inventory, root_index, ierr, message)
+                if (ierr /= 0) return
                 do j = 1, size(provider_dirs)
                     inquire(file=trim(sources(i))//'/'//trim(provider_dirs(j)), &
                             exist=provider_dir_exists)
@@ -738,6 +835,20 @@ contains
         if (ierr /= 0) return
         if (.not. allocated(expected%declarations)) return
         do i = 1, size(expected%declarations)
+            if (index(expected%declarations(i)%root_alias, 'cmake-provider:') == 1 &
+                .and. expected%declarations(i)%role == 'cmake-provider-link-input') then
+                n = alias_root(observed, expected%declarations(i)%root_alias)
+                if (n == 0) then
+                    ierr = 1
+                    message = 'captured CMake provider root is unavailable'
+                    return
+                end if
+                call input_inventory_cmake_provider_file(observed, &
+                    trim(observed%roots(n)%physical_path)//'/'// &
+                    trim(expected%declarations(i)%relative_path), ierr, message)
+                if (ierr /= 0) return
+                cycle
+            end if
             if (expected%declarations(i)%root_alias == 'project' .and. &
                 expected%declarations(i)%role == 'cmake-include-search') then
                 call input_inventory_cmake_include_search(observed, &
