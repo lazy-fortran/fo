@@ -4,6 +4,7 @@ program test_gremlin_execution_view
     use fo_fs, only: fs_path_is_absolute
     use fo_gremlin_execution_view, only: execution_view_t, execution_view_create, &
         execution_view_release, execution_view_copy_app_outputs
+    use fo_gremlin_campaign, only: append_execution_provenance
     use fo_input_inventory, only: input_declaration_t, input_inventory_t, &
         input_inventory_discover, INPUT_FILE
     use fo_process, only: argv_push, process_getcwd, process_run_argv_logged
@@ -173,6 +174,12 @@ program test_gremlin_execution_view
     call read_text_file(trim(partial%cwd)//'/fixtures/input.txt', text)
     call check(index(text, 'frozen fixture') > 0, &
         'incomplete inventory still materializes known declared bytes')
+    call check_provenance_footer(partial, '(incomplete)', &
+        'an incomplete view footer names the whole completeness word')
+    paired = partial
+    paired%complete = .true.
+    call check_provenance_footer(paired, '(complete)', &
+        'a complete view footer names its completeness')
     call execution_view_release(partial, .false., release_status, message)
 
     invalid = inventory
@@ -528,6 +535,20 @@ contains
         close (unit)
         if (status /= 0) error stop 2
     end subroutine runtime_probe
+
+    subroutine check_provenance_footer(view, expected, description)
+        type(execution_view_t), intent(in) :: view
+        character(len=*), intent(in) :: expected, description
+        character(len=512) :: log_file
+        character(len=4096) :: footer
+
+        call make_tmpfile('fo-view-provenance', log_file)
+        call append_execution_provenance(trim(log_file), view)
+        call read_text_file(trim(log_file), footer)
+        call delete_tmpfile(log_file)
+        call check(index(footer, 'fo: execution input inventory: '// &
+            trim(view%inventory_digest)//' '//expected) > 0, description)
+    end subroutine check_provenance_footer
 
     subroutine check(condition, description)
         logical, intent(in) :: condition

@@ -98,6 +98,7 @@ program test_gremlin_coverage
         'a new epoch begins only through the explicit transition')
 
     call check_mixed_outcomes()
+    call check_native_skips()
     call check_stale_writers()
     call check_cursor_rewinds_39_of_40()
 
@@ -312,6 +313,60 @@ contains
         call fs_remove_file(trim(mixed_path))
         call fs_remove_file(trim(mixed_path)//'.lock')
     end subroutine check_mixed_outcomes
+
+    subroutine check_native_skips()
+        type(coverage_epoch_t) :: epoch, reopened
+        type(gremlin_coverage_view_t) :: skipped
+        character(len=16) :: names(43), selected(43)
+        character(len=256) :: path
+        integer :: j, count_selected
+
+        path = 'gremlin-coverage-skips.state'
+        call fs_remove_file(trim(path))
+        do j = 1, size(names)
+            write(names(j), '(a,i2.2)') 'native_', j
+        end do
+        call coverage_open(trim(path), repeat('c', 64), names, size(names), &
+            17, epoch, status, message)
+        do j = 1, 41
+            call coverage_record(epoch, names(j), 'PASS', status, message)
+        end do
+        do j = 42, 43
+            call coverage_record(epoch, names(j), 'SKIP', status, message)
+            call check(status == COVERAGE_OK, 'native skip is a valid terminal result')
+        end do
+        call coverage_view(epoch, skipped)
+        call check(skipped%eligible_count == 43 .and. &
+            skipped%completed_count == 43 .and. skipped%pass_count == 41 .and. &
+            skipped%skip_count == 2 .and. skipped%remaining_count == 0 .and. &
+            skipped%ordinary_skip_count == 2 .and. skipped%ordinary_complete .and. &
+            skipped%green, '43 native completions retain 41 passes and two skips')
+        call coverage_open(trim(path), repeat('c', 64), names, size(names), &
+            17, reopened, status, message, advance_completed=.false.)
+        call check(status == COVERAGE_OK, 'restart restores native skip outcomes')
+        call coverage_next_chunk(reopened, names, 0, size(selected), selected, &
+            count_selected, status)
+        call check(status == COVERAGE_OK .and. count_selected == 0, &
+            'completed native skips are not selected again in the same epoch')
+        call coverage_record(reopened, names(1), 'INFRA_ERROR', status, message)
+        call coverage_view(reopened, skipped)
+        call check(skipped%skip_count == 2 .and. .not. skipped%green, &
+            'skips cannot hide a genuine infrastructure failure')
+        call fs_remove_file(trim(path))
+        call fs_remove_file(trim(path)//'.lock')
+
+        call coverage_open(trim(path), repeat('d', 64), names(1:3), 3, &
+            17, epoch, status, message)
+        do j = 1, 3
+            call coverage_record(epoch, names(j), 'SKIP', status, message)
+        end do
+        call coverage_view(epoch, skipped)
+        call check(skipped%full_coverage .and. skipped%skip_count == 3 .and. &
+            skipped%pass_count == 0 .and. .not. skipped%green, &
+            'an inventory of only native skips is complete but not green')
+        call fs_remove_file(trim(path))
+        call fs_remove_file(trim(path)//'.lock')
+    end subroutine check_native_skips
 
     subroutine corrupt_outcome_file(filename)
         character(len=*), intent(in) :: filename
