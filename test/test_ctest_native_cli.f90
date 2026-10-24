@@ -23,7 +23,7 @@ program test_ctest_native_cli
         'skip', 'untested', 'pass', 'timeout', 'pass', 'pass', 'pass', 'pass', &
         'pass', 'fail', 'untested', 'pass', 'pass', 'pass', 'pass', 'pass', &
         'pass', 'pass']
-    character(:), allocatable :: driver, scratch, build, order, last_test, xml
+    character(:), allocatable :: driver, scratch, build, order, last_test, xml, summary
     type(string_list_t) :: args, env
     type(process_result_t) :: observed
     type(json_value_t) :: report, tests
@@ -69,9 +69,11 @@ program test_ctest_native_cli
     call run_process(args, scratch, observed)
     xml = read_text(xml)
     call assert_true(len(xml) > 0, 'real ctest produced a JUnit report')
+    summary = failed_summary(observed%stdout)
+    call assert_true(len(summary) > 0, 'real ctest listed its failed tests')
     do k = 1, size(NAMES)
         call assert_equal_string(status_of(tests, trim(NAMES(k))), &
-            ctest_verdict(xml, trim(NAMES(k))), 'fo agrees with ctest on '// &
+            ctest_verdict(xml, summary, trim(NAMES(k))), 'fo agrees with ctest on '// &
             trim(NAMES(k)))
     end do
 
@@ -113,9 +115,26 @@ contains
         end do
     end function status_of
 
-    function ctest_verdict(text, name) result(verdict)
-        !! Verdict of a case in a ctest JUnit file, as fo spells it.
-        character(len=*), intent(in) :: text, name
+    function failed_summary(console) result(summary)
+        !! The "The following tests FAILED:" block of ctest's console output.
+        !! Each line names a failed case with its completion status, for example
+        !! "1 - n_timeout (Timeout)". CTest 3.25 and 4.3 both print this
+        !! status, while the JUnit failure message is empty in
+        !! CTest 3.25 and "Timeout" in CTest 4.3 (#248).
+        character(len=*), intent(in) :: console
+        character(:), allocatable :: summary
+        integer :: start
+
+        summary = ''
+        start = index(console, 'The following tests FAILED:')
+        if (start > 0) summary = console(start:)
+    end function failed_summary
+
+    function ctest_verdict(text, summary, name) result(verdict)
+        !! Verdict of a case in a ctest JUnit file, as fo spells it. A failed
+        !! case is a timeout when ctest's failure summary gives it the
+        !! completion status Timeout.
+        character(len=*), intent(in) :: text, summary, name
         character(:), allocatable :: verdict, item
         integer :: first, last
 
@@ -130,7 +149,7 @@ contains
             verdict = 'skip'
         else if (index(item, 'status="fail"') > 0) then
             verdict = 'fail'
-            if (index(item, 'message="Timeout"') > 0) verdict = 'timeout'
+            if (index(summary, ' - '//name//' (Timeout)') > 0) verdict = 'timeout'
         else if (index(item, 'message="SKIP_') > 0) then
             verdict = 'skip'
         else
