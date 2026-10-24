@@ -1115,6 +1115,16 @@ static void admission_collect_garbage(const char *base) {
 }
 #endif
 
+/* An inherited scope delegates only within the admission domain that
+   published it. A process whose FO_GREMLIN_ADMISSION_DIR names another domain,
+   such as a test fixture's private one, admits in that domain instead of
+   borrowing the enclosing lane's slots. */
+static int admission_scope_in_domain(const char *scope, const char *base) {
+    size_t n = strlen(base);
+    /* admission_publish names every scope "<base>/scopes/<pid>-XXXXXX". */
+    return strncmp(scope, base, n) == 0 && strncmp(scope + n, "/scopes/", 8) == 0;
+}
+
 int fo_gremlin_host_lease_acquire_weighted(const char *kind, int capacity,
                                            int weight, int *fds, int *slots,
                                            int *authority, int *guardian, char *scope,
@@ -1142,7 +1152,7 @@ int fo_gremlin_host_lease_acquire_weighted(const char *kind, int capacity,
         strcpy(previous, hint);
     }
     uint64_t h = fo_fnv1a_text(FO_FNV1A_SEED, kind);
-    if (hint && *hint) {
+    if (hint && *hint && admission_scope_in_domain(hint, base)) {
         gate = admission_gate(hint, 0);
         if (gate >= 0 && admission_parent(hint, h, &parent)) {
             if (weight > parent.weight) { e = E2BIG; goto done; }

@@ -493,6 +493,17 @@ contains
                 'unrelated contender remains excluded by the real outer global lease')
             call finish_admission_child(base, child)
         end do
+        ! Both delegated slots are held by siblings, so a process that still
+        ! borrowed the inherited scope would block here. A process naming its
+        ! own admission domain admits there instead (fixture isolation).
+        base = trim(root)//'/private-domain'
+        call start_admission_child(exe, resource, '2', base, 'domain', '', child)
+        call wait_file(trim(base)//'.ready', 500)
+        call read_admission_result(base, ierr, count, busy_number, pid, old_scope)
+        call assert(ierr == 0 .and. count == 2 .and. busy_number == 0 .and. &
+            index(old_scope, trim(base)//'.domain/scopes/') == 1, &
+            'a private admission domain ignores an inherited scope of another domain')
+        call finish_admission_child(base, child)
         call gremlin_host_lease_release(group, ierr, message)
         call assert(ierr == 0 .and. group%count == 2 .and. group%closing, &
             'outer release revokes fresh delegation but retains active child capacity')
@@ -1049,6 +1060,9 @@ contains
         if (ierr /= 0) stop 1
         if (mode == 'global') then
             ierr = c_unsetenv('FO_GREMLIN_ADMISSION_SCOPE'//c_null_char)
+        else if (mode == 'domain') then
+            ierr = c_setenv('FO_GREMLIN_ADMISSION_DIR'//c_null_char, &
+                trim(base)//'.domain'//c_null_char, 1_c_int)
         else if (mode == 'hint') then
             ierr = c_setenv('FO_GREMLIN_ADMISSION_SCOPE'//c_null_char, &
                 trim(hint)//c_null_char, 1_c_int)
