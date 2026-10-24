@@ -207,7 +207,11 @@ remain absent in frozen views; their later creation changes the generation.
 Accepted search paths are rechecked without following links during rediscovery.
 Missing referenced files, directory symlinks and undeclared external roots
 retain their strict input checks. Frozen cache hints retain internal
-find-package header paths. Original header trees must also remain unchanged
+find-package header paths. Standard external `Package_DIR` hints keep installed
+package configs at their native SDK location, because imported targets can
+derive their prefix relative to that file. The package module tree remains
+captured and fingerprinted, and declared source providers keep their immutable
+relocation. Original header trees must also remain unchanged
 through configuration and building: project code can force absolute SDK paths
 despite those hints. Changed trees fail explicitly, including on a cache hit.
 Authored configure inputs also declare external CMake module directories.

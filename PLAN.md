@@ -67,6 +67,16 @@ failure detection. The workspace master plan, when present, owns delivery order.
   the real FortFEM circulant consumer. The synthetic transitive/dev-dependency
   execution oracle fails against the original driver and passes the repair.
 
+## Native CMake package prefixes (2026-10-22)
+
+- [V] A frozen SIMPLE configure relocates Boost's package config and breaks
+  its self-relative include prefix (`boost_headers-config.cmake:24`).
+- Preserve standard external package hints while retaining package/module
+  fingerprints, header guards and immutable declared-source relocation.
+- [V] The synthetic CamelCase/hyphenated package fixture fails on 4c86209 and
+  passes with the fix, including rejection of a changed SDK's cached PASS.
+  Existing parent-module and capture-input regressions pass.
+
 ## Destination
 
 Fo is the simplest, fastest and most trustworthy Fortran build and test tool
