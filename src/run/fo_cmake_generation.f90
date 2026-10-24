@@ -190,6 +190,18 @@ contains
             pending_help = ''
             call cache_entry(line, key, kind, value)
             if (len(key) == 0) cycle
+            ! Untyped -D overrides remain values to replay. CMake's cache
+            ! setter defaults an unspecified type to STRING, not UNINITIALIZED.
+            if (kind == 'UNINITIALIZED') kind = 'STRING'
+            ! CMake replaces its own compiler help on an untyped -D update.
+            ! Keep custom cache documentation, including custom compiler help.
+            if (len(key) > 15) then
+                if (key(:6) == 'CMAKE_' .and. &
+                    key(len(key) - 8:) == '_COMPILER') then
+                    if (help == 'No help, variable specified on the command line.') &
+                        help = key(7:len(key) - 9)//' compiler'
+                end if
+            end if
             if (kind /= 'BOOL' .and. kind /= 'STRING' .and. kind /= 'PATH' .and. &
                 kind /= 'FILEPATH' .and. kind /= 'INTERNAL') cycle
             if (key == 'CMAKE_INSTALL_PREFIX') cycle
