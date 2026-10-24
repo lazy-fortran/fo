@@ -202,8 +202,12 @@ contains
             if (j <= n) cycle
             allocate (grown(n + 1))
             grown(:n) = states
-            grown(n + 1) = case_state_t(trim(id), trim(status), &
-                trim(record_generation), trim(log))
+            ! Assign components directly: GNU Fortran 12 -O2 builds
+            ! case_state_t(trim(id), ...) with wrong component lengths.
+            grown(n + 1)%id = trim(id)
+            grown(n + 1)%status = trim(status)
+            grown(n + 1)%generation = trim(record_generation)
+            grown(n + 1)%log = trim(log)
             call move_alloc(grown, states)
         end do
         ! A passing build is not a case.

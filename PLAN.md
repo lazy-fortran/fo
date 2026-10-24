@@ -256,6 +256,11 @@ Nix/Spack replacement, CI/promotion engine or agent orchestrator.
   be2de15ed0869365b9cfd6f996a12454a33e482b. Fx #70 preserves manifest
   field allocation; #74 flushes complete MCP responses and sizes JSON escapes
   exactly. GCC12/Flang21 JSON and interactive MCP tests pass (21817090).
+  FortFront #3041 (2b42759f743c672902bd1efd6341c745e92fa093) and Fo avoid
+  structure constructors with trim(...) or component-reference arguments for
+  deferred-length character components, which GNU Fortran 12.2 miscompiles
+  (GCC PR 82774, fixed in 13.4 and 14). With that pin, `fo graph` on the
+  SUNDIALS bind(c) enum modules no longer aborts on sCluster (3363072, 3363123).
 - [V] Native development C objects must precede their provider archive in link
   arguments. The independent forwarding-adapter regression fails before this
   correction (21817084) and all 295 backend checks plus CMake pass afterward
