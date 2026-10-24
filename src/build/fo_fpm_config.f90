@@ -18,6 +18,7 @@ module fo_fpm_config
     public :: MAX_LINK_LIBS, add_link_lib
     public :: MAX_EXTERNAL_MODULES
     public :: valid_manifest_module_name, absolute_dependency_destination
+    public :: command_run, pkg_config_run
 
     ! How a dependency is acquired, derived from which fields the manifest set.
     ! path = local dir (mutable, may be edited); git = cloned at a ref (pinned,
@@ -204,6 +205,9 @@ module fo_fpm_config
         logical :: netcdf = .false.
         logical :: stdlib = .false.
         logical :: minpack = .false.
+        ! pkg-config packages a metapackage resolved to, space separated, so
+        ! the input inventory can record the metadata file behind its flags.
+        character(len=512) :: provider_packages = ''
         ! [fortran] implicit-typing / implicit-external.  fpm defaults both to
         ! false, meaning the strict flags apply; a manifest that sets one to
         ! true is asking for the corresponding flag to be left off, which is
@@ -280,6 +284,7 @@ contains
         c%install_module_dir = ''
         c%openmp = .false.
         c%blas = .false.
+        c%provider_packages = ''
         c%mpi = .false.
         c%hdf5 = .false.
         c%netcdf = .false.
@@ -2665,6 +2670,7 @@ contains
             return
         end if
         call append_pkg_config_flags(output, config)
+        config%provider_packages = trim(config%provider_packages)//' '//trim(package)
     end subroutine import_pkg_config_package
 
     logical function pkg_config_available()
