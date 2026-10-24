@@ -531,6 +531,7 @@ contains
         integer, intent(out) :: exit_code
         character(:), allocatable, optional, intent(out) :: output
         type(string_list_t) :: command
+        character(:), allocatable :: captured
         integer :: i
 
         command = argv('git', '-C', directory)
@@ -538,7 +539,9 @@ contains
             call list_add(command, trim(arguments(i)))
         end do
         if (present(output)) then
-            call run_list(command, exit_code, output)
+            call run_list(command, exit_code, captured)
+            ! Transfer the character length together with the allocation.
+            call move_alloc(captured, output)
         else
             call run_list(command, exit_code)
         end if
