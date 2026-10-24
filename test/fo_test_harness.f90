@@ -14,6 +14,7 @@ module fo_test_harness
     public :: make_scratch, join_path
     public :: make_directory, make_symlink, move_path, remove_path, remove_tree
     public :: current_directory, write_text, write_lines, append_text, read_text
+    public :: set_read_text_probe
     public :: file_exists, environment_value, run_process, assert_true, assert_equal_string
     public :: assert_equal_integer, assert_contains, assert_not_contains
     public :: assert_file_exists, assert_file_absent, assert_file_equals
@@ -58,6 +59,13 @@ module fo_test_harness
         end subroutine teardown_hook_i
     end interface
     procedure(teardown_hook_i), pointer, save :: teardown_hook => null()
+
+    abstract interface
+        subroutine read_text_probe_i(path)
+            character(len=*), intent(in) :: path
+        end subroutine read_text_probe_i
+    end interface
+    procedure(read_text_probe_i), pointer, save :: read_text_probe => null()
 
     type, bind(C) :: pollfd_t
         integer(c_int) :: descriptor
@@ -1431,17 +1439,56 @@ contains
     end subroutine append_text
 
     function read_text(path) result(text)
+        !! Whole-file read that tolerates a concurrent rewrite. Tools under test
+        !! (fo watch --fmt, editors) may truncate and rewrite a file in place
+        !! while a fixture polls it, so a read whose size or mtime changed, or
+        !! that met end of file early, is retried a bounded number of times.
         character(len=*), intent(in) :: path
         character(:), allocatable :: text
-        integer :: unit, io_status, byte_count
+        integer, parameter :: READ_TEXT_ATTEMPTS = 100
+        integer :: attempt
+        logical :: settled
 
-        byte_count = 0
-        inquire(file=path, size=byte_count, iostat=io_status)
-        if (io_status /= 0 .or. byte_count < 0) then
+        do attempt = 1, READ_TEXT_ATTEMPTS
+            call read_text_once(path, text, settled)
+            if (settled) return
+            call sleep_ms(10)
+        end do
+        call record_failure('read file: ' // path // ': still being rewritten after ' // &
+            'bounded retries')
+        text = ''
+    end function read_text
+
+    subroutine set_read_text_probe(probe)
+        !! Test seam: probe(path) runs between the size inspection and the read,
+        !! which is where a concurrent rewrite races read_text.
+        procedure(read_text_probe_i), optional :: probe
+
+        if (present(probe)) then
+            read_text_probe => probe
+        else
+            read_text_probe => null()
+        end if
+    end subroutine set_read_text_probe
+
+    subroutine read_text_once(path, text, settled)
+        !! One read of path. settled is .false. when the file changed under the
+        !! read; hard errors are recorded and reported as settled.
+        character(len=*), intent(in) :: path
+        character(:), allocatable, intent(out) :: text
+        logical, intent(out) :: settled
+        integer :: unit, io_status, close_status, byte_count
+        integer(c_long_long) :: mtime_before, size_before, mtime_after, size_after
+        logical :: ok
+
+        settled = .true.
+        call fs_stat(path, mtime_before, size_before, ok)
+        if (.not. ok .or. size_before < 0 .or. size_before > huge(byte_count)) then
             call record_failure('inspect input file: ' // path)
             text = ''
             return
         end if
+        byte_count = int(size_before)
         allocate(character(len=byte_count) :: text)
         open(newunit=unit, file=path, access='stream', form='unformatted', &
             status='old', action='read', iostat=io_status)
@@ -1450,11 +1497,23 @@ contains
             text = ''
             return
         end if
+        if (associated(read_text_probe)) call read_text_probe(path)
+        io_status = 0
         if (byte_count > 0) read(unit, iostat=io_status) text
+        close(unit, iostat=close_status)
+        call assert_equal_integer(close_status, 0, 'close input file: ' // path)
+        if (is_iostat_end(io_status)) then
+            settled = .false.
+            return
+        end if
         if (byte_count > 0) call assert_equal_integer(io_status, 0, 'read file: ' // path)
-        close(unit, iostat=io_status)
-        call assert_equal_integer(io_status, 0, 'close input file: ' // path)
-    end function read_text
+        call fs_stat(path, mtime_after, size_after, ok)
+        if (.not. ok) then
+            settled = .false.
+            return
+        end if
+        settled = mtime_after == mtime_before .and. size_after == size_before
+    end subroutine read_text_once
 
     logical function file_exists(path)
         character(len=*), intent(in) :: path
