@@ -12,8 +12,12 @@ module fo_input_inventory
     use fo_dep_resolve, only: normalize_path, join_path, resolved_src_t, &
         resolve_dev_dep_srcs, MAX_RESOLVED
     use fo_registry, only: registry_resolve, registry_config_path
-    use fo_fs, only: fs_identity, fs_path_is_absolute, fs_realpath, fs_collect_files
-    use fo_util, only: make_tmpfile, delete_tmpfile, read_text_file
+    use fo_fs, only: fs_identity, fs_path_is_absolute, fs_realpath, &
+        fs_collect_files, fs_make_dir, fs_rename
+    use fo_util, only: make_tmpfile, delete_tmpfile, read_text_file, &
+        make_sibling_tmpfile, read_text_file_alloc
+    use fo_external_inputs, only: external_requests_t, external_requests_add, &
+        external_inputs_resolve, external_include_flag
     use fx_action_result_store, only: action_result_file_mode, ACTION_RESULT_OK
     implicit none
     private
@@ -69,6 +73,8 @@ module fo_input_inventory
         character(len=1024) :: diagnostic = ''
         logical :: valid = .true.
         logical :: complete = .false.
+        !! Transient discovery state: external requests of the manifest closure.
+        type(external_requests_t), allocatable :: external_requests
         ! Build-time lookup only; canonicalization discards it before rewriting keys.
         integer, allocatable, private :: entry_slots(:)
         integer, private :: indexed_entry_count = 0
@@ -665,6 +671,13 @@ contains
                     return
                 end if
             end do
+        end if
+        ! After the dev-dependency closure: its manifests add link requests too.
+        call capture_external_inputs(trim(project_root), project_index, inventory, &
+            ierr, message)
+        if (ierr /= 0) then
+            call record_failure(inventory, message)
+            return
         end if
         do i = 1, size(declarations)
             if (declaration_has_conflicting_intent(declarations, i)) then
@@ -1369,23 +1382,76 @@ contains
             call mark_incomplete(inventory, trim(alias)// &
                 ' declares external compiler modules')
         end if
-        if (config%n_link_libs > 0) then
-            call mark_incomplete(inventory, trim(alias)// &
-                ' declares external link libraries')
-        end if
-        if (config%openmp .or. config%blas .or. config%mpi .or. &
-                config%hdf5 .or. config%netcdf .or. config%stdlib .or. &
+        ! Link libraries, the OpenMP and BLAS metapackages and absolute include
+        ! directories resolve to files recorded by capture_external_inputs.
+        if (.not. allocated(inventory%external_requests)) &
+            allocate(inventory%external_requests)
+        call external_requests_add(inventory%external_requests, config, &
+            alias == 'project')
+        if (config%mpi .or. config%hdf5 .or. config%netcdf .or. config%stdlib .or. &
                 config%minpack) then
             call mark_incomplete(inventory, trim(alias)// &
                 ' declares an external FPM metapackage')
         end if
         do i = 1, config%n_flags
             if (index(config%flags(i), '-I') == 0) cycle
+            if (external_include_flag(config%flags, config%n_flags, i)) cycle
             call mark_incomplete(inventory, trim(alias)// &
                 ' has an unmodeled custom include path flag')
             exit
         end do
     end subroutine mark_unmodeled_config
+
+    subroutine capture_external_inputs(project_root, project_index, inventory, &
+            ierr, message)
+        !! Record the resolved external inputs of the manifest closure in one
+        !! project file, rewritten only when its content changes, so that each
+        !! library digest enters the inventory like any captured input.
+        character(len=*), intent(in) :: project_root
+        integer, intent(in) :: project_index
+        type(input_inventory_t), intent(inout) :: inventory
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+        character(len=*), parameter :: record = 'build/.fo-external-inputs.txt'
+        character(len=:), allocatable :: text, reasons, current
+        character(len=PATH_LEN) :: temporary
+        integer :: unit, start, finish, status
+
+        ierr = 0
+        message = ''
+        if (.not. allocated(inventory%external_requests)) return
+        call external_inputs_resolve(project_root, inventory%external_requests, &
+            text, reasons)
+        start = 1
+        do while (start <= len(reasons))
+            finish = index(reasons(start:), new_line('a'))
+            if (finish == 0) finish = len(reasons) - start + 2
+            call mark_incomplete(inventory, reasons(start:start + finish - 2))
+            start = start + finish
+        end do
+        if (len(text) == 0) return
+        call read_text_file_alloc(project_root//'/'//record, current, status)
+        if (status /= 0 .or. current /= text) then
+            call fs_make_dir(project_root//'/build')
+            call make_sibling_tmpfile(project_root//'/'//record, temporary)
+            open(newunit=unit, file=trim(temporary), status='replace', &
+                access='stream', form='unformatted', iostat=status)
+            if (status == 0) then
+                write(unit, iostat=status) text
+                close(unit)
+            end if
+            if (status == 0) status = fs_rename(trim(temporary), &
+                project_root//'/'//record)
+            if (status /= 0) then
+                call delete_tmpfile(trim(temporary))
+                call mark_incomplete(inventory, 'cannot record external inputs in '// &
+                    record)
+                return
+            end if
+        end if
+        call add_file_entry(inventory, project_index, 'project', record, &
+            'toolchain-external-inputs', .false., ierr, message)
+    end subroutine capture_external_inputs
 
     subroutine mark_incomplete(inventory, reason)
         type(input_inventory_t), intent(inout) :: inventory
