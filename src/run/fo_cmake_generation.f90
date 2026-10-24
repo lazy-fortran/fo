@@ -476,13 +476,24 @@ contains
     subroutine capture_git_repository(source, destination, log_file, ierr)
         character(len=*), intent(in) :: source, destination, log_file
         integer, intent(out) :: ierr
-        character(len=PATH_LEN) :: arguments(5)
+        character(len=PATH_LEN) :: arguments(11)
         arguments(1) = 'clone'
         arguments(2) = '--bare'
         arguments(3) = '--depth=1'
         arguments(4) = 'file://'//source
         arguments(5) = destination
-        call git_command('.', arguments, log_file, ierr)
+        call git_command('.', arguments(:5), log_file, ierr)
+        if (ierr /= 0) return
+        ! Make captured Git storage deterministic while preserving decoded objects.
+        ! Rebuild only the captured repository, never the live source.
+        arguments = [character(len=PATH_LEN) :: '-c', 'pack.compression=6', &
+            '-c', 'pack.indexVersion=2', 'repack', '-a', '-d', '-f', '-F', &
+            '--window=0', '--threads=1']
+        call git_command(destination, arguments, log_file, ierr)
+        if (ierr /= 0) return
+        arguments(1) = 'fsck'
+        arguments(2) = '--full'
+        call git_command(destination, arguments(:2), log_file, ierr)
     end subroutine capture_git_repository
 
     subroutine capture_project_git(source, metadata, script, ierr, message)

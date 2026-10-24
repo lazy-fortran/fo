@@ -3,7 +3,7 @@ program test_cmake_capture_inputs
     use fo_test_harness, only: make_directory, write_text, read_text, &
         assert_true, assert_contains, assert_process_ok, finish_assertions, &
         string_list_t, process_result_t, list_add, make_symlink, &
-        current_directory, run_process, environment_value, assert_equal_string
+        current_directory, run_process, environment_value, assert_equal_string, run_git
     use fo_test_gremlin_oracle, only: gremlin_setup
     use fo_test_cli, only: run_fo
     use fo_build_backend, only: backend_t, detect_backend
@@ -86,6 +86,7 @@ program test_cmake_capture_inputs
         '#include "local.h"'//nl//'#include "public.h"'//nl// &
         'int main(void) { return VALUE == 19 && GENERATED == 7 && '// &
         'LOCAL == 3 && PUBLIC == 11 ? 0 : 1; }'//nl)
+    call initialize_project_git()
     original_args = environment_value('FO_CMAKE_ARGS')
     original_toolchain = environment_value('CMAKE_TOOLCHAIN_FILE')
     compiler_args = ''
@@ -226,6 +227,7 @@ contains
                 '_COMPILER:STRING='//trim(compiler_paths(j)), &
                 'first native configure types the explicit compiler')
         end do
+        call repack_project_git('9', '50')
         call cmake_capture_inventory(backend, repeated, ierr, message)
         cleanup_status = int(setenv('FO_CMAKE_ARGS'//c_null_char, &
             original_args//c_null_char, 1_c_int))
@@ -254,10 +256,48 @@ contains
         call generation_capture(project, state, context, captured, ierr, message)
         call assert_true(ierr == 0, 'repeat configured generation: '//trim(message))
         if (ierr == 0) call assert_equal_string(captured%identity, generation%identity, &
-            'untyped compiler overrides retain one frozen generation')
+            'compiler overrides and Git storage retain one frozen generation')
         call cmake_capture_cleanup(repeated, cleanup_status)
         call assert_true(cleanup_status == 0, 'repeat capture metadata cleaned')
     end subroutine repeated_compiler_capture
+
+    subroutine initialize_project_git()
+        ! Related, compressible objects distinguish native packing layouts
+        ! without changing any source bytes, refs or decoded Git objects.
+        call write_text(project//'/packing-a.txt', repeat('synthetic payload '//nl, 256))
+        call write_text(project//'/packing-b.txt', repeat('synthetic payload '//nl, 255)// &
+            'different suffix'//nl)
+        call fixture_git([character(len=16) :: 'init'], 'fixture Git initializes')
+        call fixture_git([character(len=16) :: 'add', '.'], 'fixture files are staged')
+        call fixture_git([character(len=32) :: 'commit', '-qm', 'synthetic project'], &
+            'fixture source commit exists')
+        call repack_project_git('1', '0')
+    end subroutine initialize_project_git
+
+    subroutine repack_project_git(compression, window)
+        character(len=*), intent(in) :: compression, window
+        character(:), allocatable :: before, after
+        integer :: status
+
+        call run_git(project, [character(len=16) :: 'show-ref', '--head'], status, before)
+        call assert_true(status == 0, 'native refs are available before repacking')
+        call fixture_git([character(len=32) :: 'config', 'pack.compression', &
+            compression], 'select native transfer compression')
+        call fixture_git([character(len=32) :: '-c', 'pack.compression='//compression, &
+            'repack', '-a', '-d', '-f', '-F', '--window='//window, '--threads=1'], &
+            'repack the synthetic source without changing its objects')
+        call run_git(project, [character(len=16) :: 'show-ref', '--head'], status, after)
+        call assert_true(status == 0, 'native refs are available after repacking')
+        call assert_equal_string(after, before, 'native storage changes preserve refs')
+    end subroutine repack_project_git
+
+    subroutine fixture_git(arguments, label)
+        character(len=*), intent(in) :: arguments(:), label
+        integer :: status
+
+        call run_git(project, arguments, status)
+        call assert_true(status == 0, label)
+    end subroutine fixture_git
 
     subroutine install_headers(source, label)
         character(len=*), intent(in) :: source, label
