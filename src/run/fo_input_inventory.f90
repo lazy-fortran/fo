@@ -73,7 +73,7 @@ module fo_input_inventory
         logical :: valid = .true.
         logical :: complete = .false.
         !! Transient discovery state: external requests of the manifest closure.
-        type(external_requests_t) :: external_requests
+        type(external_requests_t), allocatable :: external_requests
     end type input_inventory_t
 
     public :: input_inventory_discover, input_inventory_declarations_from_config
@@ -1377,6 +1377,8 @@ contains
         end if
         ! Link libraries, the OpenMP and BLAS metapackages and absolute include
         ! directories resolve to files recorded by capture_external_inputs.
+        if (.not. allocated(inventory%external_requests)) &
+            allocate(inventory%external_requests)
         call external_requests_add(inventory%external_requests, config, &
             alias == 'project')
         if (config%mpi .or. config%hdf5 .or. config%netcdf .or. config%stdlib .or. &
@@ -1410,6 +1412,7 @@ contains
 
         ierr = 0
         message = ''
+        if (.not. allocated(inventory%external_requests)) return
         call external_inputs_resolve(project_root, inventory%external_requests, &
             text, reasons)
         start = 1
