@@ -23,7 +23,7 @@ module fo_gremlin_receipts
     use fo_gremlin_session, only: gremlin_get_session_journal_path
     use fo_gremlin_state, only: gremlin_session_t, gremlin_session_state_dir
     use fo_project_model, only: model_find_case
-    use fo_json_object, only: json_value_raw
+    use fo_json_object, only: json_value_raw, json_object_member
     use fx_dag, only: MAX_NODES
     use fx_json_build, only: json_builder_t, json_new, json_object_start, &
         json_object_end, json_key, json_value_string, json_key_string, json_key_int, &
@@ -33,7 +33,7 @@ module fo_gremlin_receipts
         json_parser_next, EV_OBJECT_START => JSON_OBJECT_START, &
         EV_OBJECT_END => JSON_OBJECT_END, EV_ARRAY_START => JSON_ARRAY_START, &
         EV_ARRAY_END => JSON_ARRAY_END, EV_KEY => JSON_KEY, JSON_STRING, JSON_ERROR, &
-        JSON_END_OF_INPUT
+        JSON_END_OF_INPUT, JSON_INTEGER
     implicit none
     private
 
@@ -97,10 +97,11 @@ contains
         type(journal_record_t), allocatable :: records(:)
         character(len=HASH_LEN) :: active_id, candidate_id, receipt_generation
         character(len=NAME_LEN) :: status_name, case_id, raw, receipt_session
-        character(len=PATH_LEN) :: journal_path, campaign_state_dir
+        character(len=PATH_LEN) :: journal_path, session_journal_path, campaign_state_dir
         character(len=NAME_LEN) :: gate_cases(MAX_NODES)
-        character(len=NAME_LEN) :: gate_pass_cases(MAX_NODES)
-        integer :: i, ios, gate_count, gate_passed, journal_index
+        character(len=NAME_LEN) :: gate_success_cases(MAX_NODES)
+        character(len=16) :: gate_success_status(MAX_NODES)
+        integer :: i, j, ios, gate_count, gate_success_count, journal_index, at
         logical :: build_passed, gate_failure
 
         ierr = 0
@@ -145,9 +146,11 @@ contains
         if (have_coverage .and. trim(coverage%generation_id) == trim(active_id)) then
             input%ordinary_required = coverage%ordinary_eligible_count
             input%ordinary_passed = coverage%ordinary_pass_count
+            input%ordinary_skipped = coverage%ordinary_skip_count
             input%ordinary_failures = coverage%ordinary_failure_count
             input%full_required = coverage%eligible_count
             input%full_passed = coverage%pass_count
+            input%full_skipped = coverage%skip_count
             input%full_failures = coverage%fail_count + coverage%timeout_count + &
                 coverage%flaky_count + coverage%infra_count
         end if
@@ -180,9 +183,10 @@ contains
         build_passed = .false.
         gate_failure = .false.
         gate_cases = ''
-        gate_pass_cases = ''
+        gate_success_cases = ''
+        gate_success_status = ''
         gate_count = 0
-        gate_passed = 0
+        gate_success_count = 0
         if (.not. allocated(session%project_key) .or. &
             .not. allocated(session%lane_id) .or. &
             .not. allocated(session%session_id)) then
@@ -191,14 +195,18 @@ contains
             return
         end if
         call gremlin_get_session_journal_path(trim(session%project_key), &
-            trim(session%lane_id), trim(session%session_id), journal_path, ierr, message)
+            trim(session%lane_id), trim(session%session_id), session_journal_path, &
+            ierr, message)
         if (ierr /= 0) return
-        do journal_index = 1, 2
+        ! Current-session receipts supersede older campaign dispositions.
+        do journal_index = 2, 1, -1
             if (journal_index == 2) then
                 call gremlin_session_state_dir(trim(session%project_key), &
                     trim(session%lane_id), campaign_state_dir, ierr, message)
                 if (ierr /= 0) return
                 journal_path = trim(campaign_state_dir)//'/campaign-journal.jsonl'
+            else
+                journal_path = session_journal_path
             end if
             call journal_read_all(trim(journal_path), records, ierr, message)
             if (ierr /= JOURNAL_OK) return
@@ -234,19 +242,27 @@ contains
                     gate_count = gate_count + 1
                     gate_cases(gate_count) = trim(case_id)
                 end if
-                if (trim(status_name) == 'PASS' .and. .not. any( &
-                    gate_pass_cases(:gate_passed) == trim(case_id)) .and. &
-                    gate_passed < size(gate_cases)) then
-                    gate_passed = gate_passed + 1
-                    gate_pass_cases(gate_passed) = trim(case_id)
+                if (trim(status_name) /= 'PASS' .and. &
+                    trim(status_name) /= 'SKIP') cycle
+                at = 0
+                do j = 1, gate_success_count
+                    if (gate_success_cases(j) == trim(case_id)) at = j
+                end do
+                if (at == 0) then
+                    if (gate_success_count == size(gate_cases)) cycle
+                    gate_success_count = gate_success_count + 1
+                    at = gate_success_count
+                    gate_success_cases(at) = trim(case_id)
                 end if
+                gate_success_status(at) = trim(status_name)
             end do
         end do
         input%exact_active_generation = input%exact_active_generation .and. build_passed
         input%capture_fresh = input%exact_active_generation .and. .not. input%dirty
         input%build_passed = build_passed
         input%gate_required = max(input%gate_required, gate_count)
-        input%gate_passed = min(input%gate_required, gate_passed)
+        input%gate_passed = count(gate_success_status(:gate_success_count) == 'PASS')
+        input%gate_skipped = count(gate_success_status(:gate_success_count) == 'SKIP')
         input%gate_failure = gate_failure
         call gremlin_readiness_compute(input, readiness)
     end subroutine compute_readiness
@@ -283,7 +299,8 @@ contains
         gate_receipt_matches = trim(receipt_generation) == trim(generation) .and. &
             trim(receipt_requirement) == trim(requirement) .and. &
             trim(gate_required) == 'true' .and. len_trim(case_name) > 0 .and. &
-            (trim(outcome) == 'PASS' .or. status_is_failure(trim(outcome)))
+            (trim(outcome) == 'PASS' .or. trim(outcome) == 'SKIP' .or. &
+            status_is_failure(trim(outcome)))
     end function gate_receipt_matches
 
     subroutine record_receipt(session, request, generation, case_name, exitcode, &
@@ -379,6 +396,8 @@ contains
         end if
         if (outcome == 'PASS' .or. outcome == 'BUILD_PASS') then
             call json_key_string(jb, 'outcome', 'pass')
+        else if (outcome == 'SKIP') then
+            call json_key_string(jb, 'outcome', 'skip')
         else
             call json_key_string(jb, 'outcome', 'fail')
         end if
@@ -886,14 +905,16 @@ contains
 
     logical function coverage_outcome(status)
         character(len=*), intent(in) :: status
-        coverage_outcome = status == 'PASS' .or. status == 'FAIL' .or. &
+        coverage_outcome = status == 'PASS' .or. status == 'SKIP' .or. &
+            status == 'FAIL' .or. &
             status == 'TIMEOUT' .or. status == 'FLAKY' .or. &
             status == 'INFRA' .or. status == 'INFRA_ERROR' .or. &
             status == 'CANCELLED'
     end function coverage_outcome
 
-    function runner_case_outcome(log_file, case_name) result(outcome)
+    function runner_case_outcome(log_file, case_name, exitcode) result(outcome)
         character(len=*), intent(in) :: log_file, case_name
+        integer, intent(in), optional :: exitcode
         character(len=16) :: outcome
         character(len=8192) :: line
         character(len=:), allocatable :: result_name
@@ -995,6 +1016,8 @@ contains
                         select case (trim(verdict))
                         case ('pass')
                             outcome = 'PASS'
+                        case ('skip')
+                            if (runner_skip_metadata_valid(trim(line))) outcome = 'SKIP'
                         case ('fail')
                             outcome = 'FAIL'
                         case ('timeout')
@@ -1016,6 +1039,45 @@ contains
             end do
         end do
         close (unit)
+        if (present(exitcode)) then
+            if (exitcode /= 0 .and. outcome == 'SKIP') outcome = 'INFRA_ERROR'
+        end if
     end function runner_case_outcome
+
+    logical function runner_skip_metadata_valid(report) result(valid)
+        character(len=*), intent(in) :: report
+        ! A per-case report that skipped its one case passed and failed nothing.
+        character(len=9), parameter :: fields(4) = &
+            [character(len=9) :: 'exit_code', 'passed', 'failed', 'skipped']
+        character(len=:), allocatable :: summary, raw
+        type(json_event_t) :: event
+        integer :: i, count, ierr, value
+
+        valid = .false.
+        call json_object_member(report, 'summary', summary, count, ierr, event)
+        if (ierr /= 0) return
+        if (count /= 1) return
+        if (event%event_type /= EV_OBJECT_START) return
+        do i = 1, size(fields)
+            if (i == 1) then
+                call json_object_member(report, trim(fields(i)), raw, &
+                    count, ierr, event)
+            else
+                call json_object_member(summary, trim(fields(i)), raw, &
+                    count, ierr, event)
+            end if
+            if (ierr /= 0) return
+            if (count /= 1) return
+            if (event%event_type /= JSON_INTEGER) return
+            read(raw, *, iostat=ierr) value
+            if (ierr /= 0) return
+            if (i < size(fields)) then
+                if (value /= 0) return
+            else
+                if (value < 1) return
+            end if
+        end do
+        valid = .true.
+    end function runner_skip_metadata_valid
 
 end module fo_gremlin_receipts

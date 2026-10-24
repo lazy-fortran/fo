@@ -112,11 +112,11 @@ contains
             call verification_counts(jb, view%ordinary_eligible_count, &
                 view%ordinary_pass_count, view%ordinary_failure_count, &
                 view%ordinary_timeout_count, view%ordinary_infra_count, &
-                view%ordinary_flaky_count)
+                view%ordinary_flaky_count, view%ordinary_skip_count)
             call json_key(jb, 'full')
             call verification_counts(jb, view%eligible_count, view%pass_count, &
                 readiness%full_failures, view%timeout_count, view%infra_count, &
-                view%flaky_count)
+                view%flaky_count, view%skip_count)
             call json_key_string(jb, 'generation_id', trim(view%generation_id))
             call json_key_string(jb, 'inventory_digest', trim(view%inventory_digest))
             call json_key_int(jb, 'epoch', view%epoch)
@@ -125,6 +125,7 @@ contains
             call json_key_int(jb, 'eligible', view%eligible_count)
             call json_key_int(jb, 'completed', view%completed_count)
             call json_key_int(jb, 'pass', view%pass_count)
+            if (view%skip_count > 0) call json_key_int(jb, 'skip', view%skip_count)
             call json_key_int(jb, 'fail', view%fail_count)
             call json_key_int(jb, 'timeout', view%timeout_count)
             call json_key_int(jb, 'flaky', view%flaky_count)
@@ -135,9 +136,13 @@ contains
             call json_key_int(jb, 'remaining', view%remaining_count)
             call json_key_int(jb, 'ordinary_required', readiness%ordinary_required)
             call json_key_int(jb, 'ordinary_passed', readiness%ordinary_passed)
+            if (readiness%ordinary_skipped > 0) &
+                call json_key_int(jb, 'ordinary_skipped', readiness%ordinary_skipped)
             call json_key_bool(jb, 'ordinary_verified', readiness%verification_level >= 2)
             call json_key_int(jb, 'full_required', readiness%full_required)
             call json_key_int(jb, 'full_passed', readiness%full_passed)
+            if (readiness%full_skipped > 0) &
+                call json_key_int(jb, 'full_skipped', readiness%full_skipped)
             call json_key_bool(jb, 'fully_verified', readiness%fully_verified)
             call json_key_bool(jb, 'ordinary_complete', view%ordinary_complete)
             call json_key_bool(jb, 'full_coverage', view%full_coverage)
@@ -165,24 +170,31 @@ contains
         call json_key_int(jb, 'event_epoch', readiness%event_epoch)
         call json_key_int(jb, 'gate_required', readiness%gate_required)
         call json_key_int(jb, 'gate_passed', readiness%gate_passed)
+        if (readiness%gate_skipped > 0) &
+            call json_key_int(jb, 'gate_skipped', readiness%gate_skipped)
         call json_key_int(jb, 'ordinary_required', readiness%ordinary_required)
         call json_key_int(jb, 'ordinary_passed', readiness%ordinary_passed)
+        if (readiness%ordinary_skipped > 0) &
+            call json_key_int(jb, 'ordinary_skipped', readiness%ordinary_skipped)
         call json_key_int(jb, 'ordinary_failures', readiness%ordinary_failures)
         call json_key_int(jb, 'full_required', readiness%full_required)
         call json_key_int(jb, 'full_passed', readiness%full_passed)
+        if (readiness%full_skipped > 0) &
+            call json_key_int(jb, 'full_skipped', readiness%full_skipped)
         call json_key_int(jb, 'full_failures', readiness%full_failures)
     end subroutine readiness_members
 
     subroutine verification_counts(jb, eligible, passed, failures, timeouts, infra, &
-            flaky)
+            flaky, skipped)
         type(json_builder_t), intent(inout) :: jb
-        integer, intent(in) :: eligible, passed, failures, timeouts, infra, flaky
+        integer, intent(in) :: eligible, passed, failures, timeouts, infra, flaky, skipped
         integer :: remaining
 
-        remaining = max(0, eligible - passed - failures)
+        remaining = max(0, eligible - passed - skipped - failures)
         call json_object_start(jb)
         call json_key_int(jb, 'eligible', eligible)
         call json_key_int(jb, 'pass', passed)
+        if (skipped > 0) call json_key_int(jb, 'skip', skipped)
         call json_key_int(jb, 'fail', max(0, failures - timeouts - infra - flaky))
         call json_key_int(jb, 'timeout', timeouts)
         call json_key_int(jb, 'infra_error', infra)
@@ -231,8 +243,9 @@ contains
         character(len=32), parameter :: scalars(*) = [character(len=32) :: &
             'input_changed', 'dirty', 'local_gate_green', 'fully_verified', &
             'completed', 'selected', 'seed', 'last_exitcode', 'event_epoch', &
-            'gate_required', 'gate_passed', 'ordinary_required', 'ordinary_passed', &
-            'ordinary_failures', 'full_required', 'full_passed', 'full_failures', &
+            'gate_required', 'gate_passed', 'gate_skipped', 'ordinary_required', &
+            'ordinary_passed', 'ordinary_skipped', 'ordinary_failures', &
+            'full_required', 'full_passed', 'full_skipped', 'full_failures', &
             'wait_satisfied', 'wait_timed_out', 'wait_terminal', 'failure_observed']
         character(len=4096) :: value
         type(json_builder_t) :: jb

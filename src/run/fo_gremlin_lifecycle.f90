@@ -5,6 +5,8 @@ module fo_gremlin_lifecycle
     use fo_exec_service, only: exec_clock_ms
     use fo_cache, only: HASH_LEN, cache_digest
     use fo_gremlin_request, only: gremlin_json_text_valid
+    use fo_json_object, only: json_object_member
+    use fx_json_parse, only: json_event_t, JSON_INTEGER
     use fo_util, only: json_bool, json_int
     use fx_json_build, only: json_escape_string
     implicit none
@@ -34,11 +36,14 @@ module fo_gremlin_lifecycle
         logical :: fully_verified = .false.
         integer :: gate_required = 0
         integer :: gate_passed = 0
+        integer :: gate_skipped = 0
         integer :: ordinary_required = 0
         integer :: ordinary_passed = 0
+        integer :: ordinary_skipped = 0
         integer :: ordinary_failures = 0
         integer :: full_required = 0
         integer :: full_passed = 0
+        integer :: full_skipped = 0
         integer :: full_failures = 0
         integer :: event_epoch = 0
         character(len=HASH_LEN) :: requirement_digest = ''
@@ -136,7 +141,8 @@ contains
             event%ordinary_required < 0 .or. event%ordinary_passed < 0 .or. &
             event%ordinary_failures < 0 .or. event%full_required < 0 .or. &
             event%full_passed < 0 .or. event%full_failures < 0 .or. &
-            event%epoch < 0 .or. event%epoch_cursor < 0) return
+            event%gate_skipped < 0 .or. event%ordinary_skipped < 0 .or. &
+            event%full_skipped < 0 .or. event%epoch < 0 .or. event%epoch_cursor < 0) return
         json = '{"event_version":1,"event_id":"'// &
             trim(json_escape_string(event%event_id))//'","event_type":"'// &
             trim(event%event_type)//'","generation":"'//trim(event%generation)// &
@@ -161,7 +167,10 @@ contains
             ',"requirement_digest":"'//trim(event%requirement_digest)// &
             '","gate_token":"'//trim(event%gate_token)//'"'// &
             ',"epoch":'//trim(json_int(event%epoch))// &
-            ',"epoch_cursor":'//trim(json_int(event%epoch_cursor))//'}'
+            ',"epoch_cursor":'//trim(json_int(event%epoch_cursor))// &
+            ',"gate_skipped":'//trim(json_int(event%gate_skipped))// &
+            ',"ordinary_skipped":'//trim(json_int(event%ordinary_skipped))// &
+            ',"full_skipped":'//trim(json_int(event%full_skipped))//'}'
         ierr = gremlin_lifecycle_validate(json)
         if (ierr == LIFECYCLE_OK) then
             message = ''
@@ -193,7 +202,8 @@ contains
             event%ordinary_required < 0 .or. event%ordinary_passed < 0 .or. &
             event%ordinary_failures < 0 .or. event%full_required < 0 .or. &
             event%full_passed < 0 .or. event%full_failures < 0 .or. &
-            event%epoch < 0 .or. event%epoch_cursor < 0) then
+            event%gate_skipped < 0 .or. event%ordinary_skipped < 0 .or. &
+            event%full_skipped < 0 .or. event%epoch < 0 .or. event%epoch_cursor < 0) then
             return
         end if
         status = LIFECYCLE_OK
@@ -484,6 +494,12 @@ contains
         if (ios /= 0) return
         call read_integer_field(json, 'full_failures', event%full_failures, ios)
         if (ios /= 0) return
+        call read_optional_count(json, 'gate_skipped', event%gate_skipped, ios)
+        if (ios /= 0) return
+        call read_optional_count(json, 'ordinary_skipped', event%ordinary_skipped, ios)
+        if (ios /= 0) return
+        call read_optional_count(json, 'full_skipped', event%full_skipped, ios)
+        if (ios /= 0) return
         call read_integer_field(json, 'epoch', event%epoch, ios)
         if (ios /= 0) return
         call read_integer_field(json, 'epoch_cursor', event%epoch_cursor, ios)
@@ -506,6 +522,21 @@ contains
         read(raw, *, iostat=ierr) value
     end subroutine read_integer_field
 
+    subroutine read_optional_count(json, name, value, ierr)
+        character(len=*), intent(in) :: json, name
+        integer, intent(out) :: value, ierr
+        character(len=:), allocatable :: raw
+        type(json_event_t) :: event
+        integer :: count
+
+        value = 0
+        call json_object_member(json, name, raw, count, ierr, event)
+        if (ierr /= 0 .or. count == 0) return
+        ierr = 1
+        if (count /= 1 .or. event%event_type /= JSON_INTEGER) return
+        read(raw, *, iostat=ierr) value
+    end subroutine read_optional_count
+
     function event_facts(event) result(facts)
         type(gremlin_lifecycle_event_t), intent(in) :: event
         character(len=8192) :: facts
@@ -523,6 +554,9 @@ contains
             int_text(event%epoch_cursor)//'|'//int_text(event%event_epoch)//'|'// &
             event%requirement_digest//'|'//event%gate_token//'|'// &
             trim(event%diagnostic)
+        if (event%gate_skipped + event%ordinary_skipped + event%full_skipped > 0) &
+            facts = trim(facts)//'|skips|'//int_text(event%gate_skipped)//'|'// &
+                int_text(event%ordinary_skipped)//'|'//int_text(event%full_skipped)
     end function event_facts
 
     logical function valid_event_type(value)

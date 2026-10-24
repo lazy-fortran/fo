@@ -13,6 +13,7 @@ program test_gremlin_journal
     failed = 0
     call test_durable_receipts_and_reconnect()
     call test_bounded_lane_journal()
+    call test_native_skip_receipt()
     write (output_unit, '(a,i0,a,i0,a)') 'gremlin journal: ', passed, &
         ' pass, ', failed, ' fail'
     if (failed > 0) stop 1
@@ -30,6 +31,31 @@ contains
             write (output_unit, '(a,a)') 'FAIL: ', label
         end if
     end subroutine assert
+
+    subroutine test_native_skip_receipt()
+        type(journal_record_t), allocatable :: records(:)
+        character(len=256) :: path, message
+        character(len=*), parameter :: receipt = &
+            '{"completion_id":"native-skip","outcome":"skip","status":"SKIP"}'
+        integer(int64) :: cursor
+        integer :: status
+
+        write(path, '(a,i0,a)') temporary_root()//'/fo-native-skip-', &
+            process_getpid(), '.jsonl'
+        call remove_file(trim(path))
+        call journal_append(trim(path), 'native-skip', receipt, status, message)
+        call assert(status == JOURNAL_OK, 'native skip is a durable distinct outcome')
+        call journal_read_page(trim(path), 0_int64, 10, 4096_int64, records, &
+            cursor, status, message)
+        call assert(status == JOURNAL_OK .and. size(records) == 1, &
+            'native skip survives journal reopen')
+        if (size(records) == 1) call assert(trim(records(1)%json) == receipt, &
+            'journal does not relabel the native skip as pass or fail')
+        call journal_append(trim(path), 'unknown', &
+            '{"completion_id":"unknown","outcome":"unknown"}', status, message)
+        call assert(status == JOURNAL_INVALID, 'arbitrary outcome remains invalid')
+        call remove_file(trim(path))
+    end subroutine test_native_skip_receipt
 
     subroutine test_durable_receipts_and_reconnect()
         type(journal_record_t), allocatable :: records(:)

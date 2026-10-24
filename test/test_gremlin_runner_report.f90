@@ -11,6 +11,10 @@ program test_gremlin_runner_report
     character(len=*), parameter :: pass_report = '{"tests":['//pass_record// &
         '],"summary":{"passed":1,"failed":0,"skipped":0,"total_seconds":0.01},'// &
         '"exit_code":0}'
+    character(len=*), parameter :: skip_record = &
+        '{"name":"test_relative_pass","status":"skip"}'
+    character(len=*), parameter :: skip_report = '{"tests":['//skip_record// &
+        '],"summary":{"passed":0,"failed":0,"skipped":1},"exit_code":0}'
 
     call make_scratch('fo-runner-report', scratch)
     log_path = scratch//'/runner.log'
@@ -25,6 +29,66 @@ program test_gremlin_runner_report
         '"seconds":1.00,"output":"","timeout_kind":"wall"}],'// &
         '"summary":{"passed":0,"failed":1},"exit_code":1}', 'TIMEOUT', &
         'nested timeout remains distinct from failure and infrastructure')
+    call check(skip_report, 'SKIP', &
+        'native skip remains a distinct completed verdict')
+    call check('{"tests":[{"name":"test_relative_pass","status":"skip",'// &
+        '"reason":"CTest test is disabled"}],'// &
+        '"summary":{"passed":0,"failed":0,"skipped":1,"total_seconds":0.0},'// &
+        '"exit_code":0}', 'SKIP', 'disabled native case has valid skip metadata')
+    call invalid_skip_fields('', 'skip requires the producer summary and exit code')
+    call invalid_skip_fields(',"summary":{"passed":0,"failed":0,"skipped":1}', &
+        'skip requires the producer exit code')
+    call invalid_skip_fields(',"exit_code":0', 'skip requires the producer summary')
+    call invalid_skip_fields(',"summary":{"passed":0,"skipped":1},"exit_code":0', &
+        'skip requires the producer failed count')
+    call invalid_skip_fields(',"summary":{"passed":0,"failed":0},"exit_code":0', &
+        'skip requires the producer skipped count')
+    call invalid_skip_fields(',"summary":{"passed":1,"failed":0,"skipped":1},'// &
+        '"exit_code":0', 'passed report count contradicts the skipped case')
+    call invalid_skip_fields(',"summary":{"failed":0,"skipped":1},"exit_code":0', &
+        'skip requires the producer passed count')
+    call invalid_skip_fields(',"summary":{"passed":0,"failed":0,"skipped":1},'// &
+        '"exit_code":1', 'nonzero report exit contradicts the skipped case')
+    call invalid_skip_fields(',"summary":{"passed":0,"failed":1,"skipped":1},'// &
+        '"exit_code":0', 'failed report count contradicts the skipped case')
+    call invalid_skip_fields(',"summary":{"passed":0,"failed":0,"skipped":0},'// &
+        '"exit_code":0', 'zero skipped count contradicts the skipped case')
+    call invalid_skip_fields(',"summary":{"passed":0,"failed":0,"skipped":-1},'// &
+        '"exit_code":0', 'negative skipped count cannot qualify a skip')
+    call invalid_skip_fields(',"summary":{"passed":0,"failed":0,"skipped":1},'// &
+        '"exit_code":0.0', 'skip report exit code must be an integer')
+    call invalid_skip_fields(',"summary":[],"exit_code":0', &
+        'skip summary must be an object')
+    call invalid_skip_fields(',"summary":{"passed":0,"failed":"0","skipped":1},'// &
+        '"exit_code":0', 'skip failed count must be an integer')
+    call invalid_skip_fields(',"summary":{"passed":0,"failed":0,"skipped":true},'// &
+        '"exit_code":0', 'skip skipped count must be an integer')
+    call invalid_skip_fields(',"summary":{"passed":0,"failed":0,"skipped":1},'// &
+        '"exit_code":0,"exit_code":0', 'duplicate skip report exit code is invalid')
+    call invalid_skip_fields(',"summary":{"passed":0,"failed":0,"skipped":1},'// &
+        '"summary":{"passed":0,"failed":0,"skipped":1},"exit_code":0', &
+        'duplicate skip summary is invalid')
+    call invalid_skip_fields(',"summary":{'// &
+        '"passed":0,"failed":0,"failed":0,"skipped":1},'// &
+        '"exit_code":0', 'duplicate skip failed count is invalid')
+    call invalid_skip_fields(',"summary":{'// &
+        '"passed":0,"failed":0,"skipped":1,"skipped":1},'// &
+        '"exit_code":0', 'duplicate skip skipped count is invalid')
+    call invalid_skip_fields(',"summary":{"passed":0,"failed":0,"skipped":1},'// &
+        '"exit_code":0,"ex\u0069t_code":0', &
+        'decoded duplicate skip report exit code is invalid')
+    call check('{"tests":[{"name":"test_relative_pass","status":"fail",'// &
+        '"output":"{\"status\":\"skip\"}"}]}', 'FAIL', &
+        'skip-shaped user output cannot hide a native failure')
+    call invalid('{"tests":[{"name":"test_relative_pass","status":"untested"}]}', &
+        'an untested case does not become a native skip')
+    call invalid('{"tests":[{"name":"test_relative_pass","status":"skip",'// &
+        '"status":"pass"}]}', 'duplicate skip verdict remains malformed')
+    call write_text(log_path, skip_report//new_line('a'))
+    call assert_true(runner_case_outcome(log_path, target, 1) == 'INFRA_ERROR', &
+        'a nonzero runner exit contradicts a claimed native skip')
+    call assert_true(runner_case_outcome(log_path, target, 0) == 'SKIP', &
+        'a zero runner exit agrees with the complete native skip report')
     call check('  {"summary":{},"tests":['//pass_record//']}', 'PASS', &
         'valid structured report accepts whitespace and field order')
     call check('{"tests":[{"name":"another_case","status":"pass"},'// &
@@ -81,6 +145,12 @@ contains
 
         call check(report, 'INFRA_ERROR', description)
     end subroutine invalid
+
+    subroutine invalid_skip_fields(fields, description)
+        character(len=*), intent(in) :: fields, description
+
+        call invalid('{"tests":['//skip_record//']'//fields//'}', description)
+    end subroutine invalid_skip_fields
 
     subroutine check_named(report, requested_name, expected, description)
         character(len=*), intent(in) :: report, requested_name, expected, description
