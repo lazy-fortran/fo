@@ -632,6 +632,33 @@ int fo_c_generation_list_cmake_input_tree(const char *root, const char *manifest
     return list_input_tree(root, manifest, 2, build_directory);
 }
 
+/* A missing include search directory is harmless only beneath a captured
+ * project tree. Inspect every existing component without following links, so
+ * a dangling link, non-directory or permission error is never called absent. */
+int fo_c_generation_project_path_state(const char *root, const char *relative) {
+    char *copy = strdup(relative), *part, *save = NULL;
+    int fd, child, missing = 0;
+    if (copy == NULL) return -1;
+    fd = open(root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) {
+        free(copy);
+        return -1;
+    }
+    for (part = strtok_r(copy, "/", &save); part != NULL;
+         part = strtok_r(NULL, "/", &save)) {
+        child = openat(fd, part, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        if (child < 0) {
+            missing = errno == ENOENT ? 1 : -1;
+            break;
+        }
+        close(fd);
+        fd = child;
+    }
+    close(fd);
+    free(copy);
+    return missing;
+}
+
 /* Reconstructable invocation views need complete bytes, not durable writes. */
 int fo_c_generation_copy_tree_ephemeral(const char *root, const char *dest,
                                        const char *manifest) {

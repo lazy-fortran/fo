@@ -112,7 +112,7 @@ contains
     end subroutine resolve_dev_dep_srcs
 
     subroutine merge_dep_link_libs(project_dir, config)
-        !! Add every dependency's own `link` entries to the root config.
+        !! Add dependency link entries and OpenMP requirements to the root config.
         !!
         !! fo compiles a dependency's C and C++ sources into the same archive as
         !! the project's, so the final link line needs whatever those sources
@@ -142,6 +142,7 @@ contains
         do i = 1, n_deps
             call fpm_config_parse(trim(deps(i)%dir), dcfg, ierr)
             if (ierr /= 0) cycle
+            config%openmp = config%openmp .or. dcfg%openmp
             do j = 1, dcfg%n_link_libs
                 call add_link_lib(config, trim(dcfg%link_libs(j)))
             end do
@@ -149,6 +150,7 @@ contains
         do i = 1, n_devs
             call fpm_config_parse(trim(devs(i)%dir), dcfg, ierr)
             if (ierr /= 0) cycle
+            config%openmp = config%openmp .or. dcfg%openmp
             do j = 1, dcfg%n_link_libs
                 call add_link_lib(config, trim(dcfg%link_libs(j)))
             end do

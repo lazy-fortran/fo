@@ -66,6 +66,27 @@ failure detection. The workspace master plan, when present, owns delivery order.
   `1ec2c652f47e78ebf8844c6de5ffb505b1257b756b5e2aeee9aa3619a5726fbe`.
   Its unselected slow target is invalid, independently checking build scope.
 
+## Transitive OpenMP runtime (2026-10-23)
+
+- [V] FortFEM's circulant test failed at link time because dependency OpenMP
+  requirements were absent from the root test configuration. Propagate those
+  requirements after acquisition for compilation and final application/test links.
+- [V] Private candidate SHA256
+  `fbba60bdaf0dbb02518a351e815ecf480296d4584256d28b702e1ce8c1116d8c`
+  passes six focused dependency, registry, profile and shared-link checks, plus
+  the real FortFEM circulant consumer. The synthetic transitive/dev-dependency
+  execution oracle fails against the original driver and passes the repair.
+
+## Native CMake package prefixes (2026-10-22)
+
+- [V] A frozen SIMPLE configure relocates Boost's package config and breaks
+  its self-relative include prefix (`boost_headers-config.cmake:24`).
+- Preserve standard external package hints while retaining package/module
+  fingerprints, header guards and immutable declared-source relocation.
+- [V] The synthetic CamelCase/hyphenated package fixture fails on 4c86209 and
+  passes with the fix, including rejection of a changed SDK's cached PASS.
+  Existing parent-module and capture-input regressions pass.
+
 ## Destination
 
 Fo is the simplest, fastest and most trustworthy Fortran build and test tool
@@ -728,3 +749,15 @@ UCRT64 at `C:\fo\msys64\ucrt64`. Rebuild from current sources.
 Deployment history, evidence roots, exact driver digests and earlier
 qualification records are in [the prior plan](https://github.com/lazy-fortran/fo/blob/342da71/PLAN.md).
 Keep this plan short and update the owning issue when work moves.
+
+## Large generation materialization (2026-10-22)
+
+- [V] A SIMPLE CMake capture has 74,350 entries. A live stack reaches the
+  all-prior-entry scan in `fo_generation_manifest.f90:1284`, making destination
+  deduplication quadratic even with node-local storage.
+- Replace that scan with a bounded-load destination index. Preserve exact
+  payload/mode/link conflict rejection and identical alias reuse.
+- [V] Synthetic aliased payloads and existing manifest, generation and inventory
+  oracles pass. The resident focused generation is green for all four cases.
+  The broader native affected gate uses explicitly pinned `FO`/`FO_BIN`.
+- The separate parent/module/private-copy repair remains [#239](https://github.com/lazy-fortran/fo/pull/239).

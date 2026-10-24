@@ -2,12 +2,13 @@ program test_gremlin_cmake
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
     use, intrinsic :: iso_fortran_env, only: int64
     use fo_test_harness, only: string_list_t, process_result_t, list_add, &
-              make_directory, write_text, read_text, assert_true, assert_equal_string, &
+              make_directory, remove_tree, write_text, read_text, assert_true, &
+                               assert_equal_string, &
                                assert_equal_integer, &
                                finish_assertions, run_process, assert_process_ok
     use fo_test_gremlin_oracle, only: gremlin_setup, gremlin_json, &
                    gremlin_start_args, gremlin_wait_ms, gremlin_field, gremlin_stop_lane
-    use fo_fs, only: fs_find_executable
+    use fo_fs, only: fs_find_executable, fs_rename
     use fo_fake_tool, only: fake_tool_dispatch, install_fake_tool
     use fo_test_json, only: json_value_t, json_member, json_boolean_value, &
         json_string_value, json_size, json_element, json_number_value
@@ -17,10 +18,13 @@ program test_gremlin_cmake
     character(:), allocatable :: provider, provider_source, revision, raw_archive
     character(:), allocatable :: child_builds, generation_builds, child_runs
     character(:), allocatable :: first_model, first_model_generation
+    character(:), allocatable :: authored_model
     type(string_list_t) :: args
     type(process_result_t) :: process
     type(json_value_t) :: reply
     integer :: rc
+    character(len=4096) :: real_cmake
+    logical :: cmake_found
     interface
         integer(c_int) function c_setenv(name, value, overwrite) bind(C, name='setenv')
             import :: c_char, c_int
@@ -41,6 +45,8 @@ program test_gremlin_cmake
     call gremlin_setup(driver, scratch, project, cache, state)
     provider = scratch//'/provider-build'
     provider_source = scratch//'/provider-source'
+    call fs_find_executable('cmake', real_cmake, cmake_found)
+    call assert_true(cmake_found, 'native CMake is available')
     call make_provider()
     call make_populate_only_dependency()
     dependency = scratch//'/dependency'
@@ -64,6 +70,10 @@ program test_gremlin_cmake
             'set(CMAKE_Fortran_MODULE_DIRECTORY ${CMAKE_BINARY_DIR})'//new_line('a')// &
                     'set(VALUE_PROVIDER_BUILD "'//provider//'" CACHE PATH "provider")'// &
                     new_line('a')// &
+                    'if(NOT EXISTS "${VALUE_PROVIDER_BUILD}/libprebuilt_provider.a")'// &
+                    new_line('a')// &
+                    'message(FATAL_ERROR "prebuilt provider archive missing")'// &
+                    new_line('a')//'endif()'//new_line('a')// &
                     'file(STRINGS "${VALUE_PROVIDER_BUILD}/CMakeCache.txt" origin '// &
                     'REGEX "^CMAKE_HOME_DIRECTORY:INTERNAL=")'//new_line('a')// &
                     'string(REPLACE "CMAKE_HOME_DIRECTORY:INTERNAL=" "" origin '// &
@@ -98,7 +108,8 @@ program test_gremlin_cmake
                     new_line('a')// &
                     'add_executable(unselected_generated_target EXCLUDE_FROM_ALL '// &
                     'unselected_generated.f90)'//new_line('a')// &
-                    'add_executable(marker marker.f90)'//new_line('a')// &
+                    'add_executable(marker marker.f90 .venv/native/hidden.f90)'// &
+                    new_line('a')// &
                     'add_executable(probe EXCLUDE_FROM_ALL probe.f90)'// &
                     new_line('a')// &
                     'add_test(NAME excluded_probe COMMAND probe)'//new_line('a')// &
@@ -106,10 +117,15 @@ program test_gremlin_cmake
                     'LABELS "probe;unit")'//new_line('a')// &
                     'install(TARGETS marker RUNTIME DESTINATION lib)'//new_line('a')// &
                     'add_executable(unselected broken.f90)'//new_line('a')// &
-                    'target_link_libraries(marker PRIVATE value_dep raw_dep)'// &
+                    'target_link_libraries(marker PRIVATE value_dep raw_dep '// &
+                    '"${VALUE_PROVIDER_BUILD}/libprebuilt_provider.a" '// &
+                    '"${VALUE_PROVIDER_BUILD}/_deps/nested-build/libnested_provider.a")'// &
                     new_line('a')// &
                   'target_include_directories(marker PRIVATE "${CMAKE_BINARY_DIR}" '// &
-                    '"${VALUE_PROVIDER_BUILD}/include")'// &
+                    '"${CMAKE_CURRENT_SOURCE_DIR}/optional/include" '// &
+                    '"${VALUE_PROVIDER_BUILD}" "${VALUE_PROVIDER_BUILD}/include" '// &
+                    '"${VALUE_PROVIDER_BUILD}/_deps/nested-build/include" '// &
+                    '"${CMAKE_CURRENT_SOURCE_DIR}/.venv/include")'// &
                     new_line('a')// &
                  'file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/sandbox")'//new_line('a')// &
                     'add_test(NAME setup COMMAND "${CMAKE_COMMAND}" '// &
@@ -126,6 +142,14 @@ program test_gremlin_cmake
                     'WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/sandbox" '// &
                     'PASS_REGULAR_EXPRESSION "text never printed")'//new_line('a'))
     call write_text(project//'/broken.f90', 'unselected target is intentionally invalid')
+    call make_directory(project//'/.venv/include')
+    call make_directory(project//'/.venv/include/nested')
+    call make_directory(project//'/.venv/native')
+    call write_text(project//'/.venv/native/hidden.f90', &
+        'module hidden_input'//new_line('a')//'implicit none'//new_line('a')// &
+        'integer, parameter :: hidden_value = 23'//new_line('a')// &
+        'end module hidden_input')
+    call write_hidden_header(31)
     call write_text(project//'/probe.f90', 'program probe'//new_line('a')// &
         'print *, "probe passed"'//new_line('a')//'end program probe'//new_line('a'))
     call write_marker(.false.)
@@ -153,6 +177,7 @@ program test_gremlin_cmake
         new_line('a')//'endif()'//new_line('a')// &
         'file(TOUCH "${OUTPUT}")'//new_line('a'))
     call initialize_project_git()
+    call native_provider_reference()
     call install_tool_trap()
     ! The build counts below observe the delegated `cmake --build` through the
     ! trap; the native route (fo_cmake_build) never invokes it.
@@ -177,10 +202,10 @@ program test_gremlin_cmake
     call assert_true(len(generation) == 64, 'CMake-only generation has an identity')
     call assert_true(.not. file_present(project//'/build/_deps/value_dep-build/'// &
         'libvalue_dep.a'), 'resident archive remains outside the live build directory')
-    if (len(generation) /= 64) then
+    if (len(generation) /= 64 .or. status_field('last_outcome') == 'BUILD_FAIL') then
         call gremlin_stop_lane(driver, project, cache, state, 'cmake', owner, &
             allow_terminal_error=.true.)
-        call finish_assertions()
+        call finish_assertions(retain_failed_scratch=.true.)
     end if
     previous = generation
     call assert_probe_receipt(generation)
@@ -196,6 +221,27 @@ program test_gremlin_cmake
     rc = c_unlink(child_runs//c_null_char)
     rc = c_unlink(generation_builds//c_null_char)
     call scoped_lane_phase()
+    call make_directory(project//'/optional/include')
+    call write_text(project//'/optional/include/hidden.inc', &
+        'integer, parameter :: hidden_header = 37')
+    call wait_result(previous, 'FAIL', generation)
+    call assert_true(generation /= previous, &
+        'materialized include directory wakes resident and changes compilation')
+    previous = generation
+    call write_text(project//'/optional/include/hidden.inc', &
+        'integer, parameter :: hidden_header = 31')
+    call wait_result(previous, 'PASS', generation)
+    call assert_true(generation /= previous, &
+        'materialized header remains a captured input')
+    previous = generation
+    rc = c_unlink(project//'/optional/include/hidden.inc'//c_null_char)
+    call assert_true(rc == 0, 'optional header can restore the fallback include')
+    call wait_result(previous, 'PASS', generation)
+    first_model = status_field('active_model')
+    first_model_generation = status_field('active_model_generation')
+    previous = generation
+    rc = c_unlink(child_runs//c_null_char)
+    rc = c_unlink(generation_builds//c_null_char)
     call write_marker(.true.)
     call wait_result(previous, 'BUILD_FAIL', generation)
     call assert_equal_string(generation, previous, &
@@ -227,6 +273,37 @@ program test_gremlin_cmake
     call write_provider(17)
     call wait_result(previous, 'PASS', generation)
     previous = generation
+    call write_nested_provider(41)
+    call wait_result(previous, 'FAIL', generation)
+    call assert_true(generation /= previous, &
+        'referenced nested provider header edit wakes resident')
+    previous = generation
+    call write_nested_provider(29)
+    call wait_result(previous, 'PASS', generation)
+    previous = generation
+    call publish_provider_file('prebuilt_provider.mod', .true.)
+    call wait_result(previous, 'FAIL', generation)
+    call assert_true(generation /= previous, 'root provider module edit wakes resident')
+    previous = generation
+    call publish_provider_file('prebuilt_provider.mod', .false.)
+    call wait_result(previous, 'PASS', generation)
+    previous = generation
+    call publish_provider_file('_deps/nested-build/libnested_provider.a', .true.)
+    call wait_result(previous, 'FAIL', generation)
+    call assert_true(generation /= previous, &
+        'referenced provider archive wakes resident')
+    previous = generation
+    call publish_provider_file('_deps/nested-build/libnested_provider.a', .false.)
+    call wait_result(previous, 'PASS', generation)
+    previous = generation
+    call write_hidden_header(37)
+    call wait_result(previous, 'FAIL', generation)
+    call assert_true(generation /= previous, &
+        'explicit header beneath an excluded directory wakes resident')
+    previous = generation
+    call write_hidden_header(31)
+    call wait_result(previous, 'PASS', generation)
+    previous = generation
     call write_text(project//'/CMakeLists.txt', &
         read_text(project//'/CMakeLists.txt')//'# model input edit'//new_line('a'))
     call wait_result(previous, 'PASS', generation)
@@ -235,6 +312,44 @@ program test_gremlin_cmake
     call assert_true(status_field('active_model') /= first_model, &
         'the refreshed model has a new identity')
     previous = generation
+    call write_text(scratch//'/outside-hidden.inc', &
+        read_text(project//'/.venv/include/hidden.inc'))
+    rc = c_unlink(project//'/.venv/include/hidden.inc'//c_null_char)
+    call assert_true(rc == 0, 'referenced hidden header can be replaced')
+    rc = c_symlink(scratch//'/outside-hidden.inc'//c_null_char, &
+        project//'/.venv/include/hidden.inc'//c_null_char)
+    call assert_true(rc == 0, 'hidden header escape fixture exists')
+    call wait_result(previous, 'CAPTURE_FAIL', generation, &
+        'cannot enumerate declared input root: project')
+    call assert_equal_string(generation, previous, &
+        'a hidden header escape retains the last compiled generation')
+    rc = c_unlink(project//'/.venv/include/hidden.inc'//c_null_char)
+    call write_hidden_header(31)
+    call restart_cmake_lane()
+    rc = c_unlink(provider//'/libprebuilt_provider.a'//c_null_char)
+    call assert_true(rc == 0, 'referenced root archive can be replaced')
+    rc = c_symlink(scratch//'/provider-original/libprebuilt_provider.a'//c_null_char, &
+        provider//'/libprebuilt_provider.a'//c_null_char)
+    call assert_true(rc == 0, 'provider archive escape fixture exists')
+    call wait_result(previous, 'CAPTURE_FAIL', generation, &
+        'required input file is missing or unsupported: cmake-provider:')
+    rc = c_unlink(provider//'/libprebuilt_provider.a'//c_null_char)
+    call publish_provider_file('libprebuilt_provider.a', .false.)
+    call restart_cmake_lane()
+    authored_model = read_text(project//'/CMakeLists.txt')
+    rc = c_symlink('include'//c_null_char, &
+        project//'/.venv/alias'//c_null_char)
+    call assert_true(rc == 0, 'hidden intermediate directory alias exists')
+    call write_text(project//'/CMakeLists.txt', authored_model// &
+        'target_include_directories(marker PRIVATE '// &
+        '"${CMAKE_CURRENT_SOURCE_DIR}/.venv/alias/nested")'//new_line('a'))
+    call wait_result(previous, 'CAPTURE_FAIL', generation, &
+        'unsupported referenced CMake directory alias')
+    call assert_equal_string(generation, previous, &
+        'an uncaptured hidden directory alias retains the last generation')
+    rc = c_unlink(project//'/.venv/alias'//c_null_char)
+    call write_text(project//'/CMakeLists.txt', authored_model)
+    call restart_cmake_lane()
     call write_text(scratch//'/outside.f90', read_text(dependency//'/value.f90'))
     rc = c_unlink(dependency//'/package/leaf.f90'//c_null_char)
     call assert_true(rc == 0, 'referenced link can be changed in the fixture')
@@ -250,6 +365,17 @@ program test_gremlin_cmake
                            allow_terminal_error=.true.)
     call finish_assertions()
 contains
+    subroutine restart_cmake_lane()
+        ! Capture failures are terminal. Recover the fixture with a new owner.
+        call gremlin_stop_lane(driver, project, cache, state, 'cmake', owner, &
+            allow_terminal_error=.true.)
+        call gremlin_json(driver, project, cache, state, args, reply, process, 20000)
+        call assert_process_ok(process, 'restored CMake resident request starts')
+        owner = gremlin_field(reply, 'session_id')
+        call wait_result('', 'PASS', generation)
+        previous = generation
+    end subroutine restart_cmake_lane
+
     subroutine install_tool_trap()
         !! cmake and ctest on PATH log each call and exec the real tool. Case
         !! children carry FO_GREMLIN_EXECUTION_CWD; the generation build not.
@@ -607,6 +733,34 @@ contains
         call write_text(project//'/tracked.txt', 'captured dirty state')
     end subroutine initialize_project_git
 
+    subroutine native_provider_reference()
+        type(string_list_t) :: command
+        type(process_result_t) :: observed
+        call list_add(command, 'cmake')
+        call list_add(command, '--preset')
+        call list_add(command, 'cpu')
+        call run_process(command, project, observed)
+        call assert_process_ok(observed, 'native provider consumer configures')
+        command = string_list_t()
+        call list_add(command, 'cmake')
+        call list_add(command, '--build')
+        call list_add(command, 'build')
+        call list_add(command, '--target')
+        call list_add(command, 'marker')
+        call run_process(command, project, observed)
+        call assert_process_ok(observed, 'native provider consumer builds')
+        command = string_list_t()
+        call list_add(command, 'ctest')
+        call list_add(command, '--test-dir')
+        call list_add(command, 'build')
+        call list_add(command, '-R')
+        call list_add(command, '^registered_marker$')
+        call list_add(command, '--output-on-failure')
+        call run_process(command, project, observed)
+        call assert_process_ok(observed, 'native nested provider header passes')
+        call remove_tree(project//'/build')
+    end subroutine native_provider_reference
+
     subroutine make_provider()
         type(string_list_t) :: command
         type(process_result_t) :: observed
@@ -614,7 +768,31 @@ contains
         call make_directory(provider_source)
         call make_directory(provider//'/include')
         call make_directory(provider//'/lib')
+        call make_directory(provider//'/_deps/nested-build/include')
         call write_text(provider_source//'/README', 'prebuilt provider provenance')
+        call write_text(provider_source//'/CMakeLists.txt', &
+            'cmake_minimum_required(VERSION 3.22)'//new_line('a')// &
+            'project(prebuilt LANGUAGES Fortran)'//new_line('a')// &
+            'configure_file(provider.f90.in provider.f90 @ONLY)'//new_line('a')// &
+            'configure_file(nested.f90.in nested.f90 @ONLY)'//new_line('a')// &
+            'add_library(prebuilt_provider STATIC "${CMAKE_BINARY_DIR}/provider.f90")'// &
+            new_line('a')// &
+            'add_library(nested_provider STATIC "${CMAKE_BINARY_DIR}/nested.f90")'// &
+            new_line('a')// &
+            'set_target_properties(nested_provider PROPERTIES '// &
+            'ARCHIVE_OUTPUT_DIRECTORY '// &
+            '"${CMAKE_BINARY_DIR}/_deps/nested-build")')
+        call write_text(provider_source//'/provider.f90.in', &
+            'module prebuilt_provider'//new_line('a')// &
+            'integer, parameter :: provider_interface = @INTERFACE_VALUE@'// &
+            new_line('a')//'contains'//new_line('a')// &
+            'integer function provider_value()'//new_line('a')// &
+            'integer, external :: nested_value'//new_line('a')// &
+            'provider_value = 17 + nested_value()'//new_line('a')// &
+            'end function'//new_line('a')//'end module')
+        call write_text(provider_source//'/nested.f90.in', &
+            'integer function nested_value()'//new_line('a')// &
+            'nested_value = @NESTED_VALUE@'//new_line('a')//'end function')
         call list_add(command, 'git')
         call list_add(command, 'init')
         call run_process(command, provider_source, observed)
@@ -623,6 +801,9 @@ contains
         call list_add(command, 'git')
         call list_add(command, 'add')
         call list_add(command, 'README')
+        call list_add(command, 'CMakeLists.txt')
+        call list_add(command, 'provider.f90.in')
+        call list_add(command, 'nested.f90.in')
         call run_process(command, provider_source, observed)
         command = string_list_t()
         call list_add(command, 'git')
@@ -643,10 +824,53 @@ contains
         revision = trim(observed%stdout)
         newline_at = index(revision, new_line('a'))
         if (newline_at > 0) revision = revision(:newline_at - 1)
-        call write_text(provider//'/CMakeCache.txt', &
-            'CMAKE_HOME_DIRECTORY:INTERNAL='//provider_source//new_line('a'))
+        call build_provider(provider, '53', '29')
+        call build_provider(scratch//'/provider-original', '53', '29')
+        call build_provider(scratch//'/provider-updated', '54', '31')
         call write_provider(17)
+        call write_nested_provider(29)
     end subroutine make_provider
+
+    subroutine build_provider(build, interface_value, nested_value)
+        character(len=*), intent(in) :: build, interface_value, nested_value
+        type(string_list_t) :: command
+        type(process_result_t) :: observed
+        call list_add(command, trim(real_cmake))
+        call list_add(command, '-S')
+        call list_add(command, provider_source)
+        call list_add(command, '-B')
+        call list_add(command, build)
+        call list_add(command, '-G')
+        call list_add(command, 'Ninja')
+        call list_add(command, '-DINTERFACE_VALUE='//interface_value)
+        call list_add(command, '-DNESTED_VALUE='//nested_value)
+        call run_process(command, scratch, observed)
+        call assert_process_ok(observed, 'native prebuilt provider configures')
+        command = string_list_t()
+        call list_add(command, trim(real_cmake))
+        call list_add(command, '--build')
+        call list_add(command, build)
+        call run_process(command, scratch, observed)
+        call assert_process_ok(observed, 'native prebuilt provider builds')
+    end subroutine build_provider
+
+    subroutine publish_provider_file(relative, changed)
+        character(len=*), intent(in) :: relative
+        logical, intent(in) :: changed
+        type(string_list_t) :: command
+        type(process_result_t) :: observed
+        character(:), allocatable :: source, temporary
+        source = scratch//'/provider-original/'//relative
+        if (changed) source = scratch//'/provider-updated/'//relative
+        temporary = provider//'/publish.tmp'
+        call list_add(command, 'cp')
+        call list_add(command, source)
+        call list_add(command, temporary)
+        call run_process(command, scratch, observed)
+        call assert_process_ok(observed, 'provider artifact copy completes')
+        rc = fs_rename(temporary, provider//'/'//relative)
+        call assert_true(rc == 0, 'provider artifact publishes atomically')
+    end subroutine publish_provider_file
 
     subroutine write_provider(value)
         integer, intent(in) :: value
@@ -655,6 +879,14 @@ contains
         call write_text(provider//'/include/provider.inc', &
             'integer, parameter :: provider_header = '//trim(number))
     end subroutine write_provider
+
+    subroutine write_nested_provider(value)
+        integer, intent(in) :: value
+        character(len=8) :: number
+        write(number, '(i0)') value
+        call write_text(provider//'/_deps/nested-build/include/nested.inc', &
+            'integer, parameter :: nested_provider_header = '//trim(number))
+    end subroutine write_nested_provider
 
     subroutine write_dependency(value)
         integer, intent(in) :: value
@@ -665,6 +897,13 @@ contains
                       'integer, parameter :: result = '//trim(number)//new_line('a')// &
                         'end module values'//new_line('a'))
     end subroutine write_dependency
+    subroutine write_hidden_header(value)
+        integer, intent(in) :: value
+        character(len=8) :: number
+        write(number, '(i0)') value
+        call write_text(project//'/.venv/include/hidden.inc', &
+            'integer, parameter :: hidden_header = '//trim(number))
+    end subroutine write_hidden_header
     subroutine write_marker(broken)
         logical, intent(in) :: broken
         if (broken) then
@@ -674,20 +913,33 @@ contains
         call write_text(project//'/marker.f90', &
                         'program marker'//new_line('a')//'use values, only: result'// &
                         new_line('a')//'use raw_values, only: raw_result'// &
+                        new_line('a')//'use hidden_input, only: hidden_value'// &
+                        new_line('a')//'use prebuilt_provider'// &
                         new_line('a')//'implicit none'//new_line('a')// &
                         'logical :: exists'//new_line('a')// &
                         'include "provider.inc"'//new_line('a')// &
+                        'include "nested.inc"'//new_line('a')// &
+                        'include "hidden.inc"'//new_line('a')// &
+                        'if (hidden_header /= 31 .or. hidden_value /= 23) '// &
+                        'error stop "hidden input changed"'//new_line('a')// &
+                        'if (provider_interface /= 53) error stop "module changed"'// &
+                        new_line('a')// &
+                        'if (provider_value() /= 46) error stop "archive changed"'// &
+                        new_line('a')// &
                         'if (provider_header /= 17) error stop "provider changed"'// &
                         new_line('a')// &
+                        'if (nested_provider_header /= 29) '// &
+                        'error stop "nested provider changed"'//new_line('a')// &
                         'inquire(file="setup.ran", exist=exists)'//new_line('a')// &
            'if (.not. exists) error stop "CTest fixture or cwd lost"'//new_line('a')// &
             'if (result /= 7) error stop "dependency result changed"'//new_line('a')// &
             'if (raw_result /= 11) error stop "populated source lost"'//new_line('a')// &
                         'print *, "marker passed"'//new_line('a')//'end program marker')
     end subroutine write_marker
-    subroutine wait_result(old, outcome, current)
+    subroutine wait_result(old, outcome, current, capture_diagnostic)
         character(len=*), intent(in) :: old, outcome
         character(:), allocatable, intent(out) :: current
+        character(len=*), intent(in), optional :: capture_diagnostic
         integer :: i
         type(string_list_t) :: query
         type(json_value_t) :: status, failure
@@ -715,17 +967,24 @@ contains
                     .and. json_string_value(json_member(failure, 'case_id')) == &
                     'registered_marker') return
             end if
-            if (gremlin_field(status, 'last_outcome') == outcome) then
-                if (outcome == 'BUILD_FAIL' .or. current /= old) return
-            end if
+            if (outcome == 'BUILD_FAIL' .and. &
+                gremlin_field(status, 'last_outcome') == outcome) return
             if (outcome == 'CAPTURE_FAIL' .and. &
                 (gremlin_field(status, 'state') == 'capture_failed' .or. &
                  gremlin_field(status, 'state') == 'error')) then
-                call assert_true(index(gremlin_field(status, 'diagnostic'), &
-                    'referenced CMake input is missing or unsupported') > 0, &
-                    'referenced unsafe alias has an explicit closure diagnostic')
+                if (present(capture_diagnostic)) then
+                    call assert_true(index(gremlin_field(status, 'diagnostic'), &
+                        capture_diagnostic) > 0, &
+                        'referenced hidden escape has an explicit diagnostic')
+                else
+                    call assert_true(index(gremlin_field(status, 'diagnostic'), &
+                        'referenced CMake input is missing or unsupported') > 0, &
+                        'referenced unsafe alias has an explicit closure diagnostic')
+                end if
                 return
             end if
+            if (outcome == 'PASS' .and. &
+                gremlin_field(status, 'last_outcome') == 'BUILD_FAIL') exit
             if (gremlin_field(status, 'state') == 'error') exit
             if (gremlin_field(status, 'state') == 'capture_failed') exit
             call gremlin_wait_ms(20)
