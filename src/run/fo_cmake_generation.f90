@@ -198,7 +198,11 @@ contains
             if (len(key) > 15) then
                 if (key(:6) == 'CMAKE_' .and. &
                     key(len(key) - 8:) == '_COMPILER') then
-                    if (help == 'No help, variable specified on the command line.') &
+                    if (help == 'No help, variable specified on the command line.' .or. &
+                        help == 'Full path to the compiler used for language '// &
+                        '<LANG>. Set by CMake during compiler detection on the '// &
+                        'first configure; users may override on the command '// &
+                        'line to select a specific toolchain.') &
                         help = key(7:len(key) - 9)//' compiler'
                 end if
             end if
