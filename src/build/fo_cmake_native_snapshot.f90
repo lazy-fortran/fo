@@ -74,6 +74,7 @@ contains
         type(cm_plan_t), intent(inout) :: plan
         type(json_parser_t) :: parser
         type(json_event_t) :: event
+        type(cm_variable_t) :: variable
         character(:), allocatable :: text, key, section
         integer :: ierr, depth
         logical :: exists, schema
@@ -128,8 +129,11 @@ contains
                 else if (depth == 2) then
                     select case (section)
                     case ('environment')
-                        plan%environment = [plan%environment, &
-                                            cm_variable_t(key, event%string_val)]
+                        ! No cm_variable_t(key, event%string_val) constructor:
+                        ! GNU Fortran 12 gives it a wrong component length.
+                        variable%name = key
+                        variable%value = event%string_val
+                        plan%environment = [plan%environment, variable]
                     case ('configure_arguments', 'build_targets')
                         if (len(event%string_val) > 4096) then
                             plan%error = &

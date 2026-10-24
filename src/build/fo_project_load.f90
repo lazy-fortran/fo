@@ -595,7 +595,11 @@ contains
         if (ierr /= 0) n_devs = 0
         call fs_realpath(project_dir, physical, resolved)
         if (.not. resolved) physical = project_dir
-        roots = [string_t(project_dir), string_t(trim(physical))]
+        ! Assign components directly: GNU Fortran 12 -O2 builds
+        ! string_t(trim(physical)) with a wrong length.
+        allocate (roots(2))
+        roots(1)%s = project_dir
+        roots(2)%s = trim(physical)
         do k = 1, n_deps + n_devs
             if (k <= n_deps) then
                 dep = deps(k)
