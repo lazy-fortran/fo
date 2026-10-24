@@ -31,6 +31,7 @@ module fo_cmake_generation
         character(:), allocatable :: authored, replacement
     end type path_alias_t
     public :: cmake_capture_inventory, cmake_registered_names, cmake_capture_cleanup
+    public :: cmake_stage_git
 contains
     subroutine cmake_capture_inventory(backend, inventory, ierr, message, flags, &
             configured)
@@ -481,6 +482,33 @@ contains
         call git_command('.', arguments, log_file, ierr)
     end subroutine capture_git_repository
 
+    subroutine cmake_stage_git(source, snapshot, ierr, message)
+        character(len=*), intent(in) :: source, snapshot
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+        character(:), allocatable :: metadata, script
+        integer :: unit, closed
+        logical :: exists
+
+        metadata = snapshot//'/.fo-cmake'
+        inquire(file=metadata//'/project-git', exist=exists)
+        if (exists) then
+            ierr = 1
+            message = 'staged path collides with owned Git provenance'
+            return
+        end if
+        call fs_make_dir(metadata, ierr)
+        if (ierr /= 0) return
+        script = ''
+        call capture_project_git(source, metadata, script, ierr, message)
+        if (ierr /= 0 .or. len(script) == 0) return
+        open(newunit=unit, file=snapshot//'/.git', status='new', iostat=ierr)
+        if (ierr /= 0) return
+        write(unit, '(a)', iostat=ierr) 'gitdir: .fo-cmake/project-git'
+        close(unit, iostat=closed)
+        if (ierr == 0) ierr = closed
+    end subroutine cmake_stage_git
+
     subroutine capture_project_git(source, metadata, script, ierr, message)
         character(len=*), intent(in) :: source, metadata
         character(:), allocatable, intent(inout) :: script
@@ -488,8 +516,9 @@ contains
         character(len=*), intent(out) :: message
         character(len=PATH_LEN) :: log_file, root, physical
         character(:), allocatable :: repository
-        integer :: newline_at
-        character(len=32) :: arguments(3)
+        integer :: newline_at, status
+        character(len=PATH_LEN) :: branch, arguments(4)
+        logical :: unborn
 
         message = ''
         call make_tmpfile('fo-cmake-project-git', log_file)
@@ -511,21 +540,45 @@ contains
             ierr = 0
             return
         end if
+        arguments(:3) = [character(len=PATH_LEN) :: 'rev-parse', '--verify', 'HEAD']
+        call git_command(source, arguments(:3), log_file, status)
+        unborn = status /= 0
+        if (unborn) then
+            arguments(:3) = [character(len=PATH_LEN) :: 'symbolic-ref', '-q', 'HEAD']
+            call git_command(source, arguments(:3), log_file, ierr)
+            if (ierr /= 0) return
+            call read_text_file(log_file, branch)
+            newline_at = index(branch, new_line('a'))
+            if (newline_at > 0) branch = branch(:newline_at - 1)
+            arguments = [character(len=PATH_LEN) :: &
+                'show-ref', '--verify', '--quiet', trim(branch)]
+            call git_command(source, arguments, log_file, status)
+            if (status /= 1) then
+                ierr = 1
+                message = 'project Git HEAD is invalid'
+                return
+            end if
+        end if
         repository = trim(metadata)//'/project-git'
         call capture_git_repository(source, repository, log_file, ierr)
         arguments(1) = 'config'
         arguments(2) = '--remove-section'
         arguments(3) = 'remote.origin'
-        if (ierr == 0) call git_command(repository, arguments, log_file, ierr)
+        if (ierr == 0) call git_command(repository, arguments(:3), log_file, ierr)
         arguments(2) = 'core.bare'
         arguments(3) = 'false'
-        if (ierr == 0) call git_command(repository, arguments, log_file, ierr)
+        if (ierr == 0) call git_command(repository, arguments(:3), log_file, ierr)
         arguments(2) = 'core.worktree'
         arguments(3) = '../..'
-        if (ierr == 0) call git_command(repository, arguments, log_file, ierr)
+        if (ierr == 0) call git_command(repository, arguments(:3), log_file, ierr)
         arguments(1) = 'read-tree'
         arguments(2) = 'HEAD'
+        if (unborn) arguments(2) = '--empty'
         if (ierr == 0) call git_command(repository, arguments(:2), log_file, ierr)
+        if (unborn .and. ierr == 0) then
+            arguments(:3) = [character(len=PATH_LEN) :: 'symbolic-ref', 'HEAD', trim(branch)]
+            call git_command(repository, arguments(:3), log_file, ierr)
+        end if
         if (ierr /= 0) then
             message = 'cannot freeze project Git build provenance; diagnostic: '// &
                 trim(log_file)

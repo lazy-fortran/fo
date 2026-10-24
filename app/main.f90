@@ -33,6 +33,7 @@ program fo_main
     use fo_process, only: process_exit, process_run_argv_logged, argv_push, &
         process_configure_openmp, process_export_self_driver
     use fo_ffc_cli, only: ffc_cmd_build, ffc_cmd_run, ffc_native_requested
+    use fo_hook, only: hook_cli
     use fo_gremlin_cli, only: gremlin_cli_run
     use fo_commands, only: command_graph, command_info, command_changed, &
         command_clean, command_install, command_check, command_lint, &
@@ -74,6 +75,8 @@ program fo_main
     end if
 
     select case (trim(action))
+    case ('hook')
+        call hook_cli()
     case ('check')
         call cmd_check()
     case ('changed')
@@ -460,6 +463,8 @@ contains
         character(len=*), intent(in) :: command
 
         select case (command)
+        case ('hook')
+            write(output_unit, '(a)') 'usage: fo hook pre-commit [--json] [--bounded]'
         case ('install')
             call print_install_usage()
         case ('test')
