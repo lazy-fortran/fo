@@ -9,7 +9,7 @@ module fo_gremlin_case_inputs
     use fo_cache, only: HASH_LEN
     use fo_fs, only: fs_realpath
     use fx_hash, only: sha256_string
-    use fx_string, only: string_t
+    use fx_string, only: string_t, builder_t, builder_append, builder_to_string
     use fo_input_inventory, only: input_inventory_t, input_entry_t
     use fo_gremlin_generation, only: generation_t
     use fo_project_model, only: name_index_t, index_insert, index_lookup, &
@@ -151,6 +151,7 @@ contains
         type(string_t), allocatable :: files(:), contents(:), names(:), roots(:)
         character(len=HASH_LEN), allocatable :: digests(:)
         character(len=:), allocatable :: global, role
+        type(builder_t) :: global_inputs
         integer :: i, n, k
         logical :: have_oracle
 
@@ -166,8 +167,8 @@ contains
         call generation_model_roots(generation, project, roots)
         associate (inv => generation%input_inventory)
             allocate (files(inv%entry_count), contents(inv%entry_count))
-            global = 'fo-case-oracle-v1|'//generation%toolchain_key//'|'// &
-                generation%driver_digest
+            call builder_append(global_inputs, 'fo-case-oracle-v1|'// &
+                generation%toolchain_key//'|'//generation%driver_digest)
             n = 0
             have_oracle = .false.
             do i = 1, inv%entry_count
@@ -186,10 +187,7 @@ contains
                     files(n)%s = trim(inv%entries(i)%relative_path)
                     contents(n)%s = entry_text(inv%entries(i))
                 else
-                    global = global//new_line('a')// &
-                        trim(inv%entries(i)%root_alias)//':'// &
-                        trim(inv%entries(i)%relative_path)//'|'// &
-                        entry_text(inv%entries(i))
+                    call append_global_input(global_inputs, inv%entries(i))
                 end if
             end do
         end associate
@@ -200,7 +198,7 @@ contains
         end do
         call model_case_digests(generation%model, generation%units, roots, names, &
             files(1:n), contents(1:n), digests)
-        global = sha256_string(global)
+        global = sha256_string(builder_to_string(global_inputs))
         do k = 1, size(names)
             if (len_trim(digests(k)) == 0) cycle
             generation%oracle_digests(k) = sha256_string(global//digests(k))
@@ -231,6 +229,7 @@ contains
         type(string_t), allocatable :: files(:), contents(:), names(:), roots(:)
         character(len=64), allocatable :: digests(:)
         character(len=:), allocatable :: global
+        type(builder_t) :: global_inputs
         integer :: i, n, k
         logical :: complete
 
@@ -246,8 +245,8 @@ contains
         call generation_model_roots(generation, project, roots)
         associate (inv => generation%input_inventory)
             allocate (files(inv%entry_count), contents(inv%entry_count))
-            global = 'fo-case-global-v1|'//generation%toolchain_key//'|'// &
-                generation%driver_digest
+            call builder_append(global_inputs, 'fo-case-global-v1|'// &
+                generation%toolchain_key//'|'//generation%driver_digest)
             n = 0
             do i = 1, inv%entry_count
                 if (project_file(inv%entries(i))) then
@@ -255,10 +254,7 @@ contains
                     files(n)%s = trim(inv%entries(i)%relative_path)
                     contents(n)%s = entry_text(inv%entries(i))
                 else
-                    global = global//new_line('a')// &
-                        trim(inv%entries(i)%root_alias)//':'// &
-                        trim(inv%entries(i)%relative_path)//'|'// &
-                        entry_text(inv%entries(i))
+                    call append_global_input(global_inputs, inv%entries(i))
                 end if
             end do
         end associate
@@ -268,12 +264,24 @@ contains
         end do
         call model_case_digests(generation%model, generation%units, roots, names, &
             files(1:n), contents(1:n), digests)
-        global = sha256_string(global)
+        global = sha256_string(builder_to_string(global_inputs))
         do k = 1, size(names)
             if (len_trim(digests(k)) == 0) cycle
             generation%case_digests(k) = sha256_string(global//digests(k))
         end do
     end subroutine generation_case_digests_ensure
+
+    subroutine append_global_input(builder, entry)
+        type(builder_t), intent(inout) :: builder
+        type(input_entry_t), intent(in) :: entry
+
+        call builder_append(builder, new_line('a'))
+        call builder_append(builder, trim(entry%root_alias))
+        call builder_append(builder, ':')
+        call builder_append(builder, trim(entry%relative_path))
+        call builder_append(builder, '|')
+        call builder_append(builder, entry_text(entry))
+    end subroutine append_global_input
 
     function generation_case_digest(generation, name) result(digest)
         !! The input closure digest of a case; '' when unknown.
