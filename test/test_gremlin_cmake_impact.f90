@@ -12,7 +12,7 @@ program test_gremlin_cmake_impact
     character(:), allocatable :: driver, scratch, project, cache, state, session
     character(:), allocatable :: first, second, restored
     character(:), allocatable :: cache_help
-    character(:), allocatable :: build_alias, dependency, external_alias
+    character(:), allocatable :: build_alias, dependency, external_alias, source_alias
     character(*), parameter :: lane = 'cmake-impact-oracle'
     character, parameter :: nl = new_line('a')
     type(string_list_t) :: args
@@ -40,6 +40,9 @@ program test_gremlin_cmake_impact
     call make_directory(scratch//'/external')
     rc = c_symlink(scratch//'/external'//c_null_char, external_alias//c_null_char)
     call assert_true(rc == 0, 'unrelated directory has a symlink alias')
+    source_alias = scratch//'/dependency-alias'
+    rc = c_symlink(dependency//c_null_char, source_alias//c_null_char)
+    call assert_true(rc == 0, 'dependency source has a separate symlink alias')
     call write_text(dependency//'/CMakeLists.txt', &
         'cmake_minimum_required(VERSION 3.22)'//nl// &
         'project(value_dep LANGUAGES Fortran)'//nl// &
@@ -109,6 +112,12 @@ contains
             'include(FetchContent)'//nl// &
             'FetchContent_Declare(value_dep SOURCE_DIR "'//dependency//'")'//nl// &
             'FetchContent_MakeAvailable(value_dep)'//nl// &
+            'if(DEFINED PROBE_SOURCE)'//nl// &
+            'file(REAL_PATH "${PROBE_SOURCE}" actual_source)'//nl// &
+            'file(REAL_PATH "${value_dep_SOURCE_DIR}/value.f90" expected_source)'//nl// &
+            'if(NOT actual_source STREQUAL expected_source)'//nl// &
+            'message(FATAL_ERROR "dependency source alias changed")'//nl// &
+            'endif()'//nl//'endif()'//nl// &
             'set(expected_prefix "${value_dep_SOURCE_DIR}/build-alias-suffix")'//nl// &
             'if(DEFINED PROBE_PREFIX)'//nl// &
             'cmake_path(NORMAL_PATH PROBE_PREFIX OUTPUT_VARIABLE actual_prefix)'//nl// &
@@ -178,6 +187,7 @@ contains
         call list_add(command, '-B')
         call list_add(command, project//'/build')
         call list_add(command, '-DFETCHCONTENT_BASE_DIR:PATH='//build_alias//'/_deps')
+        call list_add(command, '-DPROBE_SOURCE:FILEPATH='//source_alias//'/value.f90')
         call run_process(command, project, observed)
         call assert_process_ok(observed, &
             'native CMake accepts the aliased dependency binary root')

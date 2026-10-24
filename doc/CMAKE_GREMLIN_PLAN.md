@@ -201,12 +201,17 @@ targets while `--target` selects registered test names; neither changes native
 project flags. Declared prebuilt `*_BUILD` providers capture their include/lib
 inputs and real Git HEAD provenance for the observed CMakeCache source probe.
 Explicit target include directories, including system and virtual-environment
-headers, are captured and fingerprinted. Frozen cache hints retain internal
-find-package header paths. Standard external `Package_DIR` hints keep installed package configs at their
-native SDK location, because imported targets can derive their prefix relative
-to that file. The package module tree remains captured and fingerprinted, and
-declared source providers keep their immutable relocation.
-Original header trees must also remain unchanged
+headers, are captured and fingerprinted.
+Absent include-search directories under ordinary captured project subtrees
+remain absent in frozen views; their later creation changes the generation.
+Accepted search paths are rechecked without following links during rediscovery.
+Missing referenced files, directory symlinks and undeclared external roots
+retain their strict input checks. Frozen cache hints retain internal
+find-package header paths. Standard external `Package_DIR` hints keep installed
+package configs at their native SDK location, because imported targets can
+derive their prefix relative to that file. The package module tree remains
+captured and fingerprinted, and declared source providers keep their immutable
+relocation. Original header trees must also remain unchanged
 through configuration and building: project code can force absolute SDK paths
 despite those hints. Changed trees fail explicitly, including on a cache hit.
 Authored configure inputs also declare external CMake module directories.
@@ -220,6 +225,12 @@ Private invocation copies retain authored file modes independently of the
 read-only stored bundle, so copied case fixtures can be edited in owned scratch.
 Repository-root projects also retain shallow, self-contained Git metadata so
 configure-time and runtime revision/dirty-state queries use the frozen sources.
+File API references to regular inputs or include subtrees beneath excluded
+project directories, such as NumPy headers in `.venv`, capture those inputs
+without capturing the whole environment. External header subtrees can use an
+explicit cached `*_SOURCE_DIR` declaration. Also set the public include-path
+cache variable used by the finder (for example `Python_INCLUDE_DIR`) so a
+relocated configure uses the frozen headers rather than rediscovering them.
 Arbitrary provider protocols, uncaptured external authored inputs, metadata
 capacity overflow and unsupported referenced symlinks fail explicitly.
 
