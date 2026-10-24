@@ -29,6 +29,7 @@ program test_cmake_capture_inputs
     type(process_result_t) :: process
     integer :: ierr, cleanup_status, i
     logical :: header_found, generated_found, present, found
+    logical :: implicit_found, declared_found, child_found
     character(:), allocatable :: compiler_args, original_args, original_toolchain
     character(len=4096) :: compiler_paths(3)
     character(len=8), parameter :: compiler_tools(3) = &
@@ -50,6 +51,11 @@ program test_cmake_capture_inputs
 
     call gremlin_setup(driver, scratch, project, cache, state)
     sdk = scratch//'/sdk/include'
+    call make_directory(scratch//'/compiler/include/package')
+    call make_directory(scratch//'/declared/include')
+    call write_text(scratch//'/compiler/include/implicit.h', '#define IMPLICIT 5'//nl)
+    call write_text(scratch//'/compiler/include/package/child.h', '#define CHILD 6'//nl)
+    call write_text(scratch//'/declared/include/declared.h', '#define DECLARED 8'//nl)
     call make_directory(sdk//'/nested')
     call write_text(sdk//'/nested/value.h', '#define VALUE 19'//nl)
     call make_symlink(sdk, scratch//'/include-alias')
@@ -61,6 +67,11 @@ program test_cmake_capture_inputs
     call write_text(project//'/CMakeLists.txt', &
         'cmake_minimum_required(VERSION 3.22)'//nl// &
         'project(capture_inputs LANGUAGES C CXX Fortran)'//nl// &
+        'set(DECLARED_SOURCE_DIR "'//scratch//'/declared" CACHE PATH "source")'//nl// &
+        'list(APPEND CMAKE_CXX_IMPLICIT_INCLUDE_DIRECTORIES "'// &
+        scratch//'/compiler/include" "${DECLARED_SOURCE_DIR}/include")'//nl// &
+        'set(CHILD_INCLUDE "'//scratch// &
+        '/compiler/include/package" CACHE PATH "headers")'//nl// &
         'set_property(CACHE CMAKE_C_COMPILER PROPERTY HELPSTRING '// &
         '"authored compiler help")'//nl// &
         'include(CTest)'//nl// &
@@ -79,13 +90,17 @@ program test_cmake_capture_inputs
         '"${CMAKE_SOURCE_DIR}/optional/include" '// &
         '"${CMAKE_SOURCE_DIR}/include" '// &
         '"${SDK_INCLUDE}" "${LOCAL_INCLUDE}")'//nl// &
+        'target_include_directories(probe SYSTEM PRIVATE "'// &
+        scratch//'/compiler/include" "${DECLARED_SOURCE_DIR}/include" '// &
+        '"${CHILD_INCLUDE}" "${SDK_INCLUDE}")'//nl// &
         'add_test(NAME header_value COMMAND probe)'//nl)
     call write_text(project//'/seed.in', '#define GENERATED 7'//nl)
     call write_text(project//'/main.c', &
         '#include "nested/value.h"'//nl//'#include "generated.h"'//nl// &
         '#include "local.h"'//nl//'#include "public.h"'//nl// &
+        '#include "declared.h"'//nl//'#include "child.h"'//nl// &
         'int main(void) { return VALUE == 19 && GENERATED == 7 && '// &
-        'LOCAL == 3 && PUBLIC == 11 ? 0 : 1; }'//nl)
+        'LOCAL == 3 && PUBLIC == 11 && DECLARED == 8 && CHILD == 6 ? 0 : 1; }'//nl)
     call initialize_project_git()
     original_args = environment_value('FO_CMAKE_ARGS')
     original_toolchain = environment_value('CMAKE_TOOLCHAIN_FILE')
@@ -117,16 +132,30 @@ program test_cmake_capture_inputs
         call install_headers(project, 'live')
         header_found = .false.
         generated_found = .false.
+        implicit_found = .false.
+        declared_found = .false.
+        child_found = .false.
         do i = 1, inventory%entry_count
             associate(entry => inventory%entries(i))
                 if (entry%relative_path == 'nested/value.h') then
                     header_found = len_trim(entry%content_digest) == 64
                 end if
+                if (entry%relative_path == 'implicit.h') implicit_found = .true.
+                if (entry%relative_path == 'include/declared.h') &
+                    declared_found = len_trim(entry%content_digest) == 64
+                if (entry%relative_path == 'child.h') &
+                    child_found = len_trim(entry%content_digest) == 64
                 if (entry%root_alias == 'project' .and. &
                     entry%relative_path == 'generated.h') generated_found = .true.
             end associate
         end do
-        call assert_true(header_found, 'referenced external header is fingerprinted')
+        call assert_true(.not. implicit_found, &
+            'native compiler implicit include stays delegated')
+        call assert_true(declared_found, &
+            'declared SYSTEM source overrides compiler implicit delegation')
+        call assert_true(child_found, &
+            'nonimplicit child of compiler include stays captured')
+        call assert_true(header_found, 'referenced external SYSTEM header is fingerprinted')
         call assert_true(generated_found, 'configure output in source is captured')
         context%driver_path = driver
         call cache_file_digest(driver, context%driver_digest)
@@ -149,6 +178,15 @@ program test_cmake_capture_inputs
         call assert_contains(trim(message), 'include-search path', &
             'retained absent include detects directory alias during rediscovery')
         call fs_remove_file(project//'/optional/include')
+        call write_text(scratch//'/declared/include/declared.h', &
+            '#define DECLARED 9'//nl)
+        call input_inventory_revalidate(project, inventory%declarations, inventory, &
+            ierr, message)
+        call assert_true(ierr /= 0, 'changed declared implicit header is rejected')
+        call assert_contains(trim(message), 'include/declared.h', &
+            'changed declared implicit header is named')
+        call write_text(scratch//'/declared/include/declared.h', &
+            '#define DECLARED 8'//nl)
         call write_text(sdk//'/nested/value.h', '#define VALUE 31'//nl)
         call input_inventory_revalidate(project, inventory%declarations, inventory, &
             ierr, message)
