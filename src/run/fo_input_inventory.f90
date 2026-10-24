@@ -16,7 +16,7 @@ module fo_input_inventory
     use fo_util, only: make_tmpfile, delete_tmpfile, read_text_file, &
         make_sibling_tmpfile, read_text_file_alloc
     use fo_external_inputs, only: external_requests_t, external_requests_add, &
-        external_inputs_resolve
+        external_inputs_resolve, external_include_flag
     use fx_action_result_store, only: action_result_file_mode, ACTION_RESULT_OK
     implicit none
     private
@@ -1375,8 +1375,8 @@ contains
             call mark_incomplete(inventory, trim(alias)// &
                 ' declares external compiler modules')
         end if
-        ! Link libraries and the OpenMP and BLAS metapackages resolve to files
-        ! recorded by capture_external_inputs.
+        ! Link libraries, the OpenMP and BLAS metapackages and absolute include
+        ! directories resolve to files recorded by capture_external_inputs.
         call external_requests_add(inventory%external_requests, config, &
             alias == 'project')
         if (config%mpi .or. config%hdf5 .or. config%netcdf .or. config%stdlib .or. &
@@ -1386,6 +1386,7 @@ contains
         end if
         do i = 1, config%n_flags
             if (index(config%flags(i), '-I') == 0) cycle
+            if (external_include_flag(config%flags, config%n_flags, i)) cycle
             call mark_incomplete(inventory, trim(alias)// &
                 ' has an unmodeled custom include path flag')
             exit

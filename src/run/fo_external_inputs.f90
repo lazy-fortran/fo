@@ -11,7 +11,8 @@ module fo_external_inputs
     use fo_link_resolve, only: resolve_link_token, build_lib_search_dirs, is_macos
     use fo_compiler_dialect, only: compiler_dialect, compiler_dialect_t, &
         selected_compiler_command, COMPILER_GFORTRAN
-    use fo_fs, only: fs_find_executable, fs_realpath, fs_path_is_absolute
+    use fo_fs, only: fs_find_executable, fs_realpath, fs_path_is_absolute, &
+        fs_collect_files
     use fx_immutable_store, only: immutable_store_hash_file, IMMUTABLE_OK
     use fo_cache, only: HASH_LEN
     implicit none
@@ -23,13 +24,17 @@ module fo_external_inputs
     type, public :: external_requests_t
         logical :: openmp = .false.
         logical :: static_link = .false.
-        integer :: n_links = 0, n_packages = 0, n_search = 0
+        integer :: n_links = 0, n_packages = 0, n_search = 0, n_includes = 0
         ! Allocated on first use: inventories are copied and held on stacks.
         character(len=NAME_LEN), allocatable :: links(:), packages(:), search(:)
+        character(len=NAME_LEN), allocatable :: includes(:)
         character(len=:), allocatable :: overflow
     end type external_requests_t
 
     public :: external_requests_add, external_inputs_resolve
+    public :: external_include_flag
+
+    integer, parameter :: MAX_INCLUDE_FILES = 4096
 
 contains
 
@@ -46,6 +51,16 @@ contains
         do i = 1, config%n_link_libs
             call add_unique(requests%links, requests%n_links, &
                 trim(config%link_libs(i)), requests%overflow)
+        end do
+        do i = 1, config%n_flags
+            if (.not. external_include_flag(config%flags, config%n_flags, i)) cycle
+            if (trim(config%flags(i)) == '-I') then
+                call add_unique(requests%includes, requests%n_includes, &
+                    trim(config%flags(i + 1)), requests%overflow)
+            else
+                call add_unique(requests%includes, requests%n_includes, &
+                    trim(config%flags(i)(3:)), requests%overflow)
+            end if
         end do
         start = 1
         do while (start <= len_trim(config%provider_packages))
@@ -78,6 +93,21 @@ contains
             end if
         end do
     end subroutine external_requests_add
+
+    logical function external_include_flag(flags, n_flags, i) result(modeled)
+        !! True for an absolute include directory, `-I/dir` or `-I /dir`, such
+        !! as pkg-config emits; its files are recorded as external inputs.
+        character(len=*), intent(in) :: flags(:)
+        integer, intent(in) :: n_flags, i
+
+        modeled = .false.
+        if (index(flags(i), '-I') /= 1) return
+        if (trim(flags(i)) == '-I') then
+            if (i < n_flags) modeled = fs_path_is_absolute(trim(flags(i + 1)))
+        else
+            modeled = fs_path_is_absolute(trim(flags(i)(3:)))
+        end if
+    end function external_include_flag
 
     subroutine add_unique(list, n, item, overflow)
         character(len=NAME_LEN), allocatable, intent(inout) :: list(:)
@@ -115,7 +145,7 @@ contains
         text = ''
         reasons = ''
         if (.not. requests%openmp .and. requests%n_links == 0 .and. &
-            requests%n_packages == 0) return
+            requests%n_packages == 0 .and. requests%n_includes == 0) return
         if (allocated(requests%overflow)) call reason(reasons, requests%overflow)
         text = 'fo-external-inputs 1'//new_line('a')
         call fs_find_executable(trim(selected_compiler_command()), compiler, found)
@@ -191,7 +221,49 @@ contains
             call record_file('pkg-config', package, &
                 trim(output)//'/'//package//'.pc', text, reasons)
         end do
+        do i = 1, requests%n_includes
+            call record_include_dir(trim(requests%includes(i)), text, reasons)
+        end do
     end subroutine external_inputs_resolve
+
+    subroutine record_include_dir(directory, text, reasons)
+        !! Every regular file beneath an absolute include directory; an absent
+        !! directory is recorded too, so that its later creation is a change.
+        character(len=*), intent(in) :: directory
+        character(len=:), allocatable, intent(inout) :: text, reasons
+        character(len=4096), allocatable :: files(:)
+        character(len=:), allocatable :: base
+        integer :: i, n, status
+        logical :: exists
+
+        base = directory
+        do while (len(base) > 1)
+            if (base(len(base):) /= '/') exit
+            base = base(:len(base) - 1)
+        end do
+        inquire(file=base//'/.', exist=exists)
+        if (.not. exists) then
+            text = text//'include-absent '//base//new_line('a')
+            return
+        end if
+        allocate(files(MAX_INCLUDE_FILES))
+        call fs_collect_files(base, '', '', '', files, n, recursive=.true., &
+            ierr=status)
+        if (status /= 0) then
+            call reason(reasons, 'include directory cannot be recorded within '// &
+                'the supported file count: '//base)
+            return
+        end if
+        do i = 1, n
+            if (index(files(i), base//'/') /= 1) then
+                call reason(reasons, 'include file escapes its directory: '// &
+                    trim(files(i)))
+                cycle
+            end if
+            call record_file('include', trim(files(i)(len(base) + 2:)), &
+                trim(files(i)), text, reasons)
+        end do
+    end subroutine record_include_dir
 
     subroutine record_compiler_file(compiler, name, text, reasons)
         character(len=*), intent(in) :: compiler, name

@@ -1,6 +1,7 @@
 program test_external_input_inventory
-    !! A project using the OpenMP metapackage and a BLAS link library has a
-    !! complete input inventory, and a changed library changes that inventory.
+    !! A project using the OpenMP metapackage, a BLAS link library and an
+    !! absolute include directory, as pkg-config emits for BLAS providers, has
+    !! a complete input inventory, and a changed library changes it.
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
     use fo_fs, only: fs_make_dir, fs_remove_tree
     use fo_input_inventory, only: input_declaration_t, input_inventory_t, &
@@ -29,6 +30,8 @@ program test_external_input_inventory
     project = trim(fixture)//'/project'
     library = trim(fixture)//'/lib/libblas.a'
     call fs_make_dir(trim(project)//'/src')
+    call fs_make_dir(trim(fixture)//'/include')
+    call write(trim(fixture)//'/include/cblas.h', '/* provider header */')
     call write(trim(library), '!<arch>'//new_line('a')//'first')
     call require(c_setenv('LIBRARY_PATH'//c_null_char, &
         trim(fixture)//'/lib'//c_null_char, 1_c_int) == 0, 'set LIBRARY_PATH')
@@ -36,6 +39,7 @@ program test_external_input_inventory
         'name = "external-inputs"'//new_line('a')// &
         '[build]'//new_line('a')// &
         'link = ["blas"]'//new_line('a')// &
+        'flags = "-I'//trim(fixture)//'/include/"'//new_line('a')// &
         '[dependencies]'//new_line('a')// &
         'openmp = "*"')
     call write(trim(project)//'/src/kernel.f90', 'module kernel'//new_line('a')// &
@@ -55,6 +59,8 @@ program test_external_input_inventory
     call require(index(record, 'openmp libgomp.spec ') > 0 .and. &
         index(record, 'openmp finclude/omp_lib.mod ') > 0, &
         'record names the compiler OpenMP inputs')
+    call require(index(record, 'include cblas.h ') > 0, &
+        'record names the provider include files')
 
     call input_inventory_revalidate(trim(project), none, initial, ierr, message)
     call require(ierr == 0, 'unchanged externals revalidate: '//trim(message))
