@@ -2,6 +2,7 @@ module fo_input_inventory
     !! Canonical, typed declaration of files and roots that can affect an fo run.
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char, &
         c_long_long
+    use, intrinsic :: iso_fortran_env, only: int64
     use fo_cache, only: HASH_LEN, cache_digest
     use fx_immutable_store, only: immutable_store_hash_file, IMMUTABLE_OK
     use fo_fpm_config, only: fpm_config_t, fpm_config_parse, fpm_config_allocate, &
@@ -68,6 +69,9 @@ module fo_input_inventory
         character(len=1024) :: diagnostic = ''
         logical :: valid = .true.
         logical :: complete = .false.
+        ! Build-time lookup only; canonicalization discards it before rewriting keys.
+        integer, allocatable, private :: entry_slots(:)
+        integer, private :: indexed_entry_count = 0
     end type input_inventory_t
 
     public :: input_inventory_discover, input_inventory_declarations_from_config
@@ -134,6 +138,7 @@ contains
         type(input_declaration_t), allocatable :: grown(:)
         integer :: root_index, i
 
+        call reset_entry_index(inventory)
         ierr = 1
         message = 'unsupported captured CMake include-search path: '//path
         root_index = alias_root(inventory, 'project')
@@ -173,6 +178,7 @@ contains
         integer :: i, j, slash, separator
         logical :: directory, ok
 
+        call reset_entry_index(inventory)
         ierr = 0
         message = ''
         do i = 1, inventory%root_count
@@ -255,6 +261,7 @@ contains
         integer :: i, j, slash
         logical :: ok
 
+        call reset_entry_index(inventory)
         ierr = 0
         message = ''
         do i = 1, inventory%root_count
@@ -2137,15 +2144,14 @@ contains
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
         type(input_entry_t), allocatable :: grown(:)
-        integer :: i, capacity
+        integer :: i, capacity, slot
 
         ierr = 0
         message = ''
-        do i = 1, inventory%entry_count
-            if (trim(inventory%entries(i)%root_alias) /= trim(entry%root_alias)) cycle
-            if (trim(inventory%entries(i)%relative_path) /= &
-                    trim(entry%relative_path)) cycle
-            if (trim(inventory%entries(i)%role) /= trim(entry%role)) cycle
+        call ensure_entry_index(inventory)
+        slot = entry_index_slot(inventory, entry)
+        i = inventory%entry_slots(slot)
+        if (i /= 0) then
             if (inventory%entries(i)%kind /= entry%kind .or. &
                     inventory%entries(i)%mode /= entry%mode .or. &
                     inventory%entries(i)%content_digest /= entry%content_digest &
@@ -2162,7 +2168,7 @@ contains
                     trim(entry%root_alias)//':'//trim(entry%relative_path)
             end if
             return
-        end do
+        end if
         if (inventory%entry_count == inventory%entry_capacity) then
             capacity = max(64, 2 * inventory%entry_capacity)
             allocate(grown(capacity))
@@ -2175,7 +2181,78 @@ contains
         end if
         inventory%entry_count = inventory%entry_count + 1
         inventory%entries(inventory%entry_count) = entry
+        inventory%entry_slots(slot) = inventory%entry_count
+        inventory%indexed_entry_count = inventory%entry_count
     end subroutine append_entry
+
+    subroutine reset_entry_index(inventory)
+        type(input_inventory_t), intent(inout) :: inventory
+
+        if (allocated(inventory%entry_slots)) deallocate(inventory%entry_slots)
+        inventory%indexed_entry_count = 0
+    end subroutine reset_entry_index
+
+    subroutine ensure_entry_index(inventory)
+        type(input_inventory_t), intent(inout) :: inventory
+        integer :: capacity, i, slot
+
+        capacity = 128
+        if (allocated(inventory%entry_slots)) then
+            capacity = size(inventory%entry_slots)
+            if (inventory%indexed_entry_count == inventory%entry_count .and. &
+                    inventory%entry_count < capacity / 2) return
+        end if
+        do while (inventory%entry_count >= capacity / 2)
+            capacity = 2 * capacity
+        end do
+        call reset_entry_index(inventory)
+        allocate(inventory%entry_slots(capacity))
+        inventory%entry_slots = 0
+        do i = 1, inventory%entry_count
+            slot = entry_index_slot(inventory, inventory%entries(i))
+            ! Match the old scan's first prior entry, including restored duplicates.
+            if (inventory%entry_slots(slot) == 0) inventory%entry_slots(slot) = i
+        end do
+        inventory%indexed_entry_count = inventory%entry_count
+    end subroutine ensure_entry_index
+
+    integer function entry_index_slot(inventory, entry) result(slot)
+        type(input_inventory_t), intent(in) :: inventory
+        type(input_entry_t), intent(in) :: entry
+        integer :: i
+
+        slot = int(modulo(entry_key_hash(entry), &
+            int(size(inventory%entry_slots), int64))) + 1
+        do
+            i = inventory%entry_slots(slot)
+            if (i == 0) return
+            if (same_entry_key(inventory%entries(i), entry)) return
+            slot = modulo(slot, size(inventory%entry_slots)) + 1
+        end do
+    end function entry_index_slot
+
+    integer(int64) function entry_key_hash(entry) result(hash)
+        type(input_entry_t), intent(in) :: entry
+
+        hash = 0_int64
+        call hash_key_part(entry%root_alias, hash)
+        call hash_key_part(entry%relative_path, hash)
+        call hash_key_part(entry%role, hash)
+    end function entry_key_hash
+
+    subroutine hash_key_part(text, hash)
+        character(len=*), intent(in) :: text
+        integer(int64), intent(inout) :: hash
+        integer(int64), parameter :: prime = 2147483647_int64
+        integer :: i, n
+
+        n = len_trim(text)
+        ! Products remain below 2**39, so this does not rely on signed overflow.
+        hash = modulo(131_int64 * hash + int(n, int64), prime)
+        do i = 1, n
+            hash = modulo(131_int64 * hash + int(iachar(text(i:i)), int64), prime)
+        end do
+    end subroutine hash_key_part
 
     subroutine canonicalize_inventory(inventory, ierr, message)
         type(input_inventory_t), intent(inout) :: inventory
@@ -2186,6 +2263,7 @@ contains
         character(len=:), allocatable :: parts(:)
         integer :: i, j, capacity, root_index, retained, n_parts
 
+        call reset_entry_index(inventory)
         ierr = 0
         message = ''
         do i = 1, inventory%entry_count
