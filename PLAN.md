@@ -329,6 +329,19 @@ compiler bootstrap/focused/consumer logs and exact source manifests.
   39593355783 is green; the combined race/MCP native gate passes 32 programs
   on GCC 12.2 with -O1 -g -fopenmp (21817031, COMPLETED 0:0).
 
+## Cold release scheduling (2026-10-21)
+
+- [V] Ready-source compilation now uses dynamic work assignment within each
+  existing dependency level. Object keys, dependency barriers, ordered log
+  assembly and failure handling remain unchanged.
+- [V] aCluster 21817017, GCC 12.2, eight workers, COMPLETED 0:0: backend and
+  native CMake tests pass; candidate SHA256
+  1fa65488a9fb9dc7afbd51543b4c36eb306970a350f7a5962846af6a7a21e018.
+  Equal-source cold installs under process tracing take 267.42 seconds before
+  and 255.44 seconds after. Warm unchanged installs take 0.09 and 0.08 seconds
+  with no compilation output. These single samples are advisory; the earlier
+  316.77-second trace used two workers and is not a controlled comparison.
+
 ## Native CMake Fortran repair (2026-10-21)
 
 - [V] Source `8734651` retains CMake's per-source preprocessing choice from
