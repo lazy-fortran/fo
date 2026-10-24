@@ -63,7 +63,7 @@ contains
     end function missing_path_dependency
 
     subroutine capture_candidate(project_dir, driver_pin, generation, lease, ok, &
-            registration_error, message, change_watch)
+            registration_error, message, change_watch, previous_inventory)
         character(len=*), intent(in) :: project_dir
         type(driver_pin_t), intent(in) :: driver_pin
         type(generation_t), intent(out) :: generation
@@ -72,6 +72,7 @@ contains
         integer, intent(out) :: registration_error
         character(len=*), intent(out) :: message
         type(change_watch_t), intent(inout), optional :: change_watch
+        type(input_inventory_t), intent(in), optional :: previous_inventory
 
         type(backend_t) :: backend
         type(generation_context_t) :: context
@@ -101,7 +102,8 @@ contains
             return
         end if
         if (backend%kind == BACKEND_CMAKE) then
-            call cmake_capture_inventory(backend, input_inventory, ierr, message)
+            call capture_cmake_inventory(backend, input_inventory, ierr, message, &
+                previous_inventory)
         else
             call input_inventory_declarations_from_config(project_dir, declarations, &
                 ierr, message)
@@ -173,6 +175,34 @@ contains
         change_watch%capture_count = change_watch%capture_count + 1
         call observe_test_capture(change_watch%capture_count, generation%identity)
     end subroutine capture_candidate
+
+    subroutine capture_cmake_inventory(backend, inventory, ierr, message, previous)
+        type(backend_t), intent(inout) :: backend
+        type(input_inventory_t), intent(out) :: inventory
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+        type(input_inventory_t), intent(in), optional :: previous
+
+        ! Native configure may recreate source links without changing their inputs.
+        ! Compare the complete current closure before invoking configure again.
+        if (present(previous)) then
+            if (previous%valid .and. previous%complete) then
+                call cmake_capture_inventory(backend, inventory, ierr, message, &
+                    configured=.true.)
+                if (ierr == 0) then
+                    if (inventory%valid .and. inventory%complete) then
+                        if (inventory%digest == previous%digest) return
+                    end if
+                    call cmake_capture_cleanup(inventory, ierr)
+                    if (ierr /= 0) then
+                        message = 'cannot clean owned CMake comparison metadata'
+                        return
+                    end if
+                end if
+            end if
+        end if
+        call cmake_capture_inventory(backend, inventory, ierr, message)
+    end subroutine capture_cmake_inventory
 
     subroutine case_identity_capture(backend, driver_digest, flags, generation, ok, &
             configured)

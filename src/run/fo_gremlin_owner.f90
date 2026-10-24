@@ -609,8 +609,16 @@ contains
         end if
         if (o%debounce_ms <= 0_int64 .or. now_ms < o%debounce_ms) return
         o%debounce_ms = 0_int64
-        call capture_candidate(o%project_dir, o%pin, current, current_lease, ok, ierr, &
-            o%message, o%watch)
+        if (o%have_candidate) then
+            call capture_candidate(o%project_dir, o%pin, current, current_lease, ok, &
+                ierr, o%message, o%watch, o%candidate%input_inventory)
+        else if (o%have_active) then
+            call capture_candidate(o%project_dir, o%pin, current, current_lease, ok, &
+                ierr, o%message, o%watch, o%active%input_inventory)
+        else
+            call capture_candidate(o%project_dir, o%pin, current, current_lease, ok, &
+                ierr, o%message, o%watch)
+        end if
         if (ierr /= 0) then
             o%message = 'cannot register captured generation: '//trim(o%message)
             return
