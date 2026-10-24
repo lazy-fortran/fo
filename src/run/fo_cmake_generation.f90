@@ -2,7 +2,8 @@ module fo_cmake_generation
     !! Delegated CMake generation capture. CMake and CTest own configuration
     !! and registered-test semantics; no FPM manifest or source scanner is used.
     use fo_build_backend, only: backend_t, cmake_configure
-    use fo_cmake_context, only: cmake_context_build_path
+    use fo_cmake_context, only: cmake_context_build_path, cmake_context_t, &
+        cmake_context_read_reply
     use fo_cmake_native_config, only: native_cmake_selected, native_cmake_configure
     use fo_cmake_native_model, only: cm_plan_t
     use fo_cmake_native_snapshot, only: native_snapshot_write
@@ -21,7 +22,7 @@ module fo_cmake_generation
     use fx_string, only: string_t
     use fo_project_model, only: project_model_t, model_init
     use fx_json_parse, only: json_parser_t, json_event_t, json_parser_init_strict, &
-        json_parser_next, JSON_KEY, JSON_STRING, JSON_BOOL, JSON_ERROR, &
+        json_parser_next, JSON_KEY, JSON_STRING, JSON_BOOL, JSON_INTEGER, JSON_ERROR, &
         JSON_END_OF_INPUT, &
         JSON_ARRAY_START, JSON_ARRAY_END, JSON_OBJECT_START, JSON_OBJECT_END
     implicit none
@@ -895,6 +896,128 @@ contains
         end do
     end function upper
 
+    subroutine compiler_implicit_includes(context, includes, ierr, message)
+        !! Only the current native reply can delegate exact compiler SDK roots.
+        type(cmake_context_t), intent(in) :: context
+        type(string_t), allocatable, intent(out) :: includes(:)
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+        type(cmake_context_t) :: current
+        type(string_t), allocatable :: grown(:)
+        type(json_parser_t) :: parser
+        type(json_event_t) :: event
+        character(:), allocatable :: text, key, kind, file, toolchains, reply
+        character(len=64) :: ancestors(16)
+        character(len=PATH_LEN) :: physical
+        integer :: depth, pass, status, major, j
+
+        allocate(includes(0))
+        ierr = 0
+        message = ''
+        current = context
+        call cmake_context_read_reply(current)
+        if (.not. current%request_seen .or. .not. current%has_toolchains) return
+        if (.not. allocated(current%reply_index)) return
+        reply = current%reply_index(:index(current%reply_index, '/', back=.true.))
+        call read_text_file_alloc(current%reply_index, text, status)
+        if (status /= 0) return
+        toolchains = ''
+        major = 0
+        do pass = 1, 2
+            key = ''
+            kind = ''
+            file = ''
+            depth = 0
+            ancestors = ''
+            call json_parser_init_strict(parser, text)
+            do
+                call json_parser_next(parser, event)
+                if (event%event_type == JSON_END_OF_INPUT) exit
+                if (event%event_type == JSON_ERROR) then
+                    ierr = 1
+                    message = 'invalid CMake compiler input metadata JSON'
+                    return
+                end if
+                select case (event%event_type)
+                case (JSON_KEY)
+                    key = event%string_val
+                case (JSON_OBJECT_START, JSON_ARRAY_START)
+                    depth = depth + 1
+                    if (depth > size(ancestors)) then
+                        ierr = 1
+                        message = 'CMake compiler input metadata exceeds supported nesting'
+                        return
+                    end if
+                    ancestors(depth) = key
+                    if (pass == 1 .and. depth == 3) then
+                        kind = ''
+                        file = ''
+                    end if
+                    key = ''
+                case (JSON_OBJECT_END, JSON_ARRAY_END)
+                    if (pass == 1 .and. event%event_type == JSON_OBJECT_END .and. &
+                        depth == 3 .and. ancestors(2) == 'objects') then
+                        if (kind == 'toolchains') toolchains = file
+                    end if
+                    depth = depth - 1
+                    key = ''
+                case (JSON_INTEGER)
+                    if (pass == 2 .and. depth == 2) then
+                        if (ancestors(2) == 'version' .and. key == 'major') &
+                            major = int(event%int_val)
+                    end if
+                    key = ''
+                case (JSON_STRING)
+                    if (pass == 2 .and. depth == 1 .and. key == 'kind') &
+                        kind = event%string_val
+                    if (pass == 1 .and. depth == 3) then
+                        if (ancestors(2) == 'objects') then
+                            if (key == 'kind') kind = event%string_val
+                            if (key == 'jsonFile') file = event%string_val
+                        end if
+                    else if (pass == 2 .and. depth == 6) then
+                        if (ancestors(2) == 'toolchains' .and. &
+                            ancestors(4) == 'compiler' .and. &
+                            ancestors(5) == 'implicit' .and. &
+                            ancestors(6) == 'includeDirectories') then
+                            if (.not. fs_path_is_absolute(event%string_val) .or. &
+                                len(event%string_val) > PATH_LEN) then
+                                ierr = 1
+                                message = 'invalid CMake compiler include directory'
+                                return
+                            end if
+                            call canonical_directory(event%string_val, physical)
+                            allocate(grown(size(includes) + 1))
+                            do j = 1, size(includes)
+                                grown(j)%s = includes(j)%s
+                            end do
+                            grown(size(grown))%s = trim(physical)
+                            call move_alloc(grown, includes)
+                        end if
+                    end if
+                    key = ''
+                end select
+            end do
+            if (pass == 2) then
+                if (kind /= 'toolchains' .or. major /= 1) then
+                    ierr = 1
+                    message = 'unsupported CMake compiler input metadata'
+                end if
+                exit
+            end if
+            ! File API object names are basenames inside this exact reply.
+            if (len(toolchains) == 0) return
+            if (index(toolchains, '/') > 0 .or. &
+                index(toolchains, achar(92)) > 0) then
+                ierr = 1
+                message = 'invalid CMake toolchains object path'
+                return
+            end if
+            call read_text_file_alloc(reply//toolchains, text, status)
+            if (status /= 0) return
+        end do
+    end subroutine compiler_implicit_includes
+
     subroutine validate_cmake_paths(backend, roots, ierr, message, inventory, &
             n_roots, bundles, labels, names)
         type(backend_t), intent(in) :: backend
@@ -905,6 +1028,7 @@ contains
         integer, intent(inout), optional :: n_roots
         character(len=*), intent(inout), optional :: bundles(:), labels(:), names(:)
         character(len=PATH_LEN), allocatable :: files(:)
+        type(string_t), allocatable :: implicit_includes(:)
         character(len=PATH_LEN) :: normalized, authored, project, build, physical
         character(len=PATH_LEN) :: cmake_root, toolchain
         character(len=PATH_LEN) :: digest_parts(1)
@@ -917,7 +1041,7 @@ contains
         character(len=64) :: ancestors(64)
         character(len=PATH_LEN) :: pending_paths(64)
         logical :: generated(64), cmake_input(64), captured, exists, include_path
-        logical :: delegated
+        logical :: delegated, implicit_include
 
         allocate(files(2048))
         allocate(character(len=1048576) :: text)
@@ -927,6 +1051,9 @@ contains
         if (present(n_roots)) count = n_roots
         call canonical_directory(backend%project_dir, project)
         call canonical_directory(cmake_context_build_path(backend%cmake), build)
+        call compiler_implicit_includes(backend%cmake, implicit_includes, &
+            ierr, message)
+        if (ierr /= 0) return
         cmake_root = ''
         toolchain = ''
         call read_text_file(trim(build)//'/CMakeCache.txt', text)
@@ -1006,6 +1133,7 @@ contains
                             authored = normalized
                             call canonical_authored_path(normalized)
                             include_path = any(ancestors(:depth) == 'includes')
+                            implicit_include = .false.
                             if (include_path) then
                                 ! CMake permits absent search directories. The
                                 ! project scan detects their later creation.
@@ -1041,7 +1169,16 @@ contains
                                     end if
                                     captured = .true.
                                 end do
-                                if (.not. captured) then
+                                ! Declared inputs take precedence over the compiler's
+                                ! implicit search path, including SYSTEM providers.
+                                if (.not. captured .and. provider_root == 0 .and. &
+                                    .not. inside(physical, project)) then
+                                    do j = 1, size(implicit_includes)
+                                        if (trim(physical) == implicit_includes(j)%s) &
+                                            implicit_include = .true.
+                                    end do
+                                end if
+                                if (.not. captured .and. .not. implicit_include) then
                                     digest_parts(1) = physical
                                     digest = cache_digest(digest_parts, 1)
                                     call add_source(trim(physical), 'include-'//digest(:16), &
@@ -1062,9 +1199,15 @@ contains
                             do j = 1, count
                                 if (inside(normalized, roots(j))) captured = .true.
                             end do
+                            if (include_path .and. .not. captured) then
+                                do j = 1, size(implicit_includes)
+                                    if (trim(normalized) == implicit_includes(j)%s) &
+                                        implicit_include = .true.
+                                end do
+                            end if
                             ! CMake's installation and exact toolchain stay delegated.
                             ! Authored files under /opt or /usr still need capture.
-                            delegated = .false.
+                            delegated = implicit_include
                             if (index(files(i), '/cmakeFiles-') > 0) then
                                 delegated = cmake_input(depth)
                                 if (trim(normalized) == trim(toolchain)) &
