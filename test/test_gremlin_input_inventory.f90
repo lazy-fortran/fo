@@ -2,6 +2,7 @@ program test_gremlin_input_inventory
     use fo_fs, only: fs_make_dir, fs_remove_file, fs_remove_tree, fs_rename
     use fo_input_inventory, only: input_declaration_t, input_inventory_t, &
         input_inventory_discover, input_inventory_declarations_from_config, &
+        input_inventory_cmake_reference, &
         INPUT_FILE, INPUT_DIRECTORY
     use fo_util, only: make_tmpfile, read_text_file
     use fo_gremlin_execution_view, only: execution_view_t, execution_view_create, &
@@ -204,12 +205,104 @@ program test_gremlin_input_inventory
     call require(changed%digest /= previous%digest, &
         'acquired dependency source edit changes inventory digest')
 
+    call check_entry_key_collisions(trim(fixture))
     call check_whole_root_outputs(trim(fixture))
     call check_flattened_git_dependencies(trim(fixture))
     call check_dependency_directory_inputs(trim(fixture))
     call fs_remove_tree(trim(fixture))
 
 contains
+
+    subroutine check_entry_key_collisions(parent)
+        character(len=*), intent(in) :: parent
+        ! Distinct safe paths with equal full key hashes for either shared role.
+        character(len=64), parameter :: paths(2) = [character(len=64) :: &
+            '.cache/collision-3d4dce1f5d075b87.dat', &
+            '.cache/collision-eada115ecd0928a7.dat']
+        type(input_declaration_t) :: items(4)
+        type(input_inventory_t) :: directory_only, overlap, failed, copied
+        character(len=:), allocatable :: root
+        character(len=1024) :: message
+        character(len=64) :: original_digest
+        integer :: i, status
+
+        root = trim(parent)//'/key-collisions'
+        call fs_make_dir(root//'/.cache')
+        call write(root//'/fpm.toml', 'name = "key-collisions"')
+        do i = 1, size(paths)
+            call write(root//'/'//trim(paths(i)), 'collision payload')
+        end do
+        call write(root//'/.cache/part:one', 'first tuple')
+        call write(root//'/.cache/part', 'second tuple')
+        items(1)%root_alias = 'project'
+        items(1)%relative_path = '.cache'
+        items(1)%role = 'runtime-data'
+        items(1)%expected_kind = INPUT_DIRECTORY
+        items(2) = items(1)
+        items(2)%relative_path = paths(1)
+        items(2)%expected_kind = INPUT_FILE
+        items(3) = items(2)
+        items(3)%relative_path = '.cache/part:one'
+        items(3)%role = 'two'
+        items(4) = items(3)
+        items(4)%relative_path = '.cache/part'
+        items(4)%role = 'one:two'
+        call input_inventory_discover(root, items(:1), directory_only, &
+            status, message)
+        call require(status == 0, 'collision directory inventory: '//trim(message))
+        call input_inventory_discover(root, items, overlap, status, message)
+        call require(status == 0, 'overlapping collision inventory: '//trim(message))
+        do i = 1, size(paths)
+            call require(has_entry(overlap, 'project', trim(paths(i)), &
+                'runtime-data'), 'full-hash collisions retain distinct inputs')
+        end do
+        call require(overlap%entry_count == directory_only%entry_count + 2, &
+            'overlapping file deduplicates while distinct role tuples remain')
+        call require(has_entry(overlap, 'project', '.cache/part:one', 'two') &
+            .and. has_entry(overlap, 'project', '.cache/part', 'one:two'), &
+            'tuple separators do not alias distinct path and role fields')
+
+        items(2)%writable_at_execution = .true.
+        call input_inventory_discover(root, items(:2), failed, status, message)
+        call require(status /= 0 .and. trim(message) == &
+            'input mutability conflicts during inventory: project:'//trim(paths(1)), &
+            'colliding duplicate retains its mutability diagnostic')
+        copied = failed
+        original_digest = ''
+        do i = 1, copied%entry_count
+            if (copied%entries(i)%relative_path /= paths(1) .and. &
+                    copied%entries(i)%relative_path /= paths(2)) cycle
+            copied%entries(i)%role = 'cmake-project-input'
+            if (copied%entries(i)%relative_path /= paths(2)) cycle
+            original_digest = copied%entries(i)%content_digest
+            copied%entries(i)%content_digest = 'changed'
+            copied%entries(i)%writable_at_execution = .true.
+        end do
+        call input_inventory_cmake_reference(copied, root//'/'//trim(paths(2)), &
+            status, message)
+        call require(status /= 0 .and. trim(message) == &
+            'input changed or conflicts during inventory: project:'//trim(paths(2)), &
+            'copied public key edits rebuild before value-conflict lookup')
+        do i = 1, copied%entry_count
+            if (copied%entries(i)%relative_path == paths(2)) &
+                copied%entries(i)%content_digest = original_digest
+        end do
+        call input_inventory_cmake_reference(copied, root//'/'//trim(paths(2)), &
+            status, message)
+        call require(status /= 0 .and. trim(message) == &
+            'input mutability conflicts during inventory: project:'//trim(paths(2)), &
+            'value conflicts keep precedence over mutability for colliding keys')
+        do i = 1, copied%entry_count
+            if (copied%entries(i)%relative_path == paths(2)) &
+                copied%entries(i)%writable_at_execution = .false.
+        end do
+        call input_inventory_cmake_reference(copied, root//'/'//trim(paths(2)), &
+            status, message)
+        call require(status == 0, 'copied inventory recovers after conflicts: '// &
+            trim(message))
+        call require(has_entry(failed, 'project', trim(paths(2)), &
+            'runtime-data'), 'editing a copy preserves the original inventory')
+    end subroutine check_entry_key_collisions
 
     subroutine check_flattened_git_dependencies(parent)
         character(len=*), intent(in) :: parent
