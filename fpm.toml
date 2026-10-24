@@ -47,6 +47,11 @@ source-dir = "test"
 main = "test_stat_memo.f90"
 
 [[test]]
+name = "test_harness_read_text"
+source-dir = "test"
+main = "test_harness_read_text.f90"
+
+[[test]]
 name = "test_harness_tmpdir"
 source-dir = "test"
 main = "test_harness_tmpdir.f90"
