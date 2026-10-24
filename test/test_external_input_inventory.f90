@@ -7,6 +7,8 @@ program test_external_input_inventory
     use fo_input_inventory, only: input_declaration_t, input_inventory_t, &
         input_inventory_discover, input_inventory_revalidate
     use fo_util, only: make_tmpfile, read_text_file_alloc
+    use fo_compiler_dialect, only: compiler_dialect_t, compiler_dialect, &
+        selected_compiler_command, COMPILER_GFORTRAN
     implicit none
 
     interface
@@ -23,8 +25,12 @@ program test_external_input_inventory
     character(len=:), allocatable :: record
     type(input_declaration_t) :: none(0)
     type(input_inventory_t) :: initial, changed, missing
+    type(compiler_dialect_t) :: dialect
     integer :: ierr
+    logical :: openmp_modeled
 
+    dialect = compiler_dialect(trim(selected_compiler_command()))
+    openmp_modeled = dialect%kind == COMPILER_GFORTRAN
     call make_tmpfile('fo-external-input-fixture', fixture)
     call fs_make_dir(trim(fixture)//'/lib')
     project = trim(fixture)//'/project'
@@ -47,8 +53,14 @@ program test_external_input_inventory
 
     call input_inventory_discover(trim(project), none, initial, ierr, message)
     call require(ierr == 0, 'discover: '//trim(message))
-    call require(initial%complete, 'OpenMP and BLAS inputs are complete: '// &
-        trim(initial%diagnostic))
+    if (openmp_modeled) then
+        call require(initial%complete, 'OpenMP and BLAS inputs are complete: '// &
+            trim(initial%diagnostic))
+    else
+        call require(.not. initial%complete .and. &
+            index(initial%diagnostic, 'OpenMP inputs are modeled for gfortran only') > 0, &
+            'unsupported OpenMP compiler stays incomplete: '//trim(initial%diagnostic))
+    end if
     call require(has_entry(initial, 'build/.fo-external-inputs.txt'), &
         'external input record is an inventory entry')
     call read_text_file_alloc(trim(project)//'/build/.fo-external-inputs.txt', &
@@ -56,9 +68,11 @@ program test_external_input_inventory
     call require(ierr == 0, 'read external input record')
     call require(index(record, 'link-fo blas ') > 0 .and. &
         index(record, '/lib/libblas.a') > 0, 'record names the linked BLAS file')
-    call require(index(record, 'openmp libgomp.spec ') > 0 .and. &
-        index(record, 'openmp finclude/omp_lib.mod ') > 0, &
-        'record names the compiler OpenMP inputs')
+    if (openmp_modeled) then
+        call require(index(record, 'openmp libgomp.spec ') > 0 .and. &
+            index(record, 'openmp finclude/omp_lib.mod ') > 0, &
+            'record names the compiler OpenMP inputs')
+    end if
     call require(index(record, 'include cblas.h ') > 0, &
         'record names the provider include files')
 
@@ -71,7 +85,7 @@ program test_external_input_inventory
         index(message, 'build/.fo-external-inputs.txt') > 0, &
         'changed BLAS library is detected: '//trim(message))
     call input_inventory_discover(trim(project), none, changed, ierr, message)
-    call require(ierr == 0 .and. changed%complete .and. &
+    call require(ierr == 0 .and. (changed%complete .eqv. openmp_modeled) .and. &
         changed%digest /= initial%digest, 'changed library changes the inventory')
 
     call write(trim(project)//'/fpm.toml', &
