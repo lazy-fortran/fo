@@ -112,6 +112,8 @@ contains
         call argv_push(packed, n_args, 'build')
         call argv_push(packed, n_args, '--tests')
         if (present(cases)) then
+            ! Explicit cases already bound the build scope, including slow cases.
+            if (size(cases) > 0) call argv_push(packed, n_args, '--all')
             do i = 1, size(cases)
                 call argv_push(packed, n_args, '--case')
                 call argv_push(packed, n_args, trim(cases(i)))
@@ -1114,6 +1116,8 @@ contains
         allocate (model_request%exclude_labels(request%n_exclude_labels))
         allocate (model_request%layers(request%n_layers))
         model_request%filter = trim(request%filter)
+        ! An explicit required case may carry an otherwise excluded slow label.
+        model_request%all = request%n_targets > 0
         do i = 1, request%n_labels
             model_request%include_labels(i)%s = trim(request%labels(i))
         end do
