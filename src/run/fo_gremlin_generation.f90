@@ -145,16 +145,38 @@ contains
         logical, intent(in) :: full
         character(len=HASH_LEN) :: key
         character(len=:), allocatable :: text
-        integer :: i
+        integer :: i, length, cursor, row_length
 
-        text = 'model-key|1|'//trim(driver_digest)
+        length = len('model-key|1|') + len_trim(driver_digest)
         do i = 1, inventory%entry_count
             associate (e => inventory%entries(i))
-                text = text//new_line('a')//trim(e%root_alias)//'|'// &
+                length = length + 6 + len_trim(e%root_alias) + &
+                    len_trim(e%relative_path) + len_trim(e%role) + &
+                    len_trim(e%link_target)
+                if (full .or. defines_model(e)) &
+                    length = length + 1 + len_trim(e%content_digest)
+            end associate
+        end do
+        allocate (character(len=length) :: text)
+        cursor = len('model-key|1|') + len_trim(driver_digest)
+        text(:cursor) = 'model-key|1|'//trim(driver_digest)
+        cursor = cursor + 1
+        do i = 1, inventory%entry_count
+            associate (e => inventory%entries(i))
+                row_length = 6 + len_trim(e%root_alias) + &
+                    len_trim(e%relative_path) + len_trim(e%role) + &
+                    len_trim(e%link_target)
+                text(cursor:cursor + row_length - 1) = &
+                    new_line('a')//trim(e%root_alias)//'|'// &
                     trim(e%relative_path)//'|'//trim(e%role)//'|'// &
                     char(48 + modulo(e%kind, 10))//'|'//trim(e%link_target)
-                if (full .or. defines_model(e)) &
-                    text = text//'|'//trim(e%content_digest)
+                cursor = cursor + row_length
+                if (full .or. defines_model(e)) then
+                    row_length = 1 + len_trim(e%content_digest)
+                    text(cursor:cursor + row_length - 1) = &
+                        '|'//trim(e%content_digest)
+                    cursor = cursor + row_length
+                end if
             end associate
         end do
         key = sha256_string(text)
