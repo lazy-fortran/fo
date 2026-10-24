@@ -29,7 +29,7 @@ program test_cmake_capture_inputs
     type(process_result_t) :: process
     integer :: ierr, cleanup_status, i
     logical :: header_found, generated_found, present, found
-    character(:), allocatable :: compiler_args, original_args
+    character(:), allocatable :: compiler_args, original_args, original_toolchain
     character(len=4096) :: compiler_paths(3)
     character(len=8), parameter :: compiler_tools(3) = &
         [character(len=8) :: 'gcc', 'g++', 'gfortran']
@@ -87,6 +87,7 @@ program test_cmake_capture_inputs
         'int main(void) { return VALUE == 19 && GENERATED == 7 && '// &
         'LOCAL == 3 && PUBLIC == 11 ? 0 : 1; }'//nl)
     original_args = environment_value('FO_CMAKE_ARGS')
+    original_toolchain = environment_value('CMAKE_TOOLCHAIN_FILE')
     compiler_args = ''
     do i = 1, size(compiler_tools)
         call fs_find_executable(trim(compiler_tools(i)), compiler_paths(i), found)
@@ -98,6 +99,11 @@ program test_cmake_capture_inputs
     cleanup_status = int(setenv('FO_CMAKE_ARGS'//c_null_char, &
         compiler_args//c_null_char, 1_c_int))
     call assert_true(cleanup_status == 0, 'untyped compiler arguments are selected')
+    ! This fixture selects its compilers explicitly; an inherited toolchain
+    ! must not replace them before CMake initializes their cache entries.
+    cleanup_status = int(setenv('CMAKE_TOOLCHAIN_FILE'//c_null_char, &
+        c_null_char, 1_c_int))
+    call assert_true(cleanup_status == 0, 'inherited compiler toolchain is isolated')
     backend = detect_backend(project)
     call current_directory(cwd)
     ierr = int(chdir(project//c_null_char))
@@ -201,6 +207,11 @@ program test_cmake_capture_inputs
         'absent include below a directory alias')
     call reject_include(scratch//'/undeclared-absent', 'absent external include')
     call reject_include(project//'/.fo-cmake/absent', 'absent capture-output include')
+    cleanup_status = int(setenv('CMAKE_TOOLCHAIN_FILE'//c_null_char, &
+        original_toolchain//c_null_char, 1_c_int))
+    call assert_true(cleanup_status == 0, 'inherited toolchain is restored')
+    call assert_equal_string(environment_value('CMAKE_TOOLCHAIN_FILE'), &
+        original_toolchain, 'fixture preserves the inherited toolchain selection')
     call finish_assertions(retain_failed_scratch=.true.)
 contains
     subroutine repeated_compiler_capture()
