@@ -81,12 +81,12 @@ contains
                 if (trim(old_out(i)) == trim(outputs(j))) replaced = .true.
             end do
             if (.not. replaced) &
-                text = text//trim(old_out(i))//TAB//trim(old_in(i))//LF
+                call append_pair(text, old_out(i), old_in(i))
         end do
         do j = 1, n_outputs
             do i = 1, n_inputs
                 if (.not. is_library(inputs(i))) cycle
-                text = text//trim(outputs(j))//TAB//trim(inputs(i))//LF
+                call append_pair(text, outputs(j), inputs(i))
             end do
         end do
         call read_all(link_graph_path(project_dir), previous)
@@ -107,6 +107,27 @@ contains
         if (fs_rename(trim(temporary), link_graph_path(project_dir)) /= 0) &
             call fs_remove_file(trim(temporary))
     end subroutine link_graph_record
+
+    subroutine append_pair(text, output, input)
+        !! Keep the growing record on the heap. Flang otherwise retains a
+        !! concatenation temporary on the stack for each enclosing iteration.
+        character(len=:), allocatable, intent(inout) :: text
+        character(len=*), intent(in) :: output, input
+        character(len=:), allocatable :: grown
+        integer :: n, output_length, input_length
+
+        n = len(text)
+        output_length = len_trim(output)
+        input_length = len_trim(input)
+        allocate (character(len=n + output_length + input_length + 2) :: grown)
+        grown(:n) = text
+        grown(n + 1:n + output_length) = trim(output)
+        n = n + output_length
+        grown(n + 1:n + 1) = TAB
+        grown(n + 2:n + input_length + 1) = trim(input)
+        grown(n + input_length + 2:) = LF
+        call move_alloc(grown, text)
+    end subroutine append_pair
 
     pure logical function is_library(path) result(yes)
         character(len=*), intent(in) :: path
