@@ -2,16 +2,23 @@ program test_external_input_inventory
     !! A project using the OpenMP metapackage, a BLAS link library and an
     !! absolute include directory, as pkg-config emits for BLAS providers, has
     !! a complete input inventory, and a changed library changes it.
-    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
+    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char, &
+        c_ptr, c_associated
     use fo_fs, only: fs_make_dir, fs_remove_tree
     use fo_input_inventory, only: input_declaration_t, input_inventory_t, &
         input_inventory_discover, input_inventory_revalidate
-    use fo_util, only: make_tmpfile, read_text_file_alloc
+    use fo_util, only: read_text_file_alloc
     use fo_compiler_dialect, only: compiler_dialect_t, compiler_dialect, &
         selected_compiler_command, COMPILER_GFORTRAN
     implicit none
 
     interface
+        function c_mkdtemp(pattern) bind(C, name='mkdtemp') result(pointer)
+            import :: c_char, c_ptr
+            character(kind=c_char), intent(inout) :: pattern(*)
+            type(c_ptr) :: pointer
+        end function c_mkdtemp
+
         integer(c_int) function c_setenv(name, value, overwrite) &
                 bind(C, name='setenv')
             import :: c_char, c_int
@@ -21,6 +28,8 @@ program test_external_input_inventory
     end interface
 
     character(len=4096) :: fixture, project, library
+    character(kind=c_char, len=32) :: template
+    type(c_ptr) :: temporary
     character(len=1024) :: message
     character(len=:), allocatable :: record
     type(input_declaration_t) :: none(0)
@@ -31,7 +40,12 @@ program test_external_input_inventory
 
     dialect = compiler_dialect(trim(selected_compiler_command()))
     openmp_modeled = dialect%kind == COMPILER_GFORTRAN
-    call make_tmpfile('fo-external-input-fixture', fixture)
+    ! The native manifest limits each compiler flag to 127 characters, so
+    ! keep this synthetic absolute -I path short even inside resident views.
+    template = '/tmp/fo-ext-XXXXXX'//c_null_char
+    temporary = c_mkdtemp(template)
+    call require(c_associated(temporary), 'create short external input fixture')
+    fixture = template(:index(template, c_null_char) - 1)
     call fs_make_dir(trim(fixture)//'/lib')
     project = trim(fixture)//'/project'
     library = trim(fixture)//'/lib/libblas.a'
