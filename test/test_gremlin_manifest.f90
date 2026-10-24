@@ -22,6 +22,7 @@ program test_gremlin_manifest
     use fx_immutable_tree, only: immutable_store_verify_tree
     use fx_immutable_gc, only: immutable_store_collect
     use fo_process, only: process_getpid
+    use fx_hash, only: sha256_string
     implicit none
 
     interface
@@ -322,7 +323,87 @@ contains
             'a manifest edit changes the project model key')
         call write(trim(project)//'/fpm.toml', manifest_text)
         call write(trim(project)//'/src/main.f90', 'program main')
+        call verify_model_key_bytes()
+        call verify_large_model_key()
     end subroutine verify_model_key
+
+    subroutine verify_model_key_bytes()
+        type(input_inventory_t) :: inputs
+        character(len=:), allocatable :: first_row, second_row
+        character(len=HASH_LEN) :: expected
+        character(len=1), parameter :: nl = new_line('a')
+
+        call require(generation_model_key(inputs, 'driver  ', .false.) == &
+            sha256_string('model-key|1|driver'), 'empty model key retains its prefix')
+        allocate (inputs%entries(2))
+        inputs%entry_count = 2
+        inputs%entries(1)%root_alias = ' root '
+        inputs%entries(1)%relative_path = ' src/unit.f90 '
+        inputs%entries(1)%role = 'library-source '
+        inputs%entries(1)%kind = 11
+        inputs%entries(1)%link_target = 'link'//nl//achar(0)//' '
+        inputs%entries(1)%content_digest = 'abc '
+        inputs%entries(2)%relative_path = 'CMakeLists.txt'
+        inputs%entries(2)%role = 'ordinary'
+        inputs%entries(2)%kind = 3
+        first_row = nl//' root| src/unit.f90|library-source|1|link'//nl//achar(0)
+        second_row = nl//'|CMakeLists.txt|ordinary|3||'
+        expected = sha256_string('model-key|1|driver'//first_row//second_row)
+        call require(generation_model_key(inputs, 'driver  ', .false.) == &
+            expected, 'partial model key preserves framing, trim, link and empty digest')
+        call require(generation_model_key(inputs, 'driver', .true.) == &
+            sha256_string('model-key|1|driver'//first_row//'|abc'//second_row), &
+            'full model key includes ordinary source content')
+        inputs%entries(1)%mode = 493
+        inputs%entries(1)%writable_at_execution = .true.
+        call require(generation_model_key(inputs, 'driver', .false.) == expected, &
+            'model key still excludes mode and execution mutability')
+        inputs%entries(1)%role = 'test-oracle'
+        first_row = nl//' root| src/unit.f90|test-oracle|1|link'//nl//achar(0)//'|abc'
+        call require(generation_model_key(inputs, 'driver', .false.) == &
+            sha256_string('model-key|1|driver'//first_row//second_row), &
+            'model-defining roles include content without full mode')
+        inputs%entries(1)%role = 'ordinary'
+        inputs%entries(1)%relative_path = 'config/check.cmake'
+        first_row = nl//' root|config/check.cmake|ordinary|1|link'//nl//achar(0)//'|abc'
+        call require(generation_model_key(inputs, 'driver', .false.) == &
+            sha256_string('model-key|1|driver'//first_row//second_row), &
+            'CMake suffix includes content without a model-defining role')
+        inputs%entries(1) = inputs%entries(2)
+        inputs%entries(2)%relative_path = 'config/check.cmake'
+        first_row = nl//'|CMakeLists.txt|ordinary|3||'
+        second_row = nl//'|config/check.cmake|ordinary|3||'
+        call require(generation_model_key(inputs, 'driver', .false.) == &
+            sha256_string('model-key|1|driver'//first_row//second_row), &
+            'model key preserves inventory order and repeated row fields')
+    end subroutine verify_model_key_bytes
+
+    subroutine verify_large_model_key()
+        !! Synthetic SDK headers, with SHA-256 expectations generated
+        !! independently from the specified row bytes rather than this routine.
+        integer, parameter :: count = 75000
+        type(input_inventory_t) :: inputs
+        character(len=6) :: number
+        integer :: i
+
+        allocate (inputs%entries(count))
+        inputs%entry_count = count
+        do i = 1, count
+            write (number, '(i6.6)') i
+            inputs%entries(i)%root_alias = 'cmake-include:synthetic'
+            inputs%entries(i)%relative_path = &
+                'public-sdk/include/header-'//number//'.h'
+            inputs%entries(i)%role = 'cmake-dependency-input'
+            inputs%entries(i)%kind = INPUT_FILE
+            inputs%entries(i)%content_digest = repeat('a', HASH_LEN)
+        end do
+        call require(generation_model_key(inputs, 'driver-large', .false.) == &
+            '7baf55ad7a17e2c94c12a98119ff35e70fee741437853bbf80484215fae77b2b', &
+            '75000 synthetic headers retain the independently specified partial key')
+        call require(generation_model_key(inputs, 'driver-large', .true.) == &
+            '17e284700749acf5335a8c74a83bd2646966153d45969aa021a7fe9a4fdb96d5', &
+            '75000 synthetic headers retain the independently specified full key')
+    end subroutine verify_large_model_key
 
     subroutine register_generation(path, status, detail)
         character(len=*), intent(in) :: path
