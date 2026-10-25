@@ -809,27 +809,6 @@ int fo_c_generation_close_fd(int fd) {
     return close(fd);
 }
 
-/* Capture one inventoried file into a private temporary file. */
-int fo_c_generation_capture_file(const char *root, const char *relative,
-                                 const char *destination, long long device,
-                                 long long inode) {
-    struct stat before;
-    int input_fd, rc, saved;
-    if (destination == NULL) {
-        errno = EINVAL;
-        return errno;
-    }
-    input_fd = open_inventoried_input(root, relative, device, inode, &before);
-    if (input_fd < 0) return errno == 0 ? 1 : errno;
-    rc = copy_regular_file(input_fd, destination, &before,
-                           before.st_mode & 0777, 0, 0);
-    saved = errno;
-    close(input_fd);
-    if (rc != 0) unlink(destination);
-    errno = saved;
-    return rc == 0 ? 0 : (errno == 0 ? 1 : errno);
-}
-
 /* Enumeration validates every target component with openat/O_NOFOLLOW.
  * Materialization repeats root-relative confinement before preserving text. */
 int fo_c_generation_create_link(const char *path, const char *target,

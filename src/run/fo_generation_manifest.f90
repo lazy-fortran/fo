@@ -5,14 +5,16 @@ module fo_generation_manifest
     use, intrinsic :: iso_fortran_env, only: int64
     use fx_immutable_store, only: immutable_store_t, immutable_lease_t, &
         immutable_tree_entry_t, IMMUTABLE_BLOB, &
-        immutable_store_init, immutable_store_put_blob, &
+        immutable_store_init, &
         immutable_store_hash_file, immutable_store_publication_lease_acquire, &
         immutable_store_root_set, immutable_store_reason_release, &
         immutable_store_lease_release, &
         immutable_store_materialize_blob, &
         immutable_store_materialize_blob_ephemeral, IMMUTABLE_MATERIALIZE_AUTO, &
         IMMUTABLE_MATERIALIZE_COPY, immutable_store_verify_blob, IMMUTABLE_OK
-    use fx_immutable_owned, only: owned_hash_fd
+    use fx_immutable_batch, only: immutable_batch_t, immutable_batch_begin, &
+        immutable_batch_put_fd, immutable_batch_put_file, immutable_batch_commit, &
+        immutable_batch_end
     use fx_immutable_tree, only: immutable_store_put_tree
     use fx_immutable_manifest, only: immutable_entries_canonical, &
         immutable_manifest_serialize
@@ -64,15 +66,6 @@ module fo_generation_manifest
             character(kind=c_char), intent(in) :: path(*), target(*), relative(*)
         end function fo_c_generation_create_link
 
-        integer(c_int) function fo_c_generation_capture_file(root, relative, &
-                destination, expected_device, expected_inode) &
-                bind(C, name='fo_c_generation_capture_file')
-            import :: c_char, c_int, c_long_long
-            character(kind=c_char), intent(in) :: root(*), relative(*)
-            character(kind=c_char), intent(in) :: destination(*)
-            integer(c_long_long), value :: expected_device, expected_inode
-        end function fo_c_generation_capture_file
-
         integer(c_int) function fo_c_generation_open_input(root, relative, &
                 expected_device, expected_inode) &
                 bind(C, name='fo_c_generation_open_input')
@@ -102,6 +95,7 @@ contains
 
         type(immutable_store_t) :: store
         type(immutable_lease_t) :: publication
+        type(immutable_batch_t) :: batch
         type(immutable_tree_entry_t), allocatable :: tree_entries(:), &
             canonical_entries(:)
         character(len=HASH_LEN), allocatable :: ids(:)
@@ -110,10 +104,11 @@ contains
         character(len=4), allocatable :: kinds(:)
         character(len=4) :: root_kinds(1)
         character(len=:), allocatable :: tree_manifest
-        character(len=PATH_LEN) :: manifest_path, source_path, temp_payload
+        character(len=PATH_LEN) :: manifest_path, source_path
+        integer, allocatable :: first_entry(:)
         integer :: status, i, j, n_ids, lease_status, root_index
-        logical :: seen, already_stored, input_changed
-        integer(c_int) :: capture_status
+        logical :: seen
+        integer(c_int) :: fd
 
         manifest_id = ''
         ierr = 1
@@ -173,7 +168,7 @@ contains
         end if
 
         allocate (ids(inventory%entry_count + 2), &
-            kinds(inventory%entry_count + 2))
+            kinds(inventory%entry_count + 2), first_entry(inventory%entry_count + 2))
         n_ids = 0
         do i = 1, inventory%entry_count
             if (inventory%entries(i)%kind /= INPUT_FILE) cycle
@@ -192,6 +187,7 @@ contains
             n_ids = n_ids + 1
             ids(n_ids) = object_id
             kinds(n_ids) = 'blob'
+            first_entry(n_ids) = i
         end do
         do j = 1, n_ids
             if (ids(j) == manifest_id) then
@@ -235,42 +231,33 @@ contains
             return
         end if
 
-        do i = 1, inventory%entry_count
-            if (inventory%entries(i)%kind /= INPUT_FILE) cycle
+        ! Each distinct input is read once, hashed while it is copied into
+        ! batch staging and published behind one durability barrier set; the
+        ! tree that references the batch is published only after its commit.
+        call immutable_batch_begin(store, batch, status)
+        if (status /= IMMUTABLE_OK) message = 'cannot begin generation object batch'
+        do j = 1, n_ids - 1
+            if (status /= IMMUTABLE_OK) exit
+            i = first_entry(j)
             call inventory_source_path(inventory, inventory%entries(i), &
                 root_index, source_path, status, message)
             if (status /= 0) exit
-            ! Hash through the same descriptor-rooted open first: a blob the
-            ! store already holds needs no temporary payload copy.
-            call input_blob_present(store, inventory, i, root_index, &
-                already_stored, input_changed)
-            if (input_changed) then
-                status = 1
-                message = 'input changed while its content blob was captured: '// &
-                    trim(inventory%entries(i)%root_alias)//':'// &
-                    trim(inventory%entries(i)%relative_path)
-                exit
-            end if
-            if (already_stored) cycle
-            call make_tmpfile('fo-generation-payload', temp_payload)
-            capture_status = fo_c_generation_capture_file( &
+            fd = fo_c_generation_open_input( &
                 trim(inventory%roots(root_index)%physical_path)//c_null_char, &
                 trim(inventory%entries(i)%relative_path)//c_null_char, &
-                trim(temp_payload)//c_null_char, &
                 inventory%roots(root_index)%device, &
                 inventory%roots(root_index)%inode)
-            if (capture_status /= 0) then
+            if (fd < 0) then
                 status = 1
                 message = 'descriptor-rooted input capture failed: '// &
                     trim(inventory%entries(i)%root_alias)//':'// &
                     trim(inventory%entries(i)%relative_path)
                 exit
             end if
-            call immutable_store_put_blob(store, trim(temp_payload), object_id, &
-                status, publication)
-            call delete_tmpfile(trim(temp_payload))
-            if (status /= IMMUTABLE_OK .or. &
-                object_id /= inventory%entries(i)%content_digest) then
+            call immutable_batch_put_fd(store, batch, fd, ids(j), status, &
+                publication)
+            if (fo_c_generation_close_fd(fd) /= 0) status = 1
+            if (status /= IMMUTABLE_OK) then
                 status = 1
                 message = 'input changed while its content blob was captured: '// &
                     trim(inventory%entries(i)%root_alias)//':'// &
@@ -279,16 +266,19 @@ contains
             end if
         end do
         if (status == IMMUTABLE_OK) then
-            call immutable_store_put_blob(store, trim(manifest_path), object_id, &
-                status, publication)
-            if (status == IMMUTABLE_OK .and. object_id /= manifest_id) then
-                status = 1
+            call immutable_batch_put_file(store, batch, trim(manifest_path), &
+                manifest_id, status, publication)
+            if (status /= IMMUTABLE_OK) &
                 message = 'serialized generation manifest changed during publication'
-            end if
+        end if
+        if (status == IMMUTABLE_OK) then
+            call immutable_batch_commit(store, batch, status)
+            if (status /= IMMUTABLE_OK) &
+                message = 'cannot make generation objects durable'
         end if
         if (status == IMMUTABLE_OK) then
             call immutable_store_put_tree(store, canonical_entries, &
-                published_tree_id, status)
+                published_tree_id, status, batch)
             if (status /= IMMUTABLE_OK) &
                 message = 'cannot publish verified generation object tree'
             if (status == IMMUTABLE_OK .and. published_tree_id /= tree_id) then
@@ -313,6 +303,7 @@ contains
                 'generation-'//trim(metadata%execution_identity), &
                 root_kinds, root_ids, status)
         end if
+        call immutable_batch_end(batch)
         call immutable_store_lease_release(store, publication, lease_status)
         call delete_tmpfile(trim(manifest_path))
         if (status /= IMMUTABLE_OK .or. lease_status /= IMMUTABLE_OK) then
@@ -323,39 +314,6 @@ contains
         end if
         ierr = 0
     end subroutine generation_manifest_capture
-
-    !! Present means the descriptor-rooted bytes hash to the inventory digest and
-    !! the store already holds a verified blob of that id. A digest mismatch is
-    !! reported as changed; an unreadable input falls back to the copying path,
-    !! which reports the capture failure.
-    subroutine input_blob_present(store, inventory, entry_index, root_index, &
-            present, changed)
-        type(immutable_store_t), intent(in) :: store
-        type(input_inventory_t), intent(in) :: inventory
-        integer, intent(in) :: entry_index, root_index
-        logical, intent(out) :: present, changed
-        character(len=HASH_LEN) :: digest
-        integer(c_int) :: fd
-        integer :: hash_status, verify_status
-
-        present = .false.
-        changed = .false.
-        fd = fo_c_generation_open_input( &
-            trim(inventory%roots(root_index)%physical_path)//c_null_char, &
-            trim(inventory%entries(entry_index)%relative_path)//c_null_char, &
-            inventory%roots(root_index)%device, &
-            inventory%roots(root_index)%inode)
-        if (fd < 0) return
-        call owned_hash_fd(fd, digest, hash_status)
-        if (fo_c_generation_close_fd(fd) /= 0) return
-        if (hash_status /= IMMUTABLE_OK) return
-        if (digest /= inventory%entries(entry_index)%content_digest) then
-            changed = .true.
-            return
-        end if
-        call immutable_store_verify_blob(store, digest, verify_status)
-        present = verify_status == IMMUTABLE_OK
-    end subroutine input_blob_present
 
     subroutine generation_manifest_release(store_root, generation_id, root_owner, &
             ierr)
