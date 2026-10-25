@@ -11,16 +11,18 @@ module fo_gremlin_log_text
 
 contains
 
-    subroutine gremlin_retain_build_log(log_file)
+    subroutine gremlin_retain_build_log(log_file, source_log)
         !! Append the tail of the full log named in `log_file` to `log_file`.
         !! Call before the build's scratch directory is released.
         character(len=*), intent(in) :: log_file
+        character(:), allocatable, intent(out), optional :: source_log
 
         character(:), allocatable :: text, full
         character(len=:), allocatable :: path
         integer :: start, finish, unit, ios, size_bytes
 
-        call read_stream(log_file, text)
+        if (present(source_log)) source_log = ''
+        call read_stream(log_file, text, 16384)
         if (.not. allocated(text)) return
         start = index(text, MARKER, back=.true.)
         if (start == 0) return
@@ -33,9 +35,9 @@ contains
         end if
         if (finish < start) return
         path = trim(text(start:finish))
-        call read_stream(path, full)
+        if (present(source_log)) source_log = path
+        call read_stream(path, full, MAX_RETAINED, size_bytes)
         if (.not. allocated(full)) return
-        size_bytes = len(full)
         open (newunit=unit, file=log_file, status='old', position='append', &
             action='write', iostat=ios)
         if (ios /= 0) return
@@ -43,7 +45,7 @@ contains
             'from '//path
         if (size_bytes > MAX_RETAINED) then
             write (unit, '(a)') '[truncated to the last 262144 bytes]'
-            write (unit, '(a)') full(size_bytes - MAX_RETAINED + 1:)
+            write (unit, '(a)') full
         else
             write (unit, '(a)') full
         end if
@@ -60,7 +62,7 @@ contains
         integer :: i
 
         tail = ''
-        call read_stream(path, text)
+        call read_stream(path, text, limit)
         if (.not. allocated(text)) return
         tail = trim(text(max(1, len(text) - limit + 1):))
         do i = 1, len(tail)
@@ -69,21 +71,25 @@ contains
         tail = trim(adjustl(tail))
     end function gremlin_log_tail
 
-    subroutine read_stream(path, text)
+    subroutine read_stream(path, text, limit, original_size)
         character(len=*), intent(in) :: path
         character(:), allocatable, intent(out) :: text
-        integer :: unit, ios, file_size
+        integer, intent(in) :: limit
+        integer, intent(out), optional :: original_size
+        integer :: unit, ios, file_size, kept
 
         inquire (file=path, size=file_size, iostat=ios)
         if (ios /= 0 .or. file_size < 1) return
-        allocate (character(len=file_size) :: text)
+        if (present(original_size)) original_size = file_size
+        kept = min(file_size, max(0, limit))
+        allocate (character(len=kept) :: text)
         open (newunit=unit, file=path, status='old', action='read', &
             access='stream', form='unformatted', iostat=ios)
         if (ios /= 0) then
             deallocate (text)
             return
         end if
-        read (unit, iostat=ios) text
+        read (unit, pos=file_size - kept + 1, iostat=ios) text
         close (unit)
         if (ios /= 0) deallocate (text)
     end subroutine read_stream

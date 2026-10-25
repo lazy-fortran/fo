@@ -238,7 +238,7 @@ contains
             ! guard the delegated SDK inputs before build and cached PASS reuse.
             library_hint = .false.
             if (kind == 'FILEPATH') then
-                library_hint = native_library_hint(value, trim(project_path), &
+                library_hint = native_library_hint(key, value, trim(project_path), &
                     trim(build_path), roots(:n_roots), labels(:n_roots), &
                     implicit_link_dirs, link_plan, normalized)
             end if
@@ -836,11 +836,11 @@ contains
         inquire(file=trim(value)//'/'//package//'-config.cmake', exist=native)
     end function native_package_hint
 
-    logical function native_library_hint(value, project, build, roots, labels, &
+    logical function native_library_hint(key, value, project, build, roots, labels, &
             implicit_dirs, plan, physical) result(native)
         !! Compiler SDK libraries remain native, not an include-tree snapshot.
         !! Their bytes/runtime closure remain the caller's SDK witness scope.
-        character(len=*), intent(in) :: value, project, build, roots(:), labels(:)
+        character(len=*), intent(in) :: key, value, project, build, roots(:), labels(:)
         type(string_t), intent(in) :: implicit_dirs(:)
         type(cmake_plan_t), intent(in) :: plan
         character(len=*), intent(out) :: physical
@@ -883,6 +883,14 @@ contains
         if (i > size(implicit_dirs)) return
         call action_result_file_mode(trim(physical), mode, status)
         if (status /= ACTION_RESULT_OK) return
+        ! Find-package checks may link an SDK library only in try_compile.
+        ! Such operands are absent from the final-target File API plan. Keep
+        ! only library-typed cache hints after the same SDK ownership and
+        ! exact implicit-directory checks used for final-target operands.
+        if (configure_library_hint(key, trim(physical))) then
+            native = .true.
+            return
+        end if
         do i = 1, size(plan%targets)
             do j = 1, plan%targets(i)%n_link
                 if (plan%targets(i)%link_roles(j)%s /= 'libraries') cycle
@@ -902,6 +910,34 @@ contains
             end do
         end do
     end function native_library_hint
+
+    logical function configure_library_hint(key, path) result(library)
+        character(len=*), intent(in) :: key, path
+        character(:), allocatable :: name, suffix
+        integer :: last_slash, marker
+
+        library = .false.
+        marker = index(key, '_LIBRARY', back=.true.)
+        if (marker == 0) return
+        suffix = key(marker + len('_LIBRARY'):)
+        if (suffix /= '' .and. suffix /= '_DEBUG' .and. suffix /= '_RELEASE') return
+        last_slash = index(path, '/', back=.true.)
+        name = path(last_slash + 1:)
+        if (len(name) < 5) return
+        if (name(:3) /= 'lib') return
+        library = name(len(name) - 1:) == '.a'
+        if (len(name) >= 6) library = library .or. name(len(name) - 5:) == '.dylib'
+        marker = index(name, '.so')
+        if (marker > 3) then
+            if (marker + 2 == len(name)) then
+                library = .true.
+            else if (name(marker + 3:marker + 3) == '.') then
+                suffix = name(marker + 4:)
+                library = len(suffix) > 0 .and. &
+                    verify(suffix, '0123456789.') == 0
+            end if
+        end if
+    end function configure_library_hint
 
     subroutine relocate_value(value, project, build, roots, bundles, aliases, relocated)
         character(len=*), intent(in) :: value, project, build, roots(:), bundles(:)
