@@ -219,6 +219,11 @@ source-dir = "test"
 main = "test_gremlin_cmake_impact.f90"
 
 [[test]]
+name = "test_gremlin_cmake_fetch_header"
+source-dir = "test"
+main = "test_gremlin_cmake_fetch_header.f90"
+
+[[test]]
 name = "test_gremlin_reproduce_logs"
 source-dir = "test"
 main = "test_gremlin_reproduce_logs.f90"

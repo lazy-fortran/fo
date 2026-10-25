@@ -397,7 +397,8 @@ contains
                 call canonical_authored_path(normalized)
                 if (.not. inside(normalized, base)) cycle
                 if (len_trim(normalized) <= len_trim(base) + 1) cycle
-                component = normalized(len_trim(base) + 2:)
+                ! An include directory names the populated root itself.
+                component = trim(normalized(len_trim(base) + 2:))
                 slash = index(component, '/')
                 if (slash > 0) component = component(:slash - 1)
                 if (len(component) <= 4) cycle
