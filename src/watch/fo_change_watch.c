@@ -71,7 +71,16 @@ static int change_excluded(const char *rel) {
     }
     return 0;
 }
+/* fo creates the missing parents of a relative build root, such as build_cmake/
+ * for build_cmake/Debug. They are output, not input; entries beside the build
+ * root inside them stay inputs. */
+static int change_output_ancestor(const struct change_watch *w, const char *path) {
+    size_t n = strlen(path);
+    return w->excluded_root != NULL && n > 0 && n < strlen(w->excluded_root) &&
+        !strncmp(w->excluded_root, path, n) && w->excluded_root[n] == '/';
+}
 static int change_relevant(struct change_watch *w, const char *path) {
+    int ancestor = change_output_ancestor(w, path);
     int output = 0;
     size_t excluded_length = 0;
     if (w->excluded_root != NULL) {
@@ -88,6 +97,7 @@ static int change_relevant(struct change_watch *w, const char *path) {
              w->roots[i][excluded_length] != '\0'))) continue;
         size_t n = strlen(w->roots[i]);
         if (!strcmp(path, w->roots[i])) return 1;
+        if (ancestor) continue;
         if (!strncmp(path, w->roots[i], n) && path[n] == '/' &&
             !change_excluded(path + n + 1)) return 1;
     }
@@ -138,7 +148,7 @@ static int change_tree(struct change_watch *w, const char *path) {
         if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
         if (snprintf(child, sizeof(child), "%s/%s", path, entry->d_name) >=
             (int)sizeof(child)) { err = ENAMETOOLONG; break; }
-        if (!change_relevant(w, child)) continue;
+        if (!change_relevant(w, child) && !change_output_ancestor(w, child)) continue;
         if (lstat(child, &st)) {
             if (errno == ENOENT) continue;
             err = errno; break;
@@ -306,7 +316,16 @@ int fo_change_native_poll(void *handle, int timeout, char *path, int capacity, i
             if (snprintf(candidate, sizeof(candidate), "%s%s%s", w->entries[i].path,
                 event->len ? "/" : "", event->len ? event->name : "") >= (int)sizeof(candidate))
                 return ENAMETOOLONG;
-            if (!change_relevant(w, candidate)) continue;
+            if (!change_relevant(w, candidate)) {
+                /* Subscribe a new build-root parent quietly so that inputs
+                 * created beside the build root inside it are still seen. */
+                if (type == 2 && (event->mask & IN_ISDIR) &&
+                    change_output_ancestor(w, candidate)) {
+                    rc = change_tree(w, candidate);
+                    if (rc) return rc;
+                }
+                continue;
+            }
             if ((event->mask & (IN_ISDIR | IN_DELETE_SELF | IN_MOVE_SELF)) && type != 1)
                 structural = 1;
             for (i = 0; i < w->nself; ++i)

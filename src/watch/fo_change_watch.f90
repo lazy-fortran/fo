@@ -342,18 +342,28 @@ contains
     logical function change_watch_relevant(watch, path) result(relevant)
         type(change_watch_t), intent(in) :: watch
         character(len=*), intent(in) :: path
-        integer :: i, n
+        integer :: i, n, m
         character(len=PATH_LEN) :: rel
-        logical :: output_path
+        logical :: output_path, output_ancestor
 
         relevant = .false.
         output_path = .false.
+        output_ancestor = .false.
         n = len_trim(watch%excluded_root)
         if (n > 0) then
             if (trim(path) == trim(watch%excluded_root)) output_path = .true.
             if (len_trim(path) > n) then
                 if (path(:n) == watch%excluded_root(:n)) then
                     if (path(n + 1:n + 1) == '/') output_path = .true.
+                end if
+            end if
+            ! fo creates the missing parents of a relative build root, such as
+            ! build_cmake/ for build_cmake/Debug; they are output, not input.
+            m = len_trim(path)
+            if (m > 0 .and. m < n) then
+                if (watch%excluded_root(:m) == path(:m)) then
+                    if (watch%excluded_root(m + 1:m + 1) == '/') &
+                        output_ancestor = .true.
                 end if
             end if
         end if
@@ -372,6 +382,7 @@ contains
                 relevant = .true.
                 return
             end if
+            if (output_ancestor) cycle
             if (len_trim(path) <= n) cycle
             if (path(:n) /= trim(watch%roots(i))) cycle
             if (path(n + 1:n + 1) /= '/') cycle
