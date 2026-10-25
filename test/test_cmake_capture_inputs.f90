@@ -246,6 +246,7 @@ program test_cmake_capture_inputs
         'absent include below a directory alias')
     call reject_include(scratch//'/undeclared-absent', 'absent external include')
     call reject_include(project//'/.fo-cmake/absent', 'absent capture-output include')
+    call verify_native_library_alias()
     cleanup_status = int(setenv('CMAKE_TOOLCHAIN_FILE'//c_null_char, &
         original_toolchain//c_null_char, 1_c_int))
     call assert_true(cleanup_status == 0, 'inherited toolchain is restored')
@@ -253,6 +254,181 @@ program test_cmake_capture_inputs
         original_toolchain, 'fixture preserves the inherited toolchain selection')
     call finish_assertions(retain_failed_scratch=.true.)
 contains
+    subroutine verify_native_library_alias()
+        type(backend_t) :: library_backend
+        type(input_inventory_t) :: captured, nonimplicit, declared
+        type(generation_context_t) :: library_context
+        type(generation_t) :: library_generation
+        type(execution_view_t) :: library_view
+        type(string_list_t) :: command, selected
+        type(process_result_t) :: result
+        character(:), allocatable :: root, native_sdk, library, frozen, declared_bundle
+        integer :: status, metadata, source_root, alias_index
+
+        root = scratch//'/library-project'
+        native_sdk = scratch//'/library-sdk'
+        library = native_sdk//'/lib/libtoy.a'
+        call make_directory(root)
+        call make_directory(native_sdk//'/include')
+        call make_directory(native_sdk//'/libsrc')
+        call write_text(native_sdk//'/include/toy.h', 'int toy_value(void);'//nl)
+        call write_text(native_sdk//'/libsrc/toy.c', &
+            'int toy_value(void) { return 37; }'//nl)
+        call write_text(native_sdk//'/libsrc/CMakeLists.txt', &
+            'cmake_minimum_required(VERSION 3.22)'//nl// &
+            'project(toy_sdk LANGUAGES C)'//nl// &
+            'add_library(toy STATIC toy.c)'//nl)
+        call list_add(command, 'cmake')
+        call list_add(command, '-S')
+        call list_add(command, native_sdk//'/libsrc')
+        call list_add(command, '-B')
+        call list_add(command, scratch//'/library-build')
+        call list_add(command, '-DCMAKE_C_COMPILER='//trim(compiler_paths(1)))
+        call list_add(command, '-DCMAKE_ARCHIVE_OUTPUT_DIRECTORY='//native_sdk//'/lib')
+        call run_process(command, root, result, timeout_ms=30000)
+        call assert_process_ok(result, 'native toy SDK configures')
+        command = string_list_t()
+        call list_add(command, 'cmake')
+        call list_add(command, '--build')
+        call list_add(command, scratch//'/library-build')
+        call list_add(command, '--parallel')
+        call list_add(command, '1')
+        call run_process(command, root, result, timeout_ms=30000)
+        call assert_process_ok(result, 'native toy SDK archive builds')
+        call make_symlink('../lib/libtoy.a', native_sdk//'/include/libtoy.a')
+        call write_text(root//'/main.c', '#include "toy.h"'//nl// &
+            'int main(void) { return toy_value() == 37 ? 0 : 1; }'//nl)
+        call write_text(root//'/CMakeLists.txt', &
+            'cmake_minimum_required(VERSION 3.22)'//nl// &
+            'project(native_library LANGUAGES C)'//nl// &
+            'include(CTest)'//nl// &
+            '# Explicit synthetic SDK role, not a discovered host system path.'//nl// &
+            'option(TOY_NATIVE_SDK "Declare the synthetic SDK role" ON)'//nl// &
+            'if(TOY_NATIVE_SDK)'//nl// &
+            'list(APPEND CMAKE_C_IMPLICIT_LINK_DIRECTORIES "'// &
+            native_sdk//'/lib")'//nl// &
+            'endif()'//nl// &
+            'set(TOY_LIBRARY "'//native_sdk// &
+            '/include/libtoy.a" CACHE FILEPATH "toy")'//nl// &
+            'add_executable(probe main.c)'//nl// &
+            'target_include_directories(probe PRIVATE "'// &
+            native_sdk//'/include")'//nl// &
+            'target_link_libraries(probe PRIVATE "${TOY_LIBRARY}")'//nl// &
+            'add_test(NAME native_library_value COMMAND probe)'//nl)
+        status = int(setenv('FO_CMAKE_ARGS'//c_null_char, &
+            compiler_args//c_null_char, 1_c_int))
+        call assert_true(status == 0, 'native library fixture compilers selected')
+        library_backend = detect_backend(root)
+        call cmake_capture_inventory(library_backend, captured, status, message)
+        call assert_true(status == 0, &
+            'native library fixture captures: '//trim(message))
+        if (status /= 0) return
+        metadata = alias_root(captured, 'cmake-context')
+        frozen = read_text(trim(captured%roots(metadata)%physical_path)//'/cache.cmake')
+        call assert_contains(frozen, 'set(TOY_LIBRARY "'//library//'" CACHE FILEPATH', &
+            'native SDK library alias keeps its canonical target')
+        library_context%driver_path = driver
+        call cache_file_digest(driver, library_context%driver_digest)
+        inquire(file=driver, size=library_context%driver_size)
+        library_context%input_inventory = captured
+        call generation_capture(root, state, library_context, library_generation, &
+            status, message)
+        call assert_true(status == 0, 'native library generation: '//trim(message))
+        if (status == 0) then
+            call execution_view_create(scratch//'/library-views', &
+                library_generation%identity, 'native-library-oracle', &
+                'native_library_value', library_generation%input_inventory, &
+                .true., .true., library_view, status, message, &
+                candidate_bundle_root=trim(library_generation%root)//'/bundle')
+            call assert_true(status == 0, 'native library frozen view exists')
+            if (status == 0) then
+                call list_add(selected, 'test')
+                call list_add(selected, 'native_library_value')
+                call run_fo(driver, selected, trim(library_view%cwd), cache, result, &
+                    timeout_ms=30000)
+                call assert_process_ok(result, &
+                    'frozen native SDK library links and runs')
+                call execution_view_release(library_view, .false., status, message)
+                call assert_true(status == 0, 'native library view released')
+            end if
+        end if
+        status = int(setenv('FO_CMAKE_ARGS'//c_null_char, &
+            (compiler_args//' -DTOY_NATIVE_SDK=OFF')//c_null_char, 1_c_int))
+        call assert_true(status == 0, 'synthetic native SDK role is disabled')
+        library_backend = detect_backend(root)
+        call cmake_capture_inventory(library_backend, nonimplicit, status, message)
+        call assert_true(status == 0, &
+            'nonimplicit library fixture captures: '//trim(message))
+        if (status == 0) then
+            metadata = alias_root(nonimplicit, 'cmake-context')
+            frozen = read_text(trim(nonimplicit%roots(metadata)%physical_path)// &
+                '/cache.cmake')
+            call assert_contains(frozen, 'set(TOY_LIBRARY "'// &
+                '${CMAKE_CURRENT_LIST_DIR}/../../project/.fo-cmake/'// &
+                'dependencies/include-', &
+                'nonimplicit library keeps ordinary frozen include relocation')
+            call assert_contains(frozen, '/libtoy.a" CACHE FILEPATH', &
+                'nonimplicit library retains its selected alias operand')
+            call assert_true(index(frozen, &
+                'set(TOY_LIBRARY "'//library//'" CACHE FILEPATH') == 0, &
+                'nonimplicit library is not delegated as a native SDK')
+        end if
+        call cmake_capture_cleanup(nonimplicit, status)
+        call assert_true(status == 0, 'nonimplicit library metadata cleaned')
+        status = int(setenv('FO_CMAKE_ARGS'//c_null_char, &
+            (compiler_args//' -DTOY_NATIVE_SDK=ON -DTOY_SOURCE_DIR="'// &
+            native_sdk//'"')//c_null_char, 1_c_int))
+        call assert_true(status == 0, 'explicit source ownership is selected')
+        library_backend = detect_backend(root)
+        call cmake_capture_inventory(library_backend, declared, status, message)
+        call assert_true(status == 0, &
+            'declared library source captures: '//trim(message))
+        if (status == 0) then
+            metadata = alias_root(declared, 'cmake-context')
+            frozen = read_text(trim(declared%roots(metadata)%physical_path)// &
+                '/cache.cmake')
+            source_root = alias_root(declared, 'cmake-dependency:TOY')
+            call assert_true(source_root > 0, 'declared library source root exists')
+            declared_bundle = ''
+            if (source_root > 0) then
+                call assert_equal_string( &
+                    trim(declared%roots(source_root)%physical_path), native_sdk, &
+                    'declared library root retains its native source identity')
+                do alias_index = 1, declared%roots(source_root)%alias_count
+                    if (trim(declared%roots(source_root)%aliases(alias_index)) /= &
+                        'cmake-dependency:TOY') cycle
+                    declared_bundle = &
+                        trim(declared%roots(source_root)%bundle_paths(alias_index))
+                    exit
+                end do
+            end if
+            call assert_true(len(declared_bundle) > 0, &
+                'declared library source has a mapped bundle path')
+            if (len(declared_bundle) > 0) then
+                call assert_contains(frozen, 'set(TOY_LIBRARY "'// &
+                    '${CMAKE_CURRENT_LIST_DIR}/../../'//declared_bundle// &
+                    '/include/libtoy.a" CACHE FILEPATH', &
+                    'explicit source ownership wins over native SDK delegation')
+            end if
+            call assert_true(index(frozen, &
+                'set(TOY_LIBRARY "'//library//'" CACHE FILEPATH') == 0, &
+                'declared library is not delegated as a native SDK')
+            call write_text(native_sdk//'/libsrc/toy.c', &
+                'int toy_value(void) { return 38; }'//nl)
+            call input_inventory_revalidate(root, declared%declarations, declared, &
+                status, message)
+            call assert_true(status /= 0, &
+                'declared library source edit invalidates capture')
+        end if
+        call cmake_capture_cleanup(declared, status)
+        call assert_true(status == 0, 'declared library metadata cleaned')
+        call cmake_capture_cleanup(captured, status)
+        call assert_true(status == 0, 'native library metadata cleaned')
+        status = int(setenv('FO_CMAKE_ARGS'//c_null_char, &
+            original_args//c_null_char, 1_c_int))
+        call assert_true(status == 0, 'library fixture restores configure arguments')
+    end subroutine verify_native_library_alias
+
     subroutine repeated_compiler_capture()
         type(input_inventory_t) :: repeated
         type(generation_t) :: captured
