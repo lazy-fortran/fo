@@ -110,6 +110,12 @@ static int apple_excluded(const char *path);
 
 static int apple_relevant(const struct change_watch *w, const char *path) {
     int output = 0;
+    /* Missing parents of a relative build root are fo's output, not input. */
+    size_t path_length = strlen(path);
+    int ancestor = w->excluded_root != NULL && path_length > 0 &&
+        path_length < strlen(w->excluded_root) &&
+        !strncmp(w->excluded_root, path, path_length) &&
+        w->excluded_root[path_length] == '/';
     size_t excluded_length = 0;
     if (w->excluded_root != NULL) {
         excluded_length = strlen(w->excluded_root);
@@ -125,6 +131,7 @@ static int apple_relevant(const struct change_watch *w, const char *path) {
              w->roots[i][excluded_length] != '\0'))) continue;
         size_t n = strlen(w->roots[i]);
         if (!strcmp(path, w->roots[i])) return 1;
+        if (ancestor) continue;
         if (!strncmp(path, w->roots[i], n) && path[n] == '/' &&
             !apple_excluded(path + n + 1)) return 1;
     }
