@@ -33,6 +33,7 @@ module fo_gremlin_owner
         gremlin_lifecycle_read_page, gremlin_lifecycle_make_id, LIFECYCLE_OK, &
         LIFECYCLE_INVALID, LIFECYCLE_MAX_EVENT
     use fo_gremlin_log_text, only: gremlin_retain_build_log
+    use fo_cmake_diagnostics, only: cmake_diagnostic_retain
     use fo_gremlin_readiness, only: gremlin_readiness_t, gremlin_phase_name, &
         gremlin_health_name, gremlin_verification_name, GREMLIN_PHASE_QUIESCENT, &
         GREMLIN_VERIFY_ORDINARY
@@ -711,6 +712,7 @@ contains
         character(len=PATH_LEN) :: detail
         integer :: status, mandatory_count
         logical :: was_active
+        character(:), allocatable :: configure_log
 
         ierr = 0
         o%message = ''
@@ -727,7 +729,11 @@ contains
         end if
         if (ierr /= 0) return
         if (build_exit /= 0) then
-            call gremlin_retain_build_log(o%build%job%log_file)
+            call gremlin_retain_build_log(o%build%job%log_file, configure_log)
+            if (len(configure_log) > 0) call cmake_diagnostic_retain( &
+                configure_log, trim(o%build%job%log_file), &
+                trim(o%candidate%identity), trim(o%session%session_id), &
+                trim(o%build%execution_view%root))
             if (o%build%execution_view%active) call execution_view_release( &
                 o%build%execution_view, .false., status, detail)
             o%candidate%build_project_root = ''

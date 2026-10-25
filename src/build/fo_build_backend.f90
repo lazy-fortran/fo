@@ -21,6 +21,8 @@ module fo_build_backend
     use fo_cmake_native, only: native_cmake_build, native_cmake_test
     use fo_cmake_build, only: cmake_route_t, cmake_build_route, cmake_build_native
     use fo_input_inventory, only: cmake_inputs_revalidate
+    use fo_cmake_diagnostics, only: cmake_diagnostic_t, cmake_diagnostic_begin, &
+        cmake_diagnostic_finish
     implicit none
     private
     public :: backend_t, detect_backend, detect_nproc, detect_jobs
@@ -651,6 +653,8 @@ contains
         character(:), allocatable :: effective_flags, selected_flags, compiler
         type(compiler_dialect_t) :: dialect
         type(cm_plan_t) :: native_plan
+        type(cmake_diagnostic_t) :: diagnostic
+        character(:), allocatable :: selected_preload
         logical :: has_cache, hint_valid, has_frozen_context
         character(len=4096) :: captured_generator
         character(len=4096) :: header_message
@@ -786,10 +790,18 @@ contains
             call argv_push(packed, n_args, context%source_root// &
                 '/.fo-cmake/cache.cmake')
         end if
+        selected_preload = ''
+        if (has_frozen_context) selected_preload = context%source_root// &
+            '/.fo-cmake/cache.cmake'
+        call cmake_diagnostic_begin(diagnostic, context%source_root, &
+            cmake_context_build_path(context), packed, n_args, log_file, selected_preload)
         call process_run_argv_logged(context%source_root, packed, n_args, &
             log_file, .false., environment_timeout('FO_BUILD_TIMEOUT', 300), &
             exitcode)
-        if (exitcode /= 0) return
+        if (exitcode /= 0) then
+            call cmake_diagnostic_finish(diagnostic, exitcode, log_file)
+            return
+        end if
         if (len_trim(context%configure_preset) > 0) then
             if (.not. context%build_root_hint) then
                 ! Let CMake expand inherited presets and choose binaryDir.
@@ -800,8 +812,10 @@ contains
                     write (error_unit, '(a)') &
                         'fo: CMake did not report its preset build directory'
                     exitcode = 1
+                    call cmake_diagnostic_finish(diagnostic, exitcode, log_file, configure_exit=0)
                     return
                 end if
+                call cmake_diagnostic_finish(diagnostic, 0, log_file)
                 call cmake_configure(context, flags, log_file, exitcode)
                 return
             end if
@@ -813,12 +827,14 @@ contains
                         'fo: invalid CMake preset build-root hint: ', &
                         context%error
                     exitcode = 1
+                    call cmake_diagnostic_finish(diagnostic, exitcode, log_file, configure_exit=0)
                     return
                 end if
             end if
         else
             call cmake_context_read_reply(context)
         end if
+        call cmake_diagnostic_finish(diagnostic, 0, log_file)
 
     end subroutine cmake_configure
 

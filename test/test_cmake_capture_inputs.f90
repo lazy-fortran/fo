@@ -277,7 +277,8 @@ contains
         call write_text(native_sdk//'/libsrc/CMakeLists.txt', &
             'cmake_minimum_required(VERSION 3.22)'//nl// &
             'project(toy_sdk LANGUAGES C)'//nl// &
-            'add_library(toy STATIC toy.c)'//nl)
+            'add_library(toy STATIC toy.c)'//nl// &
+            'add_library(configure_only STATIC toy.c)'//nl)
         call list_add(command, 'cmake')
         call list_add(command, '-S')
         call list_add(command, native_sdk//'/libsrc')
@@ -296,6 +297,12 @@ contains
         call run_process(command, root, result, timeout_ms=30000)
         call assert_process_ok(result, 'native toy SDK archive builds')
         call make_symlink('../lib/libtoy.a', native_sdk//'/include/libtoy.a')
+        call make_symlink('../lib/libconfigure_only.a', &
+            native_sdk//'/include/libconfigure_only.a')
+        call write_text(native_sdk//'/lib/not-a-library.txt', 'SDK data'//nl)
+        call make_symlink('../lib/not-a-library.txt', native_sdk//'/include/data.txt')
+        call write_text(root//'/configure.c', &
+            'int toy_value(void); int main(void) { return toy_value(); }'//nl)
         call write_text(root//'/main.c', '#include "toy.h"'//nl// &
             'int main(void) { return toy_value() == 37 ? 0 : 1; }'//nl)
         call write_text(root//'/CMakeLists.txt', &
@@ -310,6 +317,18 @@ contains
             'endif()'//nl// &
             'set(TOY_LIBRARY "'//native_sdk// &
             '/include/libtoy.a" CACHE FILEPATH "toy")'//nl// &
+            'set(TOY_CONFIGURE_LIBRARY "'//native_sdk// &
+            '/include/libconfigure_only.a" CACHE FILEPATH "configure only")'//nl// &
+            'set(TOY_DATA_LIBRARY "'//native_sdk// &
+            '/include/data.txt" CACHE FILEPATH "not a library")'//nl// &
+            'set(TOY_DATA_FILE "'//native_sdk// &
+            '/include/libconfigure_only.a" CACHE FILEPATH "not a library hint")'//nl// &
+            'try_compile(TOY_CONFIGURE_WORKS "${CMAKE_BINARY_DIR}/try-sdk"'//nl// &
+            ' SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/configure.c"'//nl// &
+            ' LINK_LIBRARIES "${TOY_CONFIGURE_LIBRARY}")'//nl// &
+            'if(NOT TOY_CONFIGURE_WORKS)'//nl// &
+            ' message(FATAL_ERROR "configure-only SDK link failed")'//nl// &
+            'endif()'//nl// &
             'add_executable(probe main.c)'//nl// &
             'target_include_directories(probe PRIVATE "'// &
             native_sdk//'/include")'//nl// &
@@ -327,6 +346,15 @@ contains
         frozen = read_text(trim(captured%roots(metadata)%physical_path)//'/cache.cmake')
         call assert_contains(frozen, 'set(TOY_LIBRARY "'//library//'" CACHE FILEPATH', &
             'native SDK library alias keeps its canonical target')
+        call assert_contains(frozen, 'set(TOY_CONFIGURE_LIBRARY "'//native_sdk// &
+            '/lib/libconfigure_only.a" CACHE FILEPATH', &
+            'configure-only SDK library keeps its canonical target')
+        call assert_contains(frozen, 'set(TOY_DATA_LIBRARY "'// &
+            '${CMAKE_CURRENT_LIST_DIR}/../../project/.fo-cmake/dependencies/include-', &
+            'library-named nonlibrary data stays captured')
+        call assert_contains(frozen, 'set(TOY_DATA_FILE "'// &
+            '${CMAKE_CURRENT_LIST_DIR}/../../project/.fo-cmake/dependencies/include-', &
+            'nonlibrary cache hint stays captured despite library filename')
         library_context%driver_path = driver
         call cache_file_digest(driver, library_context%driver_digest)
         inquire(file=driver, size=library_context%driver_size)
@@ -372,6 +400,9 @@ contains
             call assert_true(index(frozen, &
                 'set(TOY_LIBRARY "'//library//'" CACHE FILEPATH') == 0, &
                 'nonimplicit library is not delegated as a native SDK')
+            call assert_contains(frozen, 'set(TOY_CONFIGURE_LIBRARY "'// &
+                '${CMAKE_CURRENT_LIST_DIR}/../../project/.fo-cmake/dependencies/include-', &
+                'configure-only library requires an exact implicit directory')
         end if
         call cmake_capture_cleanup(nonimplicit, status)
         call assert_true(status == 0, 'nonimplicit library metadata cleaned')
@@ -409,6 +440,10 @@ contains
                     '${CMAKE_CURRENT_LIST_DIR}/../../'//declared_bundle// &
                     '/include/libtoy.a" CACHE FILEPATH', &
                     'explicit source ownership wins over native SDK delegation')
+                call assert_contains(frozen, 'set(TOY_CONFIGURE_LIBRARY "'// &
+                    '${CMAKE_CURRENT_LIST_DIR}/../../'//declared_bundle// &
+                    '/include/libconfigure_only.a" CACHE FILEPATH', &
+                    'configure-only library preserves explicit source ownership')
             end if
             call assert_true(index(frozen, &
                 'set(TOY_LIBRARY "'//library//'" CACHE FILEPATH') == 0, &
