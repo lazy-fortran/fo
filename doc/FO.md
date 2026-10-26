@@ -208,6 +208,14 @@ but does not replace CMake's target model.
 its journal tail. It is clamped to 16 through 512, the default. PASS reuse does
 not depend on it: a per-case index keeps the latest reusable PASS of every case.
 
+Lanes of one user share a host pool of `FO_GREMLIN_HOST_SLOTS` work slots
+(default: the processor count, at most 256). A lane reserves max(`--jobs`,
+`FO_JOBS`) slots, clamped to the pool, while it builds or runs cases and
+releases them when quiescent; a lane that does not fit waits with the status
+diagnostic `waiting for a host Gremlin work slot held by other lanes`. Lanes
+without `FO_JOBS` take the whole pool. Lanes that set different pool sizes take
+turns until the holders of the other size are quiescent.
+
 ## Test selection
 
 `fo test` selects cases on one project model for both backends: the fpm

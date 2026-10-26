@@ -11,6 +11,7 @@ program test_gremlin_slot_stop
     use fo_test_json, only: json_value_t
     use fo_gremlin_state, only: gremlin_lease_group_t, &
         gremlin_host_lease_acquire_weighted, gremlin_host_lease_release
+    use fo_gremlin_campaign, only: GREMLIN_HOST_WORK_LEASE
     implicit none
 
     character(:), allocatable :: driver, scratch, project, cache, state, session
@@ -30,7 +31,7 @@ program test_gremlin_slot_stop
     call gremlin_start_args(args, project, lane, 'test_slot')
     call list_add(environment, 'FO_GREMLIN_ADMISSION_SCOPE=')
 
-    call gremlin_host_lease_acquire_weighted('gremlin-heavy-work', 2, 2, &
+    call gremlin_host_lease_acquire_weighted(GREMLIN_HOST_WORK_LEASE, 2, 2, &
         held_slots, busy, status, lease_message)
     call assert_true(status == 0 .and. .not. busy, 'oracle holds both work slots: '// &
         trim(lease_message))

@@ -13,6 +13,7 @@ program test_gremlin_state_loss
     use fo_test_gremlin_oracle, only: gremlin_owner_pid, gremlin_wait_exit
     use fo_gremlin_state, only: gremlin_lease_group_t, gremlin_session_state_dir, &
         gremlin_host_lease_acquire_weighted, gremlin_host_lease_release
+    use fo_gremlin_campaign, only: GREMLIN_HOST_WORK_LEASE
     implicit none
 
     character(:), allocatable :: driver, scratch, project, cache, state
@@ -30,7 +31,7 @@ program test_gremlin_state_loss
     call list_add(environment, 'FO_GREMLIN_ADMISSION_SCOPE=')
 
     ! An owner queued behind both host work slots.
-    call gremlin_host_lease_acquire_weighted('gremlin-heavy-work', 2, 2, &
+    call gremlin_host_lease_acquire_weighted(GREMLIN_HOST_WORK_LEASE, 2, 2, &
         held_slots, busy, status, message)
     call assert_true(status == 0 .and. .not. busy, 'oracle holds both work slots')
     if (status /= 0 .or. busy) call finish_assertions(retain_failed_scratch=.true.)
@@ -46,7 +47,7 @@ program test_gremlin_state_loss
     ! All admission guardians release their slots although the lane state
     ! they watched is gone.
     do attempt = 1, 200
-        call gremlin_host_lease_acquire_weighted('gremlin-heavy-work', 2, 2, &
+        call gremlin_host_lease_acquire_weighted(GREMLIN_HOST_WORK_LEASE, 2, 2, &
             held_slots, busy, status, message)
         if (.not. busy) exit
         call gremlin_wait_ms(50)

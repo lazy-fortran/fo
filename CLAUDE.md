@@ -153,8 +153,10 @@ multiply FO_JOBS without limit. Optional #190 measurements guide tuning, not
 admission of unrelated correct changes. Only the controller may publish main
 or deliberately replace a globally installed driver; worker self-builds stay
 private.
-Host admission allows two concurrent Gremlin heavy lanes only when each sets
-`FO_JOBS=1`; default or wider lanes hold both slots. Direct Fo build/test work
+Host admission is a pool of `FO_GREMLIN_HOST_SLOTS` work slots (default: the
+processor count). A lane reserves max(`--jobs`, `FO_JOBS`) slots, clamped to the
+pool, so lanes with explicit budgets run side by side while a lane without
+`FO_JOBS` holds the whole pool. Direct Fo build/test work
 still needs controller admission outside that lease. Choose bounded `FO_JOBS`
 from available CPU and memory; a single heavy lane can compile in parallel.
 

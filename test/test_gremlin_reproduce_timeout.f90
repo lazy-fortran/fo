@@ -17,6 +17,7 @@ program test_gremlin_reproduce_timeout
     use fo_test_json, only: json_value_t, json_member, json_boolean_value
     use fo_gremlin_state, only: gremlin_lease_group_t, &
         gremlin_host_lease_acquire_weighted, gremlin_host_lease_release
+    use fo_gremlin_campaign, only: GREMLIN_HOST_WORK_LEASE
     implicit none
 
     character(:), allocatable :: driver, scratch, project, cache, state, session
@@ -82,7 +83,7 @@ program test_gremlin_reproduce_timeout
     ! slot of the fixture's admission domain; the child must not delegate to
     ! this process's scope.
     do io = 1, 600
-        call gremlin_host_lease_acquire_weighted('gremlin-heavy-work', 2, 2, &
+        call gremlin_host_lease_acquire_weighted(GREMLIN_HOST_WORK_LEASE, 2, 2, &
             held_slots, busy, status, lease_message)
         if (.not. busy) exit
         call gremlin_wait_ms(50)
