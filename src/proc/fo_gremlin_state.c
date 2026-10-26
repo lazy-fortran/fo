@@ -1155,7 +1155,9 @@ int fo_gremlin_host_lease_acquire_weighted(const char *kind, int capacity,
     if (hint && *hint && admission_scope_in_domain(hint, base)) {
         gate = admission_gate(hint, 0);
         if (gate >= 0 && admission_parent(hint, h, &parent)) {
-            if (weight > parent.weight) { e = E2BIG; goto done; }
+            /* A descendant shares its ancestor's reservation and cannot
+               reserve more than the ancestor holds. */
+            if (weight > parent.weight) weight = parent.weight;
             if (snprintf(dir, sizeof(dir), "%s/children", hint) >= (int)sizeof(dir)) {
                 e = ENAMETOOLONG; goto done;
             }
@@ -1169,6 +1171,10 @@ int fo_gremlin_host_lease_acquire_weighted(const char *kind, int capacity,
     }
     e = fo_sys_mkdirs(dir, 0700);
     if (e == 0) e = lease_acquire_in_dir_weighted(dir, capacity, weight, fds, slots);
+    /* Lanes that size the pool differently (FO_GREMLIN_HOST_SLOTS) take turns:
+       the pool keeps its size while any holder is active, so a mismatch is a
+       wait for those holders, not a failure. */
+    if (e == EBUSY) e = EAGAIN;
     if (e == 0) {
         e = admission_publish(base, h, weight, scope, text_capacity, authority,
                               previous, delegated ? &parent : NULL);

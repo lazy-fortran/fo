@@ -27,7 +27,8 @@ module fo_gremlin_campaign
     use fo_gremlin_state, only: gremlin_session_t, gremlin_lease_t, &
         gremlin_lease_group_t, gremlin_lease_release, gremlin_session_state_dir, &
         gremlin_session_stop_requested, gremlin_host_lease_acquire_weighted, &
-        gremlin_host_lease_release, gremlin_session_read, GREMLIN_STATE_TEXT_MAX
+        gremlin_host_lease_release, gremlin_session_read, GREMLIN_STATE_TEXT_MAX, &
+        LEASE_GROUP_MAX
     use fo_gremlin_status_json, only: gremlin_simple_response, gremlin_error_response
     use fo_process, only: argv_push, process_detect_nproc
     use fo_project_load, only: project_has_model, project_load_configured, &
@@ -47,15 +48,23 @@ module fo_gremlin_campaign
     public :: generation_model_expand, active_model_identity, next_campaign_seed
     public :: case_wall_timeout, build_command, case_command, append_execution_provenance
     public :: acquire_heavy_work_slot, release_heavy_work_slot, gremlin_host_jobs
-    public :: gremlin_lane_jobs, GREMLIN_MAX_LANE_JOBS
+    public :: gremlin_lane_jobs, gremlin_host_slots, GREMLIN_MAX_LANE_JOBS
+    public :: GREMLIN_HOST_WORK_LEASE
     public :: release_generation_lease, request_policy_key, push_scope_args, log_path
     public :: gremlin_attach_response
 
     integer, parameter :: GREMLIN_HISTORY_LIMIT = 128
-    integer, parameter :: GREMLIN_HEAVY_LANE_CAPACITY = 2
+    !! Case children of a lane whose request names no job count.
+    integer, parameter :: GREMLIN_DEFAULT_LANE_JOBS = 2
     !! Upper bound of concurrently running case children in one lane.
     integer, parameter :: GREMLIN_MAX_LANE_JOBS = 16
-    character(len=*), parameter :: GREMLIN_HEAVY_LEASE = 'gremlin-heavy-work'
+    !! Host work-slot pool shared by every lane of this user. Each slot is one
+    !! case child or build job; FO_GREMLIN_HOST_SLOTS sets the pool size
+    !! (default: nproc).
+    !! The name differs from the former two-slot 'gremlin-heavy-work' pool,
+    !! whose capacity file would otherwise make old and new drivers refuse
+    !! each other while both are active.
+    character(len=*), parameter :: GREMLIN_HOST_WORK_LEASE = 'gremlin-host-work'
 
 contains
 
@@ -150,10 +159,11 @@ contains
 
     subroutine acquire_heavy_work_slot(session, lane_jobs, lease, held, honor_stop, &
             stop_requested, ierr, message, would_wait)
-        !! Admission weight out of GREMLIN_HEAVY_LANE_CAPACITY: min(capacity,
-        !! FO_JOBS). A lane that fans out (lane_jobs > 1) holds the whole
-        !! capacity, so parallel lanes never overlap on the host while two
-        !! serial FO_JOBS=1 lanes still share it.
+        !! Admission weight out of the host pool gremlin_host_slots(): the
+        !! larger of the lane's concurrent case children and its FO_JOBS build
+        !! budget, clamped to the pool. Lanes with explicit budgets share the
+        !! host in proportion to them; a lane without FO_JOBS (host default)
+        !! still takes the whole pool.
         type(gremlin_session_t), intent(in) :: session
         integer, intent(in) :: lane_jobs
         type(gremlin_lease_group_t), intent(inout) :: lease
@@ -167,7 +177,7 @@ contains
         logical, intent(out), optional :: would_wait
 
         logical :: busy
-        integer :: weight
+        integer :: weight, capacity
 
         ierr = 0
         message = ''
@@ -176,16 +186,16 @@ contains
         if (held) then
             if (.not. lease%closing) return
         end if
-        weight = min(GREMLIN_HEAVY_LANE_CAPACITY, gremlin_host_jobs())
-        if (lane_jobs > 1) weight = GREMLIN_HEAVY_LANE_CAPACITY
+        capacity = gremlin_host_slots()
+        weight = max(1, min(capacity, max(lane_jobs, gremlin_host_jobs())))
         do
             if (held) then
                 call release_heavy_work_slot(lease, held, ierr, message)
                 if (ierr /= 0) return
                 busy = held
             else
-                call gremlin_host_lease_acquire_weighted(GREMLIN_HEAVY_LEASE, &
-                    GREMLIN_HEAVY_LANE_CAPACITY, weight, lease, busy, ierr, message)
+                call gremlin_host_lease_acquire_weighted(GREMLIN_HOST_WORK_LEASE, &
+                    capacity, weight, lease, busy, ierr, message)
             end if
             if (ierr == 0) then
                 if (.not. busy) then
@@ -262,13 +272,29 @@ contains
         end if
     end function gremlin_host_jobs
 
+    integer function gremlin_host_slots() result(slots)
+        !! Host work-slot pool: FO_GREMLIN_HOST_SLOTS when it is a positive
+        !! integer, else the processor count, clamped to LEASE_GROUP_MAX.
+        character(len=32) :: value
+        integer :: status, parse_status
+
+        slots = 0
+        call get_environment_variable('FO_GREMLIN_HOST_SLOTS', value, status=status)
+        if (status == 0 .and. len_trim(value) > 0) then
+            read (value, *, iostat=parse_status) slots
+            if (parse_status /= 0) slots = 0
+        end if
+        if (slots < 1) slots = process_detect_nproc()
+        slots = max(1, min(LEASE_GROUP_MAX, slots))
+    end function gremlin_host_slots
+
     integer function gremlin_lane_jobs(request) result(k)
         !! Case children one lane runs at once: the request's jobs, else the
         !! host heavy-work weight (1 for FO_JOBS=1).
         type(gremlin_request_t), intent(in) :: request
 
         k = request%jobs
-        if (k < 1) k = min(GREMLIN_HEAVY_LANE_CAPACITY, gremlin_host_jobs())
+        if (k < 1) k = min(GREMLIN_DEFAULT_LANE_JOBS, gremlin_host_jobs())
         k = max(1, min(GREMLIN_MAX_LANE_JOBS, k))
     end function gremlin_lane_jobs
 

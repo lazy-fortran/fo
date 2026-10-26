@@ -10,7 +10,8 @@ module fo_gremlin_state
     integer, parameter, public :: GREMLIN_STATE_TEXT_MAX = 65536
     integer, parameter :: PATH_LEN = 4096, ID_LEN = 128, START_LEN = 64
     integer, parameter :: DRIVER_DIGEST_LEN = 64
-    integer, parameter :: LEASE_GROUP_MAX = 2
+    !! Most host work slots one lane can reserve (and the largest host pool).
+    integer, parameter, public :: LEASE_GROUP_MAX = 256
 
     type, public :: gremlin_session_t
         character(len=:), allocatable :: state_dir
@@ -566,12 +567,13 @@ contains
         busy = c_lease_is_busy(c_error) /= 0_c_int
         message = error_text(ierr)
         if (ierr /= 0) return
-        group%count = weight
+        ! A delegated child reservation is clamped to its parent's weight.
+        group%count = count(fds(1:weight) >= 0_c_int)
         group%scope_fd = int(authority)
         group%guardian_pid = int(guardian)
         group%scope = c_string(scope)
         group%previous_scope = c_string(previous)
-        do i = 1, weight
+        do i = 1, group%count
             group%members(i)%resource = trim(resource)
             group%members(i)%slot = int(slots(i))
             group%members(i)%lock_fd = int(fds(i))

@@ -227,6 +227,8 @@ contains
         ! Fixture lanes share host work slots only with their own fixture, not
         ! with every concurrently running test or developer lane on the host.
         call set_env('FO_GREMLIN_ADMISSION_DIR', join_path(scratch, 'admission'))
+        ! A two-slot pool keeps fixtures that fill the pool independent of nproc.
+        call set_env('FO_GREMLIN_HOST_SLOTS', '2')
         if (present(capture_counter)) then
             capture_counter = join_path(scratch, 'capture-counter.json')
             call set_env('FO_GREMLIN_TEST_CAPTURE_COUNTER', capture_counter)
