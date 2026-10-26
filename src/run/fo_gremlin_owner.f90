@@ -65,6 +65,9 @@ module fo_gremlin_owner
 
     public :: run_owner
 
+    character(len=*), parameter :: NO_CASE_SELECTED_NOTE = &
+        'no cases selected: --random 0, no --target and no changed-file impact'
+
     type :: child_t
         !! One owned child process tree: the candidate build or a campaign case.
         type(exec_job_t) :: job = exec_job_t()
@@ -710,6 +713,7 @@ contains
         type(gremlin_lease_t) :: new_lease
         type(gremlin_request_t), allocatable :: selection
         character(len=PATH_LEN) :: detail
+        character(len=:), allocatable :: idle_note
         integer :: status, mandatory_count
         logical :: was_active
         character(:), allocatable :: configure_log
@@ -852,9 +856,11 @@ contains
             return
         end if
         o%state = 'testing'
-        if (o%n_selected == 0) call idle_state(o, ierr)
+        idle_note = ''
+        if (o%n_selected == 0) call idle_state(o, ierr, idle_note)
         if (ierr /= 0) return
-        call publish(o, o%state, current_case(o), 'NONE', 0, ierr, o%message)
+        call publish(o, o%state, current_case(o), 'NONE', 0, ierr, o%message, &
+            diagnostic=trim(idle_note))
         if (ierr == 0 .and. was_active) then
             call gremlin_generation_prune_inactive(o%active%root, status, detail)
             if (status /= 0) write (error_unit, '(a)') &
@@ -862,14 +868,18 @@ contains
         end if
     end subroutine complete_build
 
-    subroutine idle_state(o, ierr)
+    subroutine idle_state(o, ierr, note)
         !! The state of a lane with nothing selected: quiescent once its gate
-        !! is required (and green under random cases), idle otherwise.
+        !! is required (and green under random cases), idle otherwise. A lane
+        !! that can never select a case sleeps too, and `note` says why, so a
+        !! deliberate empty selection is not read as a failure (#271).
         type(owner_t), intent(inout) :: o
         integer, intent(out) :: ierr
+        character(len=:), allocatable, intent(out), optional :: note
         type(gremlin_coverage_view_t) :: view
 
         ierr = 0
+        if (present(note)) note = ''
         o%state = 'idle'
         if (o%request%random_count == 0 .and. o%request%gate_required_count > 0) &
             o%state = 'quiescent'
@@ -879,6 +889,11 @@ contains
             if (view%green .and. o%request%gate_required_count > 0) o%state = 'quiescent'
         else if (ierr == COVERAGE_NOT_FOUND) then
             ierr = 0
+        end if
+        if (o%request%random_count == 0 .and. o%request%gate_required_count == 0) then
+            o%state = 'quiescent'
+            o%message = NO_CASE_SELECTED_NOTE
+            if (present(note)) note = NO_CASE_SELECTED_NOTE
         end if
     end subroutine idle_state
 
@@ -915,6 +930,7 @@ contains
         type(gremlin_coverage_view_t) :: view
         type(gremlin_readiness_t) :: readiness
         character(len=PATH_LEN) :: launch_message, detail
+        character(len=:), allocatable :: idle_note
         character(len=128) :: active_session, owner_start
         character(len=GREMLIN_STATE_TEXT_MAX) :: status_text
         integer :: slot, in_flight, status, mandatory_count, owner_pid
@@ -985,9 +1001,9 @@ contains
             end if
         end if
         if (o%n_selected == 0) then
-            call idle_state(o, ierr)
+            call idle_state(o, ierr, idle_note)
             if (ierr == 0) call publish(o, o%state, '', 'NONE', 0, ierr, o%message, &
-                candidate=o%active)
+                diagnostic=trim(idle_note), candidate=o%active)
             return
         end if
         o%state = 'testing'
