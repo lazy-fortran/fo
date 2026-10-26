@@ -276,9 +276,11 @@ contains
             "mid = { modules = ['l_mid'], uses = ['base'] }"//nl// &
             'top = { source = ["src/l_t*.f90"], uses = ["mid"] }'//nl// &
             '[extra.fo.test-groups]'//nl// &
-            'physics = { tests = ["test_mid", "test/test_top*"], '// &
+            'physics = { tests = ["test_mid", "test/test_top*", '// &
+            '"test_lay_slow"], '// &
             'inputs = ["data/cfg.nml"] }'//nl// &
-            'smoke = { tests = ["test_f*"] }'//nl
+            'smoke = { tests = ["test_f*", "test_mid"], '// &
+            'inputs = ["data/cfg.nml"] }'//nl
     end function layers_toml
 
     integer function case_layer_name_check(model, case_name, layer_name) result(ok)
@@ -363,7 +365,12 @@ contains
             'group does not leak')
         call check(has_label(model, 'test_free', 'smoke'), 'second group')
         call check(has_label(model, 'test_lay_slow', 'slow'), 'slow label kept')
+        call check(has_label(model, 'test_lay_slow', 'physics'), &
+            'group label follows existing slow label')
         c = model_find_case(model, 'test_mid')
+        call check(has_label(model, 'test_mid', 'smoke'), &
+            'case retains both matching group labels')
+        call check(size(model%cases(c)%labels) == 2, 'two distinct group labels')
         call check(size(model%cases(c)%attrs) == 1, 'group input recorded')
         if (size(model%cases(c)%attrs) == 1) call check( &
             model%cases(c)%attrs(1)%key == 'input' .and. &

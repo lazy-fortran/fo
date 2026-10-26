@@ -336,6 +336,8 @@ contains
         logical, intent(in) :: slow
         type(string_t), allocatable, intent(out) :: labels(:)
         type(model_attr_t), allocatable, intent(out) :: attrs(:)
+        type(string_t), allocatable :: grown_labels(:)
+        type(model_attr_t), allocatable :: grown_attrs(:)
         integer :: g, k, m
         logical :: hit
 
@@ -351,12 +353,23 @@ contains
                 end if
             end do
             if (.not. hit) cycle
-            if (.not. has_name(labels, config%test_groups(g)%name)) &
-                labels = [labels, string_t(config%test_groups(g)%name)]
+            ! Assign deferred-length components directly: GCC 13 loses their
+            ! contents in a self-referential derived-type array constructor.
+            if (.not. has_name(labels, config%test_groups(g)%name)) then
+                k = size(labels)
+                allocate (grown_labels(k + 1))
+                grown_labels(1:k) = labels
+                grown_labels(k + 1)%s = config%test_groups(g)%name
+                call move_alloc(grown_labels, labels)
+            end if
             do m = 1, size(config%test_groups(g)%inputs)
                 if (has_input(attrs, config%test_groups(g)%inputs(m)%s)) cycle
-                attrs = [attrs, model_attr_t('input', &
-                    config%test_groups(g)%inputs(m)%s)]
+                k = size(attrs)
+                allocate (grown_attrs(k + 1))
+                grown_attrs(1:k) = attrs
+                grown_attrs(k + 1)%key = 'input'
+                grown_attrs(k + 1)%value = config%test_groups(g)%inputs(m)%s
+                call move_alloc(grown_attrs, attrs)
             end do
         end do
     end subroutine case_labels
