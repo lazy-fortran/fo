@@ -2493,7 +2493,10 @@ contains
                 end do
 
                 team_size = max(1, min(n_compile, native_jobs()))
-                !$omp parallel do if(n_compile > 1) num_threads(team_size) schedule(static) &
+                ! Ready sources vary greatly in compile time; idle workers take
+                ! the next source while dependencies still respect this level.
+                !$omp parallel do if(n_compile > 1) num_threads(team_size) &
+                !$omp schedule(dynamic, 1) &
                 !$omp private(node_id, obj_path, fname_local, per_log_local, smod_index)
                 do ii = 1, n_compile
                     node_id = compile_nodes(ii)
