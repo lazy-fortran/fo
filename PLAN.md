@@ -55,6 +55,13 @@ Nix/Spack replacement, CI/promotion engine or agent orchestrator.
   warm execution, changed-helper invalidation and undefined-helper rejection.
   The original FortGen consumer and combined release deployment are pending.
 
+- Native FPM `build --tests --case` now builds only the selected test
+  closures, without executing tests. An unrelated test's
+  compiler error reproduces the old failure; the focused materialization CLI
+  regression and one-target, random-zero Gremlin gate pass after the fix.
+  Explicitly selecting the invalid case and unscoped slow-inclusive builds
+  still fail. This is focused qualification, not a full-suite result.
+
 ## Current state (main `8cec6ed`, 2026-10-16)
 
 The 2026-10-15 [backend-neutral project model](doc/CMAKE_GREMLIN_PLAN.md#backend-neutral-project-model-decision-2026-10-15)

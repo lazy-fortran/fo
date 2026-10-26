@@ -858,8 +858,8 @@ contains
         ! --tests builds what every test case needs, slow ones included (fpm:
         ! all test programs; CMake: the plan targets of the model's cases), so
         ! `fo test --no-build` can run any of them afterwards.
-        if (has_arg('--tests') .and. b%kind == BACKEND_CMAKE .and. &
-            project_has_model(b)) then
+        if (has_arg('--tests') .and. project_has_model(b) .and. &
+            (b%kind == BACKEND_CMAKE .or. has_arg('--case'))) then
             call project_load(b, trim(all_flags), model, model_error, model_message)
             if (model_error /= 0) then
                 write (error_unit, '(a)') 'fo: '//model_message

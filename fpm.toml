@@ -16,13 +16,13 @@ module-naming = false
 library = false
 
 [dependencies]
-fx = { git = "https://github.com/lazy-fortran/fx.git", branch = "main" }
+fx = { git = "https://github.com/lazy-fortran/fx.git", rev = "eda9d6e4ec5287e07452f7c5402ccb5ccba8dfec" }
 # Tracking fortfront's main rather than a tag while the two move together.
 # Pinning to v0.1.1 meant fixes landing in fortfront were invisible here -
 # including the out-of-bounds token read that segfaults every fo run under
 # gfortran 13.3, which is what Ubuntu 24.04 and so every GitHub runner has.
 # Pin again once that has settled.
-fortfront = { git = "https://github.com/lazy-fortran/fortfront.git", branch = "main" }
+fortfront = { git = "https://github.com/lazy-fortran/fortfront.git", rev = "87f65043eaeac90b2a0606ef6a4e9b49b89c2a6a" }
 openmp = "*"
 
 [dev-dependencies]
@@ -376,3 +376,6 @@ main = "test_cmake_scope_cli.f90"
 name = "test_cmake_declared_inputs_cli"
 source-dir = "test"
 main = "test_cmake_declared_inputs_cli.f90"
+
+[extra.fo.test-args]
+test_backend_gfortran=["external-test-helpers"]
