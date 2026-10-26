@@ -89,6 +89,11 @@ contains
                 end if
             end associate
         end do
+        ! Issue #272: one wait may span a whole generation, so the bound seen by
+        ! MCP clients is one hour rather than the old 30 s.
+        call assert_equal_integer(int(json_number_value(json_member( &
+            json_member(properties, 'wait_ms'), 'maximum'))), 3600000, &
+            'schema wait_ms maximum is one hour')
     end subroutine test_schema
 
     function schema_type(kind) result(name)
@@ -165,6 +170,11 @@ contains
                 end if
             end select
         end do
+
+        ! Issue #272: a caller may block once for up to one hour.
+        option = GREMLIN_OPTIONS(gremlin_option_index('wait_ms'))
+        call add_probe(option, 600000_int64, .true.)
+        call add_probe(option, 3600001_int64, .false.)
 
         call assert_true(n > 20, 'the table yields option probes')
         input = mcp_request(1, 'initialize', '{"protocolVersion":"2025-11-25"}')//nl
