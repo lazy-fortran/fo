@@ -227,7 +227,10 @@ contains
             call build_case(model, members(i), rcs(i))
         end do
         do i = 1, n
-            allocate (buffer(n), setup_buffer(n))
+            ! ctest's JSON already expands a fixture into DEPENDS, so the same
+            ! predecessor arrives twice: once from DEPENDS, once from the fixture
+            ! match below. Room for both sources, not one.
+            allocate (buffer(n + size(rcs(i)%depends)), setup_buffer(n))
             count = 0
             k = 0
             do j = 1, size(rcs(i)%depends)
