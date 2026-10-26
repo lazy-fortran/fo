@@ -39,6 +39,7 @@ program test_scan
     call test_scan_module_name_containing_procedure()
     call test_scan_submodule_def()
     call test_scan_external_subroutine_def()
+    call test_scan_many_external_units()
     call test_scan_external_after_internal_with_unit_expression()
     call test_scan_contained_subroutine_keeps_program()
     call test_scan_program_def()
@@ -341,6 +342,32 @@ contains
             'scan_external_subroutine: procedure name')
         call fs_remove_file(trim(path))
     end subroutine test_scan_external_subroutine_def
+
+    subroutine test_scan_many_external_units()
+        ! f90wrap wrappers hold more than 100 external procedures; FortFront
+        ! #3042 overflowed its range table on them during campaign discovery.
+        integer, parameter :: n_units = 150
+        type(scan_unit_t) :: info
+        integer :: ierr, i
+        character(len=512) :: path
+        character(len=80) :: lines(3*n_units)
+        character(len=16) :: label
+
+        do i = 1, n_units
+            write (label, '(i0)') i
+            lines(3*i - 2) = 'subroutine f90wrap_unit_'//trim(label)//'()'
+            lines(3*i - 1) = '    implicit none'
+            lines(3*i) = 'end subroutine f90wrap_unit_'//trim(label)
+        end do
+        call make_tmp_path('fo_test_many_external_units', path, '.f90')
+        call write_file(path, lines, 3*n_units)
+
+        call scan_file(path, info, ierr)
+        call assert(ierr == 0, 'scan_many_external_units: no error')
+        call assert(trim(info%module_name) == 'f90wrap_unit_1', &
+            'scan_many_external_units: first procedure name')
+        call fs_remove_file(trim(path))
+    end subroutine test_scan_many_external_units
 
     subroutine test_scan_external_after_internal_with_unit_expression()
         type(scan_unit_t) :: info
