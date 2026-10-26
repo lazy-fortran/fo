@@ -156,9 +156,9 @@ private.
 Host admission is a pool of `FO_GREMLIN_HOST_SLOTS` work slots (default: the
 processor count). A lane reserves max(`--jobs`, `FO_JOBS`) slots, clamped to the
 pool, so lanes with explicit budgets run side by side while a lane without
-`FO_JOBS` holds the whole pool. Direct Fo build/test work
-still needs controller admission outside that lease. Choose bounded `FO_JOBS`
-from available CPU and memory; a single heavy lane can compile in parallel.
+`FO_JOBS` holds the whole pool. Direct Fo build/test work outside a lane
+starts without waiting for approval. Choose bounded `FO_JOBS` from available
+CPU and memory; a single heavy lane can compile in parallel.
 
 ## Code ownership
 
