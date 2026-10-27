@@ -64,7 +64,8 @@ by its File API metadata. Set `FO_CMAKE_BUILD_DIR` for a nondefault build direct
 staged build outputs remain private. Hook builds enable Fo's relocatable object
 cache so successive staged views can reuse compilation and executable results.
 The build child reuses the exact File API request prepared for test selection,
-so the staged tree is configured once; the build wall cap still applies.
+so the mandatory build does not configure it again; its wall cap still applies.
+Independent native executable cache checks and links use the native job limit.
 
 Projects can apply their native fast-test label policy with Git configuration.
 For example, a project whose fast CTest target excludes reference comparisons
