@@ -6,6 +6,7 @@ module fo_gremlin_campaign
     use, intrinsic :: iso_fortran_env, only: int64
     use fo_build_backend, only: BACKEND_NATIVE, BACKEND_CMAKE, backend_t, detect_backend
     use fo_cache, only: HASH_LEN, cache_digest
+    use fo_ctest_run, only: ctest_fixture_support_case
     use fo_cmake_generation, only: cmake_registered_names
     use fo_fpm_config, only: fpm_config_t, fpm_config_parse
     use fo_fs, only: fs_sleep_ms
@@ -593,6 +594,13 @@ contains
                 end if
             end if
             do i = 1, n_model
+                if (.not. any(request%targets(:request%n_targets) == &
+                    generation%model%cases(model_cases(i))%name) .and. &
+                    .not. any(request%gate_cases(:request%gate_required_count) == &
+                    generation%model%cases(model_cases(i))%name)) then
+                    if (ctest_fixture_support_case(generation%model, model_cases(i), &
+                        model_cases(:n_model))) cycle
+                end if
                 associate (name => generation%model%cases(model_cases(i))%name)
                     if (len(name) > len(all_names)) then
                         ierr = 1
@@ -619,7 +627,7 @@ contains
             else
                 if (request%n_impact_cases > 0) &
                     call append_priority_names(request%impact_cases, &
-                        request%n_impact_cases, impacted, n_impacted)
+                    request%n_impact_cases, impacted, n_impacted)
             end if
         else if (request%only_changed) then
             ! First generation: the cases the working-tree delta affects on

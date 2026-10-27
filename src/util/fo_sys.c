@@ -141,6 +141,10 @@ int fo_sys_lock_file(const char *path, int extra_flags, int mode, int operation)
     return fd;
 }
 
+int fo_sys_lock_fixture(const char *path) {
+    return fo_sys_lock_file(path, O_CLOEXEC, 0600, LOCK_EX);
+}
+
 void fo_sys_unlock(int fd) {
     if (fd >= 0) { flock(fd, LOCK_UN); close(fd); }
 }
