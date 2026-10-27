@@ -6,16 +6,7 @@ program test_gremlin_ctest_fixture_lifecycle
     use fo_test_json, only: json_value_t, json_member, json_boolean_value, &
         json_size, json_element
     implicit none
-    character(:), allocatable :: driver, scratch, project, cache, state, session
-    character(*), parameter :: lane = 'fixture-lifecycle'
-    type(string_list_t) :: args
-    type(process_result_t) :: process
-    type(json_value_t) :: reply, events, receipt
-    logical :: green, first, second, helper
-    integer :: attempt, i
-
-    call gremlin_setup(driver, scratch, project, cache, state)
-    call write_lines(project//'/CMakeLists.txt', [character(180) :: &
+    character(180), parameter :: cmake_lines(*) = [character(180) :: &
         'cmake_minimum_required(VERSION 3.22)', &
         'project(fixture_lifecycle LANGUAGES Fortran)', &
         'enable_testing()', &
@@ -25,8 +16,8 @@ program test_gremlin_ctest_fixture_lifecycle
         'endforeach()', &
         'set_tests_properties(setup PROPERTIES FIXTURES_SETUP service)', &
         'set_tests_properties(first second PROPERTIES FIXTURES_REQUIRED service)', &
-        'set_tests_properties(cleanup PROPERTIES FIXTURES_CLEANUP service)'])
-    call write_lines(project//'/probe.f90', [character(180) :: &
+        'set_tests_properties(cleanup PROPERTIES FIXTURES_CLEANUP service)']
+    character(180), parameter :: probe_lines(*) = [character(180) :: &
         'program probe', &
         'use iso_fortran_env, only: int64', &
         'implicit none', &
@@ -53,7 +44,18 @@ program test_gremlin_ctest_fixture_lifecycle
         '  if(ios /= 0) error stop "fixture cleaned before requirer"', &
         '  close(u)', &
         'end select', &
-        'end program probe'])
+        'end program probe']
+    character(:), allocatable :: driver, scratch, project, cache, state, session
+    character(*), parameter :: lane = 'fixture-lifecycle'
+    type(string_list_t) :: args
+    type(process_result_t) :: process
+    type(json_value_t) :: reply, events, receipt
+    logical :: green, first, second, helper
+    integer :: attempt, i
+
+    call gremlin_setup(driver, scratch, project, cache, state)
+    call write_lines(project//'/CMakeLists.txt', cmake_lines)
+    call write_lines(project//'/probe.f90', probe_lines)
     call gremlin_start_args(args, project, lane, 'first')
     call list_add(args, '--jobs')
     call list_add(args, '2')
