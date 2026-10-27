@@ -313,7 +313,7 @@ contains
         character(len=*), intent(in) :: cwd, compiler, argv, inputs, output
         character(len=*), intent(in) :: log_file
         integer, intent(out) :: exitcode
-        character(len=:), allocatable :: packed, effective_argv, link_environment
+        character(len=:), allocatable :: packed, effective_argv, link_environment, key_argv
         character(len=HASH_LEN), allocatable :: parts(:)
         character(len=HASH_LEN) :: action_id
         character(len=1024) :: stage_dir, staged_output, canonical_cwd
@@ -339,12 +339,15 @@ contains
             n = 0
             allocate (parts(3 + count_char(inputs, achar(10)) + 1))
             parts(1) = memo_tool_key(compiler)
-            if (len(link_environment) > 0) then
-                call text_digest(effective_argv//achar(10)//link_environment, parts(2))
-            else
-                call text_digest(argv, parts(2))
-            end if
+            key_argv = argv
             parts(3) = 'fo-cmake-link-1'
+            if (cache_relocatable()) then
+                key_argv = relocatable_link_key(argv, inputs)
+                parts(3) = 'fo-cmake-link-relocatable-1'
+            end if
+            if (len(link_environment) > 0) key_argv = key_argv//achar(10)// &
+                'policy:ZERO_AR_DATE=1;oso_prefix=<cwd>/'
+            call text_digest(key_argv, parts(2))
             n = 3
             start = 1
             do i = 1, len(inputs) + 1
@@ -372,6 +375,18 @@ contains
             call append_artifact_error(log_file, &
                 'fo: could not reserve executable staging directory')
             return
+        end if
+        if (do_cache) then
+            call cache_restore_binary(cache, action_id, trim(staged_output), restored)
+            if (restored) then
+                call native_image_valid(staged_output, valid_image)
+                if (valid_image) then
+                    if (fs_rename(trim(staged_output), trim(output)) == 0) exitcode = 0
+                    call fs_remove_tree(trim(stage_dir))
+                    return
+                end if
+            end if
+            call fs_remove_file(trim(staged_output))
         end if
         n_args = 0
         call argv_push(packed, n_args, compiler)
@@ -401,6 +416,68 @@ contains
         end if
         call fs_remove_tree(trim(stage_dir))
     end subroutine native_link_exact
+
+    function relocatable_link_key(argv, inputs) result(key)
+        !! Only declared file operands lose their paths; their ordered content
+        !! digests are already keyed. Flags, including runtime paths, stay exact.
+        character(len=*), intent(in) :: argv, inputs
+        character(len=:), allocatable :: key, word, declarations
+        character(len=24) :: ordinal
+        character(len=1), parameter :: nl = achar(10)
+        integer :: first, i, match
+
+        key = ''
+        declarations = nl//inputs//nl
+        first = 1
+        do i = 1, len(argv) + 1
+            if (i <= len(argv)) then
+                if (argv(i:i) /= nl) cycle
+            end if
+            word = argv(first:i - 1)
+            first = i + 1
+            if (len(word) == 0) cycle
+            match = index(declarations, nl//word//nl)
+            if (match > 0) then
+                if (.not. relocatable_link_operand(word)) match = 0
+            end if
+            if (match > 0) then
+                write (ordinal, '(i0)') count_char(inputs(:match), nl) + 1
+                key = key//nl//'input:'//trim(ordinal)
+            else
+                key = key//nl//'literal:'//word
+            end if
+        end do
+    end function relocatable_link_key
+
+    logical function relocatable_link_operand(path) result(relocatable)
+        !! Shared libraries and linker scripts can encode their authored paths
+        !! in the executable; only regular archives and object files are portable.
+        character(len=*), intent(in) :: path
+        character(len=18) :: header
+        integer :: unit, status
+
+        relocatable = .false.
+        open (newunit=unit, file=path, access='stream', form='unformatted', &
+            status='old', action='read', iostat=status)
+        if (status /= 0) return
+        read (unit, iostat=status) header
+        close (unit)
+        if (status /= 0) return
+        if (header(:8) == '!<arch>'//achar(10)) then
+            relocatable = .true.
+        else if (header(:4) == achar(127)//'ELF') then
+            if (iachar(header(6:6)) == 1) &
+                relocatable = header(17:18) == achar(1)//achar(0)
+            if (iachar(header(6:6)) == 2) &
+                relocatable = header(17:18) == achar(0)//achar(1)
+        else if (header(:4) == achar(207)//achar(250)//achar(237)//achar(254) .or. &
+                 header(:4) == achar(206)//achar(250)//achar(237)//achar(254)) then
+            relocatable = header(13:16) == achar(1)//repeat(achar(0), 3)
+        else if (header(:4) == achar(254)//achar(237)//achar(250)//achar(207) .or. &
+                 header(:4) == achar(254)//achar(237)//achar(250)//achar(206)) then
+            relocatable = header(13:16) == repeat(achar(0), 3)//achar(1)
+        end if
+    end function relocatable_link_operand
 
     integer function count_char(text, ch) result(n)
         character(len=*), intent(in) :: text
