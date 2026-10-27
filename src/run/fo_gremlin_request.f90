@@ -115,7 +115,8 @@ module fo_gremlin_request
         gremlin_option_t('lifetime', '--owner', '--lifetime', 'string', GA_START, &
             choices='persistent,task', &
             note='task: the lane stops when the client that started it ends'), &
-        gremlin_option_t('wait_ms', '--wait-ms', '', 'int', GA_WAIT, 0, 30000), &
+        gremlin_option_t('wait_ms', '--wait-ms', '', 'int', GA_WAIT, 0, 3600000, &
+            note='upper bound one hour; returns early when --until holds'), &
         gremlin_option_t('wait_until', '--until', '', 'string', GA_WAIT, &
             choices='local-gate-green,ordinary-verified,fully-verified,quiescent,failure'), &
         gremlin_option_t('since', '--since', '', 'string', GA_STATUS + GA_WAIT, &
