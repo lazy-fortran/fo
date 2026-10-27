@@ -155,7 +155,7 @@ contains
         type(generation_t) :: generation
         type(test_result_entry_t), allocatable :: results(:)
         type(string_t), allocatable :: changed(:), reasons(:), deferred(:), warnings(:)
-        character(len=4096) :: driver, logfile, resultfile
+        character(len=4096) :: driver, logfile, resultfile, dependency_message
         character(len=64) :: driver_digest, key
         character(len=:), allocatable :: root, snapshot, tree, text, message, packed, child_env
         character(len=:), allocatable :: reuse, populated, backend_name
@@ -212,14 +212,14 @@ contains
                 end if
                 snapshot = owned_view
             else
-              do attempts = 1, 100
-                snapshot = path_dirname(root)//'/.fo-hook-'//int_text(process_getpid())// &
-                    '-'//int_text(attempts)
-                if (fs_mkdir_excl(snapshot) == 0) then
-                    snapshot_owned = .true.
-                    exit
-                end if
-              end do
+                do attempts = 1, 100
+                    snapshot = path_dirname(root)//'/.fo-hook-'//int_text(process_getpid())// &
+                        '-'//int_text(attempts)
+                    if (fs_mkdir_excl(snapshot) == 0) then
+                        snapshot_owned = .true.
+                        exit
+                    end if
+                end do
             end if
             if (.not. snapshot_owned .and. len(owned_view) == 0) then
                 message = 'cannot create an isolated staged view beside the repository'
@@ -261,9 +261,12 @@ contains
             ! is initialized so the effective configure arguments include it.
             call cmake_configured_build_dir(root, populated, populated_found)
             if (populated_found) then
-                call cmake_populated_dependency_args(root//'/'//populated, &
-                    'build/_deps', reuse, status, message)
-                if (status /= 0) exit validation
+                call cmake_populated_dependency_args(populated, &
+                    'build/_deps', reuse, status, dependency_message)
+                if (status /= 0) then
+                    message = trim(dependency_message)
+                    exit validation
+                end if
             end if
             status = c_prepare(root//c_null_char, snapshot//c_null_char, int(cap, c_int), &
                 reuse//c_null_char)
@@ -500,22 +503,21 @@ contains
         type(string_t), allocatable, intent(out) :: labels(:)
         character(len=:), allocatable :: text
         character(len=:), allocatable :: piece
-        integer :: status, comma, n
+        integer :: status, comma
 
         allocate (labels(0))
         call git_text(root, git_words('config', '--get-all', name), text, status)
         if (status /= 0) return
         text = adjustl(text)
         if (len_trim(text) == 0) return
-        n = 0
         do
             comma = index(text, ',')
-            piece = trim(text(:comma - 1))
-            if (comma == 0) piece = trim(text)
-            if (len_trim(piece) > 0) then
-                n = n + 1
-                call append(labels, piece)
+            if (comma == 0) then
+                piece = trim(text)
+            else
+                piece = trim(text(:comma - 1))
             end if
+            if (len_trim(piece) > 0) call append(labels, piece)
             if (comma == 0) exit
             text = adjustl(text(comma + 1:))
             if (len_trim(text) == 0) exit

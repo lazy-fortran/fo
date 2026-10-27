@@ -360,6 +360,32 @@ program test_hook_precommit
     call assert_contains(result%stdout, '"backend":"cmake"', 'FetchContent project configures')
     call assert_contains(result%stdout, '"fast_passed":1', 'fetched dependency test ran in the hook')
 
+    call write_text(scratch//'/header.inc', 'integer, parameter :: header_answer = 9'//nl)
+    call write_text(project//'/CMakeLists.txt', read_text(project//'/CMakeLists.txt')// &
+        'FetchContent_Declare(headerdep URL "file://'//scratch//'/header.inc" '// &
+        'DOWNLOAD_NO_EXTRACT TRUE)'//nl//'FetchContent_MakeAvailable(headerdep)'//nl// &
+        'target_include_directories(app.x PRIVATE "${headerdep_SOURCE_DIR}")'//nl)
+    call write_text(project//'/app.f90', 'program app'//nl// &
+        '    use hook_dep_mod, only: dep_answer'//nl//'    implicit none'//nl// &
+        '    include "header.inc"'//nl// &
+        '    if (dep_answer /= 7 .or. header_answer /= 9) stop 1'//nl// &
+        'end program app'//nl)
+    call configure_cmake(project)
+    call git([character(len=64) :: 'add', 'CMakeLists.txt', 'app.f90'])
+    call hook()
+    call assert_process_ok(result, 'reuse header-only populated roots discovered by File API')
+    call assert_contains(result%stdout, '"fast_passed":1', 'fetched header test ran')
+
+    ! An explicit absolute build directory belongs to the real checkout, while
+    ! the staged build must stay private and use that tree only for source roots.
+    call configure_cmake(project, 'alternate')
+    call remove_tree(project//'/build')
+    environment = string_list_t()
+    call list_add(environment, 'FO_CMAKE_BUILD_DIR='//project//'/alternate')
+    call hook(environment)
+    call assert_process_ok(result, 'absolute populated build root stays usable in the hook')
+    call assert_contains(result%stdout, '"fast_passed":1', 'absolute root test ran')
+
     ! The project's own CTest labels keep reference-comparison cases out of a
     ! commit; without that declaration the hook runs them and is blocked.
     project = join_path(scratch, 'label-tier')
@@ -391,13 +417,18 @@ contains
         call list_add(args, '--lane')
         call list_add(args, 'hook-proof')
     end subroutine lane_args
-    subroutine configure_cmake(directory)
+    subroutine configure_cmake(directory, build_dir)
         character(len=*), intent(in) :: directory
+        character(len=*), intent(in), optional :: build_dir
+        character(len=:), allocatable :: selected
+        selected = 'build'
+        if (present(build_dir)) selected = build_dir
+        call write_text(directory//'/'//selected//'/.cmake/api/v1/query/codemodel-v2', '')
         cmake_args = string_list_t()
         call list_add(cmake_args, '-S')
         call list_add(cmake_args, '.')
         call list_add(cmake_args, '-B')
-        call list_add(cmake_args, 'build')
+        call list_add(cmake_args, selected)
         call run_external('cmake', cmake_args, directory, result, timeout_ms=180000)
         call assert_process_ok(result, 'configure the CMake fixture')
     end subroutine configure_cmake
@@ -411,12 +442,14 @@ contains
         call run_external('git', args, project, result)
         call assert_process_ok(result, 'git fixture command')
     end subroutine git
-    subroutine hook()
+    subroutine hook(extra)
+        type(string_list_t), intent(in), optional :: extra
         args = string_list_t()
         call list_add(args, 'hook')
         call list_add(args, 'pre-commit')
         call list_add(args, '--json')
-        call run_fo(driver, args, project, scratch//'/cache', result, timeout_ms=90000)
+        call run_fo(driver, args, project, scratch//'/cache', result, &
+            extra_environment=extra, timeout_ms=90000)
     end subroutine hook
     subroutine bounded_hook(extra_environment)
         type(string_list_t), optional, intent(in) :: extra_environment

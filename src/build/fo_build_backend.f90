@@ -47,22 +47,23 @@ module fo_build_backend
 contains
 
     subroutine cmake_configured_build_dir(project, build_dir, found)
-        !! Relative build directory of the CMake tree that `project` is already
+        !! Absolute build directory of the CMake tree that `project` is already
         !! configured with, or empty when it is not configured. A populated
         !! cache naming `project` as its home is the project's own evidence of
         !! its native build authority, ahead of any fpm manifest beside it.
         character(len=*), intent(in) :: project
         character(len=:), allocatable, intent(out) :: build_dir
         logical, intent(out), optional :: found
-        character(len=:), allocatable :: cache, home, hint, candidate, project_path
-        integer :: status, step
+        character(len=:), allocatable :: cache, hint, candidate, project_path
+        integer :: status, step, length
 
         build_dir = ''
         if (present(found)) found = .false.
         project_path = fs_canonical_path(trim(project))
-        hint = ''
-        call get_environment_variable('FO_CMAKE_BUILD_DIR', hint, status=status)
-        if (status /= 0) hint = ''
+        call get_environment_variable('FO_CMAKE_BUILD_DIR', length=length, status=status)
+        if (status /= 0) length = 0
+        allocate(character(len=length) :: hint)
+        if (length > 0) call get_environment_variable('FO_CMAKE_BUILD_DIR', hint)
         do step = 1, 2
             if (step == 1) then
                 if (len_trim(hint) == 0) cycle
@@ -70,8 +71,9 @@ contains
             else
                 candidate = 'build'
             end if
-            call read_text_file_alloc(trim(project_path)//'/'//candidate// &
-                '/CMakeCache.txt', cache, status)
+            if (.not. fs_path_is_absolute(candidate)) &
+                candidate = trim(project_path)//'/'//candidate
+            call read_text_file_alloc(candidate//'/CMakeCache.txt', cache, status)
             if (status /= 0 .or. len_trim(cache) == 0) cycle
             if (.not. cache_home_is(cache, trim(project_path))) cycle
             build_dir = candidate

@@ -57,6 +57,24 @@ git config fo.hookBuildCap 60
 git config fo.hookFastThreshold 1
 ```
 
+When both manifests exist, a CMake cache whose home directory matches the
+checkout establishes CMake as its build authority. The hook reuses populated
+dependency source roots from that build, including header-only roots referenced
+by its File API metadata. Set `FO_CMAKE_BUILD_DIR` for a nondefault build directory;
+staged build outputs remain private.
+
+Projects can apply their native fast-test label policy with Git configuration.
+For example, a project whose fast CTest target excludes reference comparisons
+can use:
+
+```sh
+git config fo.hookExcludeLabels 'slow|regression|performance|scalability'
+```
+
+`fo.hookIncludeLabels` applies the corresponding inclusion filter. Each
+comma-separated entry is a label expression, with the same matching rules as
+`fo test -L` and `fo test -LE`. The result reports label exclusions.
+
 Fast test invocations record elapsed time and warn by name above the threshold;
 this is advisory, not a new classification database. Mark slow tests using the
 existing declarations (they remain available explicitly outside the hook):
