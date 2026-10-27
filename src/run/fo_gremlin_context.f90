@@ -2,7 +2,7 @@ module fo_gremlin_context
     use, intrinsic :: iso_fortran_env, only: int64, dp => real64
     use, intrinsic :: iso_c_binding, only: c_long_long
     use fo_cache, only: HASH_LEN, cache_digest
-    use fo_build_backend, only: backend_t, detect_backend, BACKEND_CMAKE
+    use fo_build_backend, only: backend_t, detect_backend, BACKEND_CMAKE, BACKEND_NONE
     use fo_cmake_generation, only: cmake_capture_inventory, cmake_capture_cleanup
     use fo_fpm_config, only: fpm_config_t, fpm_config_parse, fpm_dep_t, &
         dep_kind, DEP_PATH
@@ -84,6 +84,11 @@ contains
 
         registration_error = 0
         backend = detect_backend(project_dir)
+        if (backend%kind == BACKEND_NONE) then
+            message = 'no supported project manifest; expected fpm.toml or CMakeLists.txt'
+            ok = .false.
+            return
+        end if
         ierr = 0
         if (backend%kind /= BACKEND_CMAKE) &
             call dep_acquire_sources(project_dir, ierr)
