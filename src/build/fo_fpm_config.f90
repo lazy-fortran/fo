@@ -389,15 +389,14 @@ contains
         type(fpm_config_t), intent(inout) :: config
         integer, intent(out) :: ierr
 
-        character(len=1025) :: line
-        character(len=1024) :: key, val, section
+        character(len=:), allocatable :: line, key, val, section
         ! accumulated value for multi-line arrays (flags = [\n  "...",\n])
         character(len=:), allocatable :: accum
         ! [extra.fo] model sections are read without any length cap
         character(len=:), allocatable :: raw, fo_key, fo_val, fo_accum
         integer :: eq
         logical :: in_array
-        character(len=1024) :: pending_key
+        character(len=:), allocatable :: pending_key
         integer :: u, ios, i
 
         call fpm_config_init(config)
@@ -458,13 +457,6 @@ contains
                 call dispatch_fo_model(section, fo_key, fo_val, config)
                 cycle
             end if
-            if (len_trim(raw) >= len(line)) then
-                write (error_unit, '(a)') &
-                    'fo: fpm.toml line exceeds 1024 characters'
-                ierr = 1
-                close (u)
-                return
-            end if
             line = raw
             call strip_toml_comment(line)
             line = adjustl(line)
@@ -475,11 +467,6 @@ contains
                 accum = accum//trim(line)
                 if (index(line, ']') > 0) then
                     in_array = .false.
-                    if (len(accum) > len(val)) then
-                        write (config%manifest_parse_error, '(a,i0,a)') 'array value of '// &
-                            trim(pending_key)//' is longer than ', len(val), ' characters'
-                        cycle
-                    end if
                     val = accum
                     select case (trim(section))
                     case ('build')
@@ -2355,7 +2342,7 @@ contains
 
     subroutine get_section(line, section)
         character(len=*), intent(in) :: line
-        character(len=*), intent(out) :: section
+        character(len=:), allocatable, intent(out) :: section
 
         integer :: i1, i2, n
 
@@ -2377,7 +2364,7 @@ contains
 
     subroutine split_kv(line, key, val)
         character(len=*), intent(in) :: line
-        character(len=*), intent(out) :: key, val
+        character(len=:), allocatable, intent(out) :: key, val
 
         integer :: eq_pos
 

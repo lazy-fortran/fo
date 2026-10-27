@@ -30,7 +30,8 @@ program test_fpm_config
     call test_flags_multiline_array()
     call test_preprocess_macros()
     call test_per_test_arguments()
-    call test_long_test_name_and_overlong_line()
+    call test_long_test_name()
+    call test_unbounded_arrays()
     call test_external_modules_array()
     call test_implicit_typing_allowed()
 
@@ -866,7 +867,7 @@ contains
         call fs_remove_tree(dir)
     end subroutine test_per_test_arguments
 
-    subroutine test_long_test_name_and_overlong_line()
+    subroutine test_long_test_name()
         type(fpm_config_t) :: config
         character(len=512) :: dir
         character(len=:), allocatable :: long_name, parsed_name
@@ -887,13 +888,46 @@ contains
         call assert(ierr == 0 .and. parsed_name == long_name, &
             'long test name: manifest name survives parsing and selection')
 
-        open (newunit=unit, file=trim(dir)//'/fpm.toml', status='replace')
-        write (unit, '(a)') 'name = "'//repeat('x', 1020)//'"'
-        close (unit)
-        call fpm_config_parse(dir, config, ierr)
-        call assert(ierr /= 0, 'long test name: rejects a line beyond parser bound')
         call fs_remove_tree(trim(dir))
-    end subroutine test_long_test_name_and_overlong_line
+    end subroutine test_long_test_name
+
+    subroutine test_unbounded_arrays()
+        type(fpm_config_t) :: config
+        character(:), allocatable :: dir, value
+        character(*), parameter :: flag = '-D'//repeat('x', 48)
+        integer :: unit, ierr, i, layout
+
+        call make_scratch('fo-fpm-unbounded-arrays', dir)
+        do layout = 1, 2
+            open (newunit=unit, file=dir//'/fpm.toml', status='replace')
+            write (unit, '(a)') 'name = "unbounded-arrays"'
+            write (unit, '(a)') '[build]'
+            value = 'flags = ['
+            do i = 1, 32
+                value = value//'"'//flag//'",'
+                if (layout == 1) then
+                    write (unit, '(a)') value
+                    value = ''
+                end if
+            end do
+            write (unit, '(a)') value//']'
+            write (unit, '(a)') '[install]'
+            write (unit, '(a)') 'executable = ['
+            do i = 1, 32
+                write (unit, '(a)') '"'//repeat('program_name', 4)//'",'
+            end do
+            write (unit, '(a)') ']'
+            close (unit)
+            call fpm_config_parse(dir, config, ierr)
+            call assert(ierr == 0, 'arrays over 1024 characters parse')
+            call assert(config%n_flags == 32, 'all long-array flags survive')
+            do i = 1, config%n_flags
+                call assert(trim(config%flags(i)) == flag, &
+                    'long-array flag is retained without truncation')
+            end do
+        end do
+        call remove_tree(dir)
+    end subroutine test_unbounded_arrays
 
     subroutine test_external_modules_array()
         !! libneo declares its system modules as a multi-line array; the parser
