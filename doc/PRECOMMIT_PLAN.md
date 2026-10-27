@@ -61,7 +61,8 @@ When both manifests exist, a CMake cache whose home directory matches the
 checkout establishes CMake as its build authority. The hook reuses populated
 dependency source roots from that build, including header-only roots referenced
 by its File API metadata. Set `FO_CMAKE_BUILD_DIR` for a nondefault build directory;
-staged build outputs remain private.
+staged build outputs remain private. Hook builds enable Fo's relocatable object
+cache so successive staged views can reuse compilation results.
 
 Projects can apply their native fast-test label policy with Git configuration.
 For example, a project whose fast CTest target excludes reference comparisons

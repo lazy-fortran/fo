@@ -48,10 +48,12 @@ int fo_c_hook_prepare(const char *root, const char *view, int build_cap,
     if (status) return status;
     snprintf(seconds, sizeof(seconds), "%d", build_cap);
 #if defined(_WIN32) && !defined(__CYGWIN__)
-    if (_putenv_s("FO_BUILD_TIMEOUT", seconds) ||
+    if (_putenv_s("FO_CACHE_RELOCATABLE", "1") ||
+        _putenv_s("FO_BUILD_TIMEOUT", seconds) ||
         _putenv_s("GIT_ALLOW_PROTOCOL", "file")) return EINVAL;
 #else
-    if (setenv("FO_BUILD_TIMEOUT", seconds, 1) ||
+    if (setenv("FO_CACHE_RELOCATABLE", "1", 1) ||
+        setenv("FO_BUILD_TIMEOUT", seconds, 1) ||
         setenv("GIT_ALLOW_PROTOCOL", "file", 1)) return errno;
 #endif
     if (snprintf(source, sizeof(source), "%s/build/dependencies", root) >= (int)sizeof(source) ||
