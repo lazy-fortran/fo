@@ -111,7 +111,7 @@ module fo_gfortran_build
     public :: source_has_marker, dispatch_target
     public :: gfortran_selected_test_names
     public :: native_compile_units, native_link_target, native_archive_target
-    public :: native_compile_actions, native_link_exact
+    public :: native_compile_actions, native_link_exact, native_jobs
     public :: native_run_test, write_test_result_line
     public :: make_obj_path
 
@@ -520,16 +520,22 @@ contains
         integer, save :: n_known = 0
         integer :: i
 
+        key = ''
+        !$omp critical (fo_tool_key)
         do i = 1, n_known
             if (trim(known(i)) /= command) cycle
             key = keys(i)
-            return
+            exit
         end do
-        key = compiler_tool_key(command)
-        if (n_known >= size(known)) return
-        n_known = n_known + 1
-        known(n_known) = command
-        keys(n_known) = key
+        if (len_trim(key) == 0) then
+            key = compiler_tool_key(command)
+            if (n_known < size(known)) then
+                n_known = n_known + 1
+                known(n_known) = command
+                keys(n_known) = key
+            end if
+        end if
+        !$omp end critical (fo_tool_key)
     end function memo_tool_key
 
     subroutine prepare_action_node(act, source, obj_path, obj_dir, cwd, tokens, &

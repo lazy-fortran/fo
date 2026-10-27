@@ -26,10 +26,11 @@ module fo_cmake_build
     use fo_scan, only: scan_unit_t, scan_file_preprocessed, scan_file_regex, &
         MAX_UNITS
     use fo_gfortran_build, only: native_action_t, native_compile_actions, &
-        native_link_exact, native_archive_target, make_obj_path
+        native_link_exact, native_archive_target, make_obj_path, native_jobs
     use fo_compiler_dialect, only: compiler_dialect, compiler_dialect_t
     use fo_compdb, only: compdb_write_commands
-    use fo_fs, only: fs_make_dir, fs_write_text
+    use fo_fs, only: fs_make_dir, fs_write_text, fs_remove_file
+    use fo_util, only: read_text_file_alloc, int_text
     use fo_process, only: argv_push, argv_push_split_nl
     use, intrinsic :: iso_fortran_env, only: error_unit, int64
     implicit none
@@ -865,12 +866,12 @@ contains
         integer, intent(out) :: exitcode
         type(scan_unit_t), allocatable :: units(:)
         type(native_action_t), allocatable :: actions(:)
-        type(string_t), allocatable :: unit_files(:), unit_commands(:)
+        type(string_t), allocatable :: unit_files(:), unit_commands(:), link_logs(:)
         character(len=512), allocatable :: objects(:)
-        character(len=:), allocatable :: obj_dir, root, packed
+        character(len=:), allocatable :: obj_dir, root, packed, link_text
         character(len=512) :: obj
         integer :: t, k, n, s, n_units, compiled, ierr, n_args, slot, ntab, mask
-        integer, allocatable :: table(:)
+        integer, allocatable :: table(:), link_exits(:)
         character(len=12) :: count_text
         logical :: found
 
@@ -973,11 +974,33 @@ contains
                 route%plan%targets(t)%artifact, log_file, exitcode)
             if (exitcode /= 0) return
         end do
+        allocate (link_exits(size(route%plan%targets)), &
+            link_logs(size(route%plan%targets)))
+        link_exits = 0
         do t = 1, size(route%plan%targets)
             if (route%mode(t) /= MODE_NATIVE) cycle
             if (route%plan%targets(t)%type /= 'EXECUTABLE') cycle
-            call link_executable(route, t, root, obj_dir, log_file, exitcode)
-            if (exitcode /= 0) return
+            link_logs(t)%s = route%plan%build_root// &
+                '/.fo-native-cmake/link-'//int_text(t)//'.log'
+            call fs_write_text(link_logs(t)%s, '')
+        end do
+        ! Archives are complete; independent executables can validate and
+        ! restore their content-checked cache entries on the native job pool.
+        !$omp parallel do num_threads(max(1, min(route%n_native, native_jobs()))) &
+        !$omp& schedule(dynamic)
+        do t = 1, size(route%plan%targets)
+            if (route%mode(t) /= MODE_NATIVE) cycle
+            if (route%plan%targets(t)%type /= 'EXECUTABLE') cycle
+            call link_executable(route, t, root, obj_dir, link_logs(t)%s, link_exits(t))
+        end do
+        !$omp end parallel do
+        do t = 1, size(link_exits)
+            if (.not. allocated(link_logs(t)%s)) cycle
+            call read_text_file_alloc(link_logs(t)%s, link_text, ierr)
+            if (ierr == 0 .and. len_trim(link_text) > 0) &
+                call log_line(log_file, link_text)
+            call fs_remove_file(link_logs(t)%s)
+            if (link_exits(t) /= 0) exitcode = link_exits(t)
         end do
     end subroutine cmake_build_native
 
