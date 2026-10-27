@@ -32,7 +32,6 @@ program test_cmake_native_build_cli
     use fo_test_json, only: json_value_t, json_parse, json_member, json_element
     use fo_test_json, only: json_size, json_string_value
     use fo_test_twin, only: twin_write, twin_case_count, twin_case_name
-    use fo_link_resolve, only: is_macos
     use fo_fs, only: fs_find_executable
     use fo_fake_tool, only: fake_tool_dispatch, install_fake_tool
     implicit none
@@ -63,7 +62,6 @@ program test_cmake_native_build_cli
     call interface_cutoff()
     call relocated_tree_reuses_results()
     call shared_dependency_relocation()
-    call shared_library_keeps_its_runtime_path()
 
     call remove_tree(scratch)
     call finish_assertions()
@@ -195,10 +193,7 @@ contains
             'exec $FO_TEST_REAL_AR $@')
         call install_fake_tool(join_path(shim_dir, 'gfortran-count'), &
             'if " $ARGS " ~ " -c " if ${FO_TEST_FC_LOG:-} != "" append $FO_TEST_FC_LOG ' // &
-            '"COMPILE $LAST\n"' // nl // &
-            'if " $ARGS " !~ " -c " if " $ARGS " ~ "top.f90.o" ' // &
-            'if ${FO_TEST_FC_LOG:-} != "" append $FO_TEST_FC_LOG "LINK top\n"' // nl // &
-            'exec $FO_TEST_REAL_FC $@')
+            '"COMPILE $LAST\n"' // nl // 'exec $FO_TEST_REAL_FC $@')
     end subroutine build_shims
 
     function fo_environment(delegate, with_shims) result(environment)
@@ -641,7 +636,7 @@ contains
             'cold build compiles top.f90 once')
 
         ! Body-only edit: one compile, relink, new output.
-        call write_lines(compile_log, [character(len=1) :: ''])
+        call remove_path(compile_log)
         call write_chain(root, '2', 'integer, parameter :: marker = 1')
         call run_fo(driver, args, root, cache, observed, environment)
         call assert_process_ok(observed, 'build after a body-only edit')
@@ -655,7 +650,7 @@ contains
             'the relinked executable has the new body')
 
         ! Interface edit: dependents are compiled again.
-        call write_lines(compile_log, [character(len=1) :: ''])
+        call remove_path(compile_log)
         call write_chain(root, '2', 'integer, parameter :: marker = 2')
         call run_fo(driver, args, root, cache, observed, environment)
         call assert_process_ok(observed, 'build after an interface edit')
@@ -751,11 +746,11 @@ contains
         call list_add(environment, 'FO_TEST_REAL_FC='//fortran)
         call list_add(environment, 'FO_TEST_FC_LOG='//compile_log)
         call list_add(args, 'build')
-        call write_lines(compile_log, [character(len=1) :: ''])
+        call remove_path(compile_log)
         call run_fo(driver, args, first, cache, observed, environment)
         call assert_process_ok(observed, 'build a consumer of a shared external source')
         call assert_equal_integer(project_compiles(), 2, 'two cold external actions')
-        call write_lines(compile_log, [character(len=1) :: ''])
+        call remove_path(compile_log)
         call run_fo(driver, args, second, cache, observed, environment)
         call assert_process_ok(observed, 'build the relocated external consumer')
         call assert_equal_integer(project_compiles(), 0, &
@@ -765,52 +760,6 @@ contains
         call assert_equal_string(read_text(first//'/build/top'), &
             read_text(second//'/build/top'), 'external debug executables are identical')
     end subroutine shared_dependency_relocation
-
-    subroutine shared_library_keeps_its_runtime_path()
-        character(:), allocatable :: first, second, tree
-        type(string_list_t) :: args, environment
-        type(process_result_t) :: observed
-        integer :: i
-
-        ! Mach-O records its install name in the library bytes themselves.
-        if (is_macos()) return
-        first = join_path(scratch, 'shared-a')
-        second = join_path(scratch, 'shared-copy-b')
-        environment = fo_environment(.false., .false.)
-        call list_add(environment, 'FO_CACHE_RELOCATABLE=1')
-        call list_add(environment, 'FO_CMAKE_ARGS=-DCMAKE_Fortran_COMPILER='// &
-            join_path(shim_dir, 'gfortran-count'))
-        call list_add(environment, 'FO_TEST_REAL_FC='//fortran)
-        call list_add(environment, 'FO_TEST_FC_LOG='//compile_log)
-        call list_add(args, 'build')
-        do i = 1, 2
-            tree = first
-            if (i == 2) tree = second
-            call write_lines(tree//'/CMakeLists.txt', [character(len=160) :: &
-                'cmake_minimum_required(VERSION 3.20)', 'project(shared Fortran)', &
-                'set(CMAKE_SKIP_RPATH TRUE)', 'set(CMAKE_Fortran_FLAGS "-O1 -g0")', &
-                'add_library(dep SHARED dep.f90)', &
-                'set_target_properties(dep PROPERTIES NO_SONAME TRUE '// &
-                'Fortran_MODULE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/mod")', &
-                'target_include_directories(dep PUBLIC "${CMAKE_CURRENT_BINARY_DIR}/mod")', &
-                'add_executable(top top.f90)', 'target_link_libraries(top dep)'])
-            call write_lines(tree//'/dep.f90', [character(len=64) :: &
-                'module dep_mod', 'contains', 'integer function value()', &
-                'value = 41', 'end function', 'end module'])
-            call write_lines(tree//'/top.f90', [character(len=64) :: &
-                'program top', 'use dep_mod', 'print "(i0)", value()', 'end program'])
-            call write_lines(compile_log, [character(len=1) :: ''])
-            call run_fo(driver, args, tree, cache, observed, environment)
-            call assert_process_ok(observed, 'build with a shared library without SONAME')
-        end do
-        call assert_equal_string(read_text(first//'/build/libdep.so'), &
-            read_text(second//'/build/libdep.so'), 'shared-library bytes are identical')
-        call assert_equal_integer(line_count(read_text(compile_log), 'LINK top'), 1, &
-            'a shared-library path remains part of the link identity')
-        call remove_tree(first)
-        call assert_equal_string(run_text(second//'/build/top'), '41'//nl, &
-            'the copied executable uses its own surviving shared library')
-    end subroutine shared_library_keeps_its_runtime_path
 
     subroutine relocated_tree_reuses_results()
         !! A copy of a project at another path reuses every compile result
@@ -837,7 +786,7 @@ contains
         environment = plain
         call list_add(environment, 'FO_CACHE_RELOCATABLE=1')
         call list_add(args, 'build')
-        call write_lines(compile_log, [character(len=1) :: ''])
+        call remove_path(compile_log)
         call run_fo(driver, args, first, cache, observed, environment)
         call assert_process_ok(observed, 'cold build of the relocation project')
         call assert_not_contains(route_record(first), 'delegated', &
@@ -847,13 +796,11 @@ contains
         call assert_equal_integer(project_compiles(), 3, &
             'cold build compiles the three sources once each')
 
-        call write_lines(compile_log, [character(len=1) :: ''])
+        call remove_path(compile_log)
         call run_fo(driver, args, second, cache, observed, environment)
         call assert_process_ok(observed, 'build of the copied project')
         call assert_equal_integer(project_compiles(), 0, &
             'the copy reuses every compile result')
-        call assert_equal_integer(line_count(read_text(compile_log), 'LINK top'), 0, &
-            'the copy restores its executable without invoking the linker')
         call assert_equal_string(run_text(join_path(second, 'build/top')), '11'//nl, &
             'copied project output')
         ! Independent oracle: the same sources compiled at a third path with
@@ -870,13 +817,13 @@ contains
             read_text(join_path(second, objects//'top.f90.o')), &
             'a restored object equals an independently compiled one')
 
-        call write_lines(compile_log, [character(len=1) :: ''])
+        call remove_path(compile_log)
         call run_fo(driver, args, third, cache, observed, plain)
         call assert_process_ok(observed, 'build of a copy keyed by location')
         call assert_equal_integer(project_compiles(), 3, &
             'without FO_CACHE_RELOCATABLE a copy compiles at its own location')
 
-        call write_lines(compile_log, [character(len=1) :: ''])
+        call remove_path(compile_log)
         call write_relocation_project(second, '2')
         call run_fo(driver, args, second, cache, observed, environment)
         call assert_process_ok(observed, 'build after a body edit in the copy')
@@ -886,24 +833,6 @@ contains
             'the edited file is the one compiled')
         call assert_equal_string(run_text(join_path(second, 'build/top')), '12'//nl, &
             'edited copy output')
-
-        call write_lines(compile_log, [character(len=1) :: ''])
-        call remove_path(second//'/build/top')
-        call run_fo(driver, args, second, cache, observed, environment)
-        call assert_process_ok(observed, 'restore a deleted native CMake executable')
-        call assert_equal_integer(line_count(read_text(compile_log), 'LINK top'), 0, &
-            'a deleted executable is restored without relinking')
-        call assert_equal_string(run_text(second//'/build/top'), '12'//nl, &
-            'the restored executable has the edited implementation')
-
-        call write_lines(compile_log, [character(len=1) :: ''])
-        call list_add(environment, &
-            'FO_CMAKE_ARGS=-DCMAKE_Fortran_COMPILER='// &
-            join_path(shim_dir, 'gfortran-count')//' -DCMAKE_EXE_LINKER_FLAGS=-g')
-        call run_fo(driver, args, second, cache, observed, environment)
-        call assert_process_ok(observed, 'build after changing declared link flags')
-        call assert_equal_integer(line_count(read_text(compile_log), 'LINK top'), 1, &
-            'changed link flags invalidate the cached executable')
     end subroutine relocated_tree_reuses_results
 
 end program test_cmake_native_build_cli

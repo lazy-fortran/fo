@@ -62,10 +62,7 @@ checkout establishes CMake as its build authority. The hook reuses populated
 dependency source roots from that build, including header-only roots referenced
 by its File API metadata. Set `FO_CMAKE_BUILD_DIR` for a nondefault build directory;
 staged build outputs remain private. Hook builds enable Fo's relocatable object
-cache so successive staged views can reuse compilation and executable results.
-The build child reuses the exact File API request prepared for test selection,
-so the mandatory build does not configure it again; its wall cap still applies.
-Independent native executable cache checks and links use the native job limit.
+cache so successive staged views can reuse compilation results.
 
 Projects can apply their native fast-test label policy with Git configuration.
 For example, a project whose fast CTest target excludes reference comparisons

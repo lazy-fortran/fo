@@ -115,24 +115,10 @@ program test_hook_precommit
     call assert_contains(result%stdout, '"deferred":["test_answer"]', 'slow name reported')
     call assert_contains(result%stdout, '"fast_passed":0', 'slow test never passed implicitly')
 
-    project = join_path(scratch, 'cmake-once')
-    call write_text(project//'/CMakeLists.txt', 'cmake_minimum_required(VERSION 3.20)'//nl// &
-        'project(hook_once LANGUAGES Fortran)'//nl// &
-        'file(APPEND "'//scratch//'/configure-count" "configure\n")'//nl// &
-        'add_library(answer answer.f90)'//nl)
-    call write_text(project//'/answer.f90', original)
-    call git([character(len=64) :: 'init', '-q'])
-    call git([character(len=64) :: 'add', 'CMakeLists.txt', 'answer.f90'])
-    call hook()
-    call assert_process_ok(result, 'build the configured staged model')
-    call assert_equal_string(read_text(scratch//'/configure-count'), 'configure'//nl, &
-        'the staged model and build share one CMake configure')
-
     ! CTest's external command gives an independent deterministic budget oracle.
     project = join_path(scratch, 'cmake')
     call write_text(project//'/CMakeLists.txt', 'cmake_minimum_required(VERSION 3.20)'//nl// &
-        'project(hook_cmake LANGUAGES Fortran)'//nl// &
-        'enable_testing()'//nl// &
+        'project(hook_cmake LANGUAGES Fortran)'//nl//'enable_testing()'//nl// &
         'add_library(answer answer.f90)'//nl// &
         'add_test(NAME wait COMMAND "${CMAKE_COMMAND}" -E sleep 3)'//nl// &
         'add_test(NAME slow COMMAND "${CMAKE_COMMAND}" -E false)'//nl// &
