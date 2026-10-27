@@ -2,7 +2,8 @@ module fo_hook
     use, intrinsic :: iso_c_binding, only: c_int, c_char, c_null_char
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit, dp => real64
     use fo_build_backend, only: backend_t, detect_backend, BACKEND_NONE, BACKEND_CMAKE, &
-        cmake_configured_build_dir
+        cmake_configured_build_dir, backend_build
+    use fo_cmake_context, only: cmake_context_adopt_query, cmake_context_read_reply
     use fo_project_model, only: project_model_t, model_request_t, model_selection_t
     use fo_project_load, only: project_affected
     use fo_gremlin_context, only: case_identity_capture
@@ -45,6 +46,11 @@ contains
         bounded = .false.
         owned_view = ''
         call get_command_argument(2, argument)
+        if (trim(argument) == 'build-view') then
+            call get_command_argument(3, argument)
+            call build_configured_view(trim(argument), code)
+            call process_exit(code)
+        end if
         if (trim(argument) /= 'pre-commit') then
             write(error_unit, '(a)') 'usage: fo hook pre-commit [--json] [--bounded]'
             call process_exit(2)
@@ -72,6 +78,35 @@ contains
         end if
         call process_exit(code)
     end subroutine hook_cli
+
+    subroutine build_configured_view(token, code)
+        !! The parent configured this private view already. Its exact File API
+        !! request authorizes reuse while the child retains the build wall cap.
+        character(len=*), intent(in) :: token
+        integer, intent(out) :: code
+        type(backend_t) :: backend
+        character(len=4096) :: logfile
+        character(len=:), allocatable :: text
+        integer :: status
+
+        code = 1
+        if (len_trim(token) == 0 .or. command_argument_count() /= 3) return
+        backend = detect_backend('.')
+        if (backend%kind /= BACKEND_CMAKE) return
+        call cmake_context_adopt_query(backend%cmake)
+        if (backend%cmake%request_token /= token) return
+        call cmake_context_read_reply(backend%cmake)
+        if (.not. backend%cmake%request_seen .or. &
+            .not. backend%cmake%has_codemodel .or. &
+            .not. backend%cmake%has_toolchains) return
+        call make_tmpfile('fo-hook-build', logfile)
+        call backend_build(backend, code, log_file=trim(logfile), configured=.true.)
+        if (code /= 0) then
+            call read_text_file_alloc(trim(logfile), text, status)
+            if (status == 0) write(error_unit, '(a)') text
+        end if
+        call delete_tmpfile(trim(logfile))
+    end subroutine build_configured_view
 
     subroutine bounded_check(json, code)
         logical, intent(in) :: json
@@ -327,7 +362,13 @@ contains
             packed = ''
             n = 0
             call argv_push(packed, n, trim(driver))
-            call argv_push(packed, n, 'build')
+            if (backend%kind == BACKEND_CMAKE) then
+                call argv_push(packed, n, 'hook')
+                call argv_push(packed, n, 'build-view')
+                call argv_push(packed, n, backend%cmake%request_token)
+            else
+                call argv_push(packed, n, 'build')
+            end if
             call process_run_argv_logged(snapshot, packed, n, logfile, .false., cap, &
                 status, env_extra=child_env, heartbeat_s=0, timeout_kind=timeout_kind, &
                 cpu_budget_s=86400)
