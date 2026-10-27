@@ -641,7 +641,7 @@ contains
             'cold build compiles top.f90 once')
 
         ! Body-only edit: one compile, relink, new output.
-        call remove_path(compile_log)
+        call write_lines(compile_log, [character(len=1) :: ''])
         call write_chain(root, '2', 'integer, parameter :: marker = 1')
         call run_fo(driver, args, root, cache, observed, environment)
         call assert_process_ok(observed, 'build after a body-only edit')
@@ -655,7 +655,7 @@ contains
             'the relinked executable has the new body')
 
         ! Interface edit: dependents are compiled again.
-        call remove_path(compile_log)
+        call write_lines(compile_log, [character(len=1) :: ''])
         call write_chain(root, '2', 'integer, parameter :: marker = 2')
         call run_fo(driver, args, root, cache, observed, environment)
         call assert_process_ok(observed, 'build after an interface edit')
@@ -751,11 +751,11 @@ contains
         call list_add(environment, 'FO_TEST_REAL_FC='//fortran)
         call list_add(environment, 'FO_TEST_FC_LOG='//compile_log)
         call list_add(args, 'build')
-        call remove_path(compile_log)
+        call write_lines(compile_log, [character(len=1) :: ''])
         call run_fo(driver, args, first, cache, observed, environment)
         call assert_process_ok(observed, 'build a consumer of a shared external source')
         call assert_equal_integer(project_compiles(), 2, 'two cold external actions')
-        call remove_path(compile_log)
+        call write_lines(compile_log, [character(len=1) :: ''])
         call run_fo(driver, args, second, cache, observed, environment)
         call assert_process_ok(observed, 'build the relocated external consumer')
         call assert_equal_integer(project_compiles(), 0, &
@@ -799,7 +799,7 @@ contains
                 'value = 41', 'end function', 'end module'])
             call write_lines(tree//'/top.f90', [character(len=64) :: &
                 'program top', 'use dep_mod', 'print "(i0)", value()', 'end program'])
-            call remove_path(compile_log)
+            call write_lines(compile_log, [character(len=1) :: ''])
             call run_fo(driver, args, tree, cache, observed, environment)
             call assert_process_ok(observed, 'build with a shared library without SONAME')
         end do
@@ -837,7 +837,7 @@ contains
         environment = plain
         call list_add(environment, 'FO_CACHE_RELOCATABLE=1')
         call list_add(args, 'build')
-        call remove_path(compile_log)
+        call write_lines(compile_log, [character(len=1) :: ''])
         call run_fo(driver, args, first, cache, observed, environment)
         call assert_process_ok(observed, 'cold build of the relocation project')
         call assert_not_contains(route_record(first), 'delegated', &
@@ -847,7 +847,7 @@ contains
         call assert_equal_integer(project_compiles(), 3, &
             'cold build compiles the three sources once each')
 
-        call remove_path(compile_log)
+        call write_lines(compile_log, [character(len=1) :: ''])
         call run_fo(driver, args, second, cache, observed, environment)
         call assert_process_ok(observed, 'build of the copied project')
         call assert_equal_integer(project_compiles(), 0, &
@@ -870,13 +870,13 @@ contains
             read_text(join_path(second, objects//'top.f90.o')), &
             'a restored object equals an independently compiled one')
 
-        call remove_path(compile_log)
+        call write_lines(compile_log, [character(len=1) :: ''])
         call run_fo(driver, args, third, cache, observed, plain)
         call assert_process_ok(observed, 'build of a copy keyed by location')
         call assert_equal_integer(project_compiles(), 3, &
             'without FO_CACHE_RELOCATABLE a copy compiles at its own location')
 
-        call remove_path(compile_log)
+        call write_lines(compile_log, [character(len=1) :: ''])
         call write_relocation_project(second, '2')
         call run_fo(driver, args, second, cache, observed, environment)
         call assert_process_ok(observed, 'build after a body edit in the copy')
@@ -887,7 +887,7 @@ contains
         call assert_equal_string(run_text(join_path(second, 'build/top')), '12'//nl, &
             'edited copy output')
 
-        call remove_path(compile_log)
+        call write_lines(compile_log, [character(len=1) :: ''])
         call remove_path(second//'/build/top')
         call run_fo(driver, args, second, cache, observed, environment)
         call assert_process_ok(observed, 'restore a deleted native CMake executable')
@@ -896,7 +896,7 @@ contains
         call assert_equal_string(run_text(second//'/build/top'), '12'//nl, &
             'the restored executable has the edited implementation')
 
-        call remove_path(compile_log)
+        call write_lines(compile_log, [character(len=1) :: ''])
         call list_add(environment, &
             'FO_CMAKE_ARGS=-DCMAKE_Fortran_COMPILER='// &
             join_path(shim_dir, 'gfortran-count')//' -DCMAKE_EXE_LINKER_FLAGS=-g')
