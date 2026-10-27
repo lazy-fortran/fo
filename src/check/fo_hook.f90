@@ -15,7 +15,7 @@ module fo_hook
     use fo_fmt, only: fmt_sources, FMT_SELECT_FILES
     use fo_process, only: process_run_argv_logged, argv_push, process_self_executable, &
         process_getpid, process_exit, process_has_fortran_source_ext, TIMEOUT_WALL
-    use fo_fs, only: fs_mkdir_excl, fs_remove_tree, fs_canonical_path
+    use fo_fs, only: fs_mkdir_excl, fs_remove_tree, fs_canonical_path, fs_sleep_ms
     use fo_util, only: make_tmpfile, delete_tmpfile, read_text_file_alloc, &
         wall_time_seconds, int_text
     use fx_hash, only: sha256_file
@@ -130,7 +130,7 @@ contains
             message = ''
         end block validation
         if (owned) then
-            call fs_remove_tree(snapshot, cleanup)
+            call remove_owned_view(snapshot, cleanup)
             if (cleanup /= 0) then
                 code = 1
                 message = 'cannot remove owned staged view: '//snapshot
@@ -291,8 +291,8 @@ contains
             request%all = .true.
             ! A commit never runs a comparison that needs a reference checkout or
             ! a network. The project names those cases with its own CTest labels;
-            ! fo.hookExcludeLabels and fo.hookIncludeLabels carry them here with
-            ! the same regular-expression meaning as ctest -LE and -L.
+            ! each comma-separated entry of fo.hookExcludeLabels is one pattern
+            ! handled exactly as `fo test -LE` handles one `-LE` argument.
             call config_labels(root, 'fo.hookExcludeLabels', excluded)
             call config_labels(root, 'fo.hookIncludeLabels', included)
             if (size(excluded) > 0) request%exclude_labels = excluded
@@ -412,7 +412,7 @@ contains
             code = 0
         end block validation
         if (snapshot_owned) then
-            call fs_remove_tree(snapshot, cleanup)
+            call remove_owned_view(snapshot, cleanup)
             if (cleanup /= 0) then
                 code = 1
                 message = 'cannot remove owned staged view: '//snapshot
@@ -534,6 +534,24 @@ contains
         grown(n + 1)%s = trim(value)
         call move_alloc(grown, labels)
     end subroutine append
+
+    subroutine remove_owned_view(snapshot, status)
+        !! The view belongs to this hook, so a child that is still leaving it
+        !! is waited for rather than reported as a failed verification.
+        character(len=*), intent(in) :: snapshot
+        integer, intent(out) :: status
+        integer :: attempt
+        logical :: owned_left
+
+        do attempt = 1, 20
+            call fs_remove_tree(snapshot, status)
+            if (status == 0) then
+                inquire (file=snapshot, exist=owned_left)
+                if (.not. owned_left) return
+            end if
+            if (attempt < 20) call fs_sleep_ms(250)
+        end do
+    end subroutine remove_owned_view
 
     integer function config_seconds(root, name, fallback) result(value)
         character(len=*), intent(in) :: root, name

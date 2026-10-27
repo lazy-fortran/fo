@@ -29,7 +29,10 @@ input inventory and shared store. No new scheduler or test registry:
    case is never PASS and blocks the bounded commit command. No wait for active Gremlin work,
    graph ranking, sampling or full suite in the hook. Fo Git acquisition is
    restricted to local files; acquire dependencies before committing. Both hook modes add the disconnected flags to the existing CMake configuration
-   identity and disable FetchContent downloads and updates. Acquire prerequisites
+   identity and disable FetchContent downloads and updates. A project that is
+   already configured contributes its populated dependency source roots to that
+   identity, so the staged copy builds against the dependencies the project holds
+   instead of acquiring new ones. Acquire prerequisites
    with normal `fo build` before explicit hook preparation;
    arbitrary project configure scripts retain responsibility for their own network contract.
 
@@ -66,6 +69,16 @@ slow = { tests = ["test_expensive", "test_reference_*"] }
 
 ```cmake
 set_tests_properties(test_expensive PROPERTIES LABELS slow)
+```
+
+A CMake project can also keep a whole label out of the commit tier, which suits
+cases that need a reference checkout or a network and therefore can never pass
+inside a commit. Each comma-separated entry is handled as one `-LE` argument of
+`fo test`, so the usual CMake idiom is one alternation:
+
+```sh
+git config fo.hookExcludeLabels "slow|regression|performance|scalability"
+git config fo.hookIncludeLabels "unit"
 ```
 
 JSON contains the staged tree, build verdict, cache hit, fast PASS count,
