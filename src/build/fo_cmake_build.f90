@@ -866,10 +866,12 @@ contains
         integer, intent(out) :: exitcode
         type(scan_unit_t), allocatable :: units(:)
         type(native_action_t), allocatable :: actions(:)
-        type(string_t), allocatable :: unit_files(:), unit_commands(:), link_logs(:)
+        type(string_t), allocatable :: unit_files(:), unit_commands(:)
         character(len=512), allocatable :: objects(:)
         character(len=:), allocatable :: obj_dir, root, packed, link_text
         character(len=512) :: obj
+        character(len=4096) :: link_root, link_obj_dir
+        character(len=4096), allocatable :: link_logs(:)
         integer :: t, k, n, s, n_units, compiled, ierr, n_args, slot, ntab, mask
         integer, allocatable :: table(:), link_exits(:)
         character(len=12) :: count_text
@@ -977,29 +979,34 @@ contains
         allocate (link_exits(size(route%plan%targets)), &
             link_logs(size(route%plan%targets)))
         link_exits = 0
+        link_logs = ''
+        ! Fixed-length buffers preserve path lengths at the OpenMP boundary.
+        link_root = root
+        link_obj_dir = obj_dir
         do t = 1, size(route%plan%targets)
             if (route%mode(t) /= MODE_NATIVE) cycle
             if (route%plan%targets(t)%type /= 'EXECUTABLE') cycle
-            link_logs(t)%s = route%plan%build_root// &
+            link_logs(t) = route%plan%build_root// &
                 '/.fo-native-cmake/link-'//int_text(t)//'.log'
-            call fs_write_text(link_logs(t)%s, '')
+            call fs_write_text(trim(link_logs(t)), '')
         end do
         ! Archives are complete; independent executables can validate and
         ! restore their content-checked cache entries on the native job pool.
         !$omp parallel do num_threads(max(1, min(route%n_native, native_jobs()))) &
-        !$omp& schedule(dynamic)
+        !$omp& schedule(dynamic) default(none) shared(route, link_root, link_obj_dir, link_logs, link_exits) private(t)
         do t = 1, size(route%plan%targets)
             if (route%mode(t) /= MODE_NATIVE) cycle
             if (route%plan%targets(t)%type /= 'EXECUTABLE') cycle
-            call link_executable(route, t, root, obj_dir, link_logs(t)%s, link_exits(t))
+            call link_executable(route, t, trim(link_root), trim(link_obj_dir), &
+                trim(link_logs(t)), link_exits(t))
         end do
         !$omp end parallel do
         do t = 1, size(link_exits)
-            if (.not. allocated(link_logs(t)%s)) cycle
-            call read_text_file_alloc(link_logs(t)%s, link_text, ierr)
+            if (len_trim(link_logs(t)) == 0) cycle
+            call read_text_file_alloc(trim(link_logs(t)), link_text, ierr)
             if (ierr == 0 .and. len_trim(link_text) > 0) &
                 call log_line(log_file, link_text)
-            call fs_remove_file(link_logs(t)%s)
+            call fs_remove_file(trim(link_logs(t)))
             if (link_exits(t) /= 0) exitcode = link_exits(t)
         end do
     end subroutine cmake_build_native
