@@ -152,7 +152,7 @@ contains
 
     subroutine project_inventory_cases(model, cases)
         !! The cases a continuous campaign may run: every case except those a
-        !! test preset filters out and explicit-only cases (the dispatcher).
+        !! test preset filters out, explicit-only dispatchers and expanded parents.
         !! Label exclusions (slow) stay in; their runs pass --all.
         type(project_model_t), intent(in) :: model
         integer, allocatable, intent(out) :: cases(:)
@@ -176,7 +176,7 @@ contains
             integer, intent(in) :: i
 
             included = .not. (model%cases(i)%default_excluded .or. &
-                model%cases(i)%explicit_only)
+                model%cases(i)%explicit_only .or. model%cases(i)%expanded)
         end function included
 
     end subroutine project_inventory_cases
