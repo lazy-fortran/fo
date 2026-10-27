@@ -299,6 +299,8 @@ program test_hook_precommit
         '[dependencies]'//nl//'hookdep = { git = "https://example.invalid/hookdep.git" }'//nl)
     call write_text(project//'/CMakeLists.txt', 'cmake_minimum_required(VERSION 3.20)'//nl// &
         'project(hook_authority LANGUAGES Fortran)'//nl// &
+        'set_property(GLOBAL PROPERTY RULE_LAUNCH_COMPILE '// &
+        '"${CMAKE_COMMAND} -E touch compile-launched &&")'//nl// &
         'option(HOOK_TESTING "Enable tests" ON)'//nl// &
         'add_executable(answer.x src/answer.f90)'//nl// &
         'if(HOOK_TESTING)'//nl//'  enable_testing()'//nl// &
@@ -310,14 +312,17 @@ program test_hook_precommit
     call git([character(len=64) :: 'commit', '-qm', 'Synthetic dual-manifest project'])
     call configure_cmake(project)
     call write_text(project//'/src/answer.f90', 'program answer'//nl// &
-        '    implicit none'//nl//'    if (42 /= 42) stop 1'//nl// &
+        '    implicit none'//nl//'    logical :: launched'//nl// &
+        '    inquire (file="compile-launched", exist=launched)'//nl// &
+        '    if (.not. launched) stop 1'//nl//'    if (42 /= 42) stop 1'//nl// &
         '    if (43 /= 43) stop 1'//nl//'end program answer'//nl)
     call git([character(len=64) :: 'add', 'src/answer.f90'])
     call hook()
     call assert_process_ok(result, 'configured CMake project keeps its native authority')
     call assert_contains(result%stdout, '"backend":"cmake"', 'CMake chosen over fpm.toml')
     call assert_contains(result%stdout, '"build":"PASS', 'mandatory build ran on the CMake tree')
-    call assert_contains(result%stdout, '"fast_passed":1', 'CTest case ran under the CMake backend')
+    call assert_contains(result%stdout, '"fast_passed":1', &
+        'CTest case observes the native CMake compile launcher')
 
     ! A staged copy of a project with fetched dependencies reuses the dependency
     ! roots the project already populated; a commit never acquires a dependency.

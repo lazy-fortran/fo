@@ -285,7 +285,8 @@ contains
                 ! has an absolute FO_CMAKE_BUILD_DIR or a preset binaryDir.
                 backend%cmake%build_root = 'build'
                 backend%cmake%build_root_hint = .true.
-                child_env = 'FO_CMAKE_BUILD_DIR=build'
+                ! Preserve the project's CMake build rules in the staged view.
+                child_env = 'FO_CMAKE_BUILD_DIR=build;FO_CMAKE_DELEGATE_BUILD=1'
                 call cmake_stage_git(root, snapshot, status, message)
                 if (status /= 0) exit validation
             end if
