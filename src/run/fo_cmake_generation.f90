@@ -11,7 +11,7 @@ module fo_cmake_generation
         input_inventory_cmake_reference, input_inventory_cmake_missing_include, &
         input_inventory_cmake_include_search, input_inventory_cmake_provider_file
     use fo_fs, only: fs_make_dir, fs_write_text, fs_collect_files, fs_remove_tree, &
-        fs_realpath, fs_path_is_absolute, fs_parent_path
+        fs_realpath, fs_canonical_path, fs_path_is_absolute, fs_parent_path
     use fo_util, only: make_tmpfile, delete_tmpfile, read_text_file, &
         read_text_file_alloc
     use fo_dep_resolve, only: normalize_path
@@ -33,7 +33,7 @@ module fo_cmake_generation
         character(:), allocatable :: authored, replacement
     end type path_alias_t
     public :: cmake_capture_inventory, cmake_registered_names, cmake_capture_cleanup
-    public :: cmake_stage_git
+    public :: cmake_stage_git, cmake_populated_dependency_args
 contains
     subroutine cmake_capture_inventory(backend, inventory, ierr, message, flags, &
             configured)
@@ -547,6 +547,63 @@ contains
         close(unit, iostat=closed)
         if (ierr == 0) ierr = closed
     end subroutine cmake_stage_git
+
+    subroutine cmake_populated_dependency_args(populated_build, target_base, &
+            args, ierr, message)
+        !! Arguments that move a relocated configure onto the dependency source
+        !! trees `populated_build` already holds. The same cache discovery that
+        !! freezes a Gremlin closure is reused: FETCHCONTENT_BASE_DIR plus every
+        !! populated <name>_SOURCE_DIR. Nothing is acquired, so a staged copy
+        !! of a project with fetched dependencies configures offline.
+        character(len=*), intent(in) :: populated_build, target_base
+        character(len=:), allocatable, intent(out) :: args
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+        character(len=:), allocatable :: cache, line, key, kind, value, base, name
+        integer :: cursor
+        logical :: exists
+
+        ierr = 0
+        message = ''
+        args = ''
+        call read_text_file_alloc(trim(populated_build)//'/CMakeCache.txt', &
+            cache, ierr)
+        if (ierr /= 0) then
+            ierr = 0
+            return
+        end if
+        base = trim(populated_build)//'/_deps'
+        cursor = 1
+        do while (next_cache_line(cache, cursor, line))
+            call cache_entry(line, key, kind, value)
+            if (key == 'FETCHCONTENT_BASE_DIR' .and. len_trim(value) > 0) &
+                base = fs_canonical_path(trim(value))
+        end do
+        cursor = 1
+        do while (next_cache_line(cache, cursor, line))
+            call cache_entry(line, key, kind, value)
+            if (len_trim(value) == 0) cycle
+            if (index(key, '_SOURCE_DIR') /= len(key) - 10) cycle
+            name = key(:len(key) - 11)
+            if (len_trim(name) == 0) cycle
+            ! Only a direct child of the populated base is a FetchContent root;
+            ! a nested add_subdirectory is carried by its own parent project.
+            if (index(value, trim(base)//'/') /= 1) cycle
+            if (len_trim(value) <= len_trim(base) + 1) cycle
+            if (index(value(len_trim(base) + 2:), '/') /= 0) cycle
+            if (index(value, ';') /= 0) then
+                message = 'unsupported semicolon in dependency path: '//trim(value)
+                ierr = 1
+                return
+            end if
+            ! A stale cache entry for a collected tree must not break the build.
+            inquire (file=trim(value), exist=exists)
+            if (.not. exists) cycle
+            args = args//' -DFETCHCONTENT_SOURCE_DIR_'//upper(name)//'='//trim(value)
+        end do
+        if (len_trim(args) > 0) &
+            args = ' -DFETCHCONTENT_BASE_DIR='//trim(target_base)//args
+    end subroutine cmake_populated_dependency_args
 
     subroutine capture_project_git(source, metadata, script, ierr, message)
         character(len=*), intent(in) :: source, metadata

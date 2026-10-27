@@ -1,13 +1,14 @@
 module fo_hook
     use, intrinsic :: iso_c_binding, only: c_int, c_char, c_null_char
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit, dp => real64
-    use fo_build_backend, only: backend_t, detect_backend, BACKEND_NONE, BACKEND_CMAKE
+    use fo_build_backend, only: backend_t, detect_backend, BACKEND_NONE, BACKEND_CMAKE, &
+        cmake_configured_build_dir
     use fo_project_model, only: project_model_t, model_request_t, model_selection_t
     use fo_project_load, only: project_affected
     use fo_gremlin_context, only: case_identity_capture
     use fo_gremlin_generation, only: generation_t
     use fo_gremlin_request, only: gremlin_json_text_valid
-    use fo_cmake_generation, only: cmake_stage_git
+    use fo_cmake_generation, only: cmake_stage_git, cmake_populated_dependency_args
     use fo_hook_evidence, only: hook_input_key, hook_receipt_read, &
         hook_receipt_write, hook_slow_case
     use fo_test_results, only: test_result_entry_t, parse_test_results
@@ -28,9 +29,9 @@ module fo_hook
     public :: hook_cli
     real(dp), save :: commit_deadline = 0.0_dp
     interface
-        integer(c_int) function c_prepare(root, view, cap) bind(C, name='fo_c_hook_prepare')
+        integer(c_int) function c_prepare(root, view, cap, reuse) bind(C, name='fo_c_hook_prepare')
             import :: c_char, c_int
-            character(kind=c_char), intent(in) :: root(*), view(*)
+            character(kind=c_char), intent(in) :: root(*), view(*), reuse(*)
             integer(c_int), value :: cap
         end function c_prepare
     end interface
@@ -157,13 +158,15 @@ contains
         character(len=4096) :: driver, logfile, resultfile
         character(len=64) :: driver_digest, key
         character(len=:), allocatable :: root, snapshot, tree, text, message, packed, child_env
+        character(len=:), allocatable :: reuse, populated, backend_name
+        type(string_t), allocatable :: excluded(:), included(:)
         character(len=4096), allocatable :: files(:)
         character(len=16384) :: formatting
         integer :: status, n, i, j, fast, passed, nfiles, timeout_kind, cap, budget
         integer :: cleanup, attempts, nresults, r
         real :: seconds
         real(dp) :: started, elapsed, threshold
-        logical :: found, snapshot_owned, hit, built, identity_ok
+        logical :: found, snapshot_owned, hit, built, identity_ok, populated_found
 
         code = 1
         message = ''
@@ -179,6 +182,9 @@ contains
         call make_tmpfile('fo-hook-log', logfile)
         call make_tmpfile('fo-hook-result', resultfile)
         call process_self_executable(driver, found)
+        reuse = ''
+        child_env = ''
+        backend_name = 'native'
         started = wall_time_seconds()
         validation: block
             if (.not. found) then
@@ -249,14 +255,29 @@ contains
                 message = trim(formatting)
                 exit validation
             end if
-            status = c_prepare(root//c_null_char, snapshot//c_null_char, int(cap, c_int))
+            ! A project already configured with CMake keeps its populated
+            ! dependency trees: the staged copy is pointed at them, because a
+            ! commit never acquires a dependency. This runs before the backend
+            ! is initialized so the effective configure arguments include it.
+            call cmake_configured_build_dir(root, populated, populated_found)
+            if (populated_found) then
+                call cmake_populated_dependency_args(root//'/'//populated, &
+                    'build/_deps', reuse, status, message)
+                if (status /= 0) exit validation
+            end if
+            status = c_prepare(root//c_null_char, snapshot//c_null_char, int(cap, c_int), &
+                reuse//c_null_char)
             if (status /= 0) then
                 message = 'cannot prepare private build/dependency view'
                 exit validation
             end if
-            child_env = ''
-            backend = detect_backend(snapshot)
+            backend = detect_backend(snapshot, authority_dir=root)
+            if (backend%kind == BACKEND_NONE) then
+                message = 'no supported staged Fortran project'
+                exit validation
+            end if
             if (backend%kind == BACKEND_CMAKE) then
+                backend_name = 'cmake'
                 ! Always configure/build this index view, even when the caller
                 ! has an absolute FO_CMAKE_BUILD_DIR or a preset binaryDir.
                 backend%cmake%build_root = 'build'
@@ -265,13 +286,17 @@ contains
                 call cmake_stage_git(root, snapshot, status, message)
                 if (status /= 0) exit validation
             end if
-            if (backend%kind == BACKEND_NONE) then
-                message = 'no supported staged Fortran project'
-                exit validation
-            end if
             allocate(request%names(0), request%include_labels(0), &
                 request%exclude_labels(0), request%layers(0))
             request%all = .true.
+            ! A commit never runs a comparison that needs a reference checkout or
+            ! a network. The project names those cases with its own CTest labels;
+            ! fo.hookExcludeLabels and fo.hookIncludeLabels carry them here with
+            ! the same regular-expression meaning as ctest -LE and -L.
+            call config_labels(root, 'fo.hookExcludeLabels', excluded)
+            call config_labels(root, 'fo.hookIncludeLabels', included)
+            if (size(excluded) > 0) request%exclude_labels = excluded
+            if (size(included) > 0) request%include_labels = included
             call project_affected(backend, '', request, changed, model, selection, &
                 reasons, status, message)
             if (status /= 0) exit validation
@@ -400,7 +425,8 @@ contains
                 message = message//achar(10)//text
             end if
         end if
-        call report(json, code, tree, key, hit, built, passed, deferred, warnings, message)
+        call report(json, code, tree, key, hit, built, passed, deferred, warnings, &
+            message, backend_name, excluded)
         call delete_tmpfile(trim(logfile))
         call delete_tmpfile(trim(resultfile))
     end subroutine staged_check
@@ -467,6 +493,47 @@ contains
             end block
         end if
     end subroutine copy_log
+
+    subroutine config_labels(root, name, labels)
+        !! One regular expression per comma-separated entry of a Git config key.
+        character(len=*), intent(in) :: root, name
+        type(string_t), allocatable, intent(out) :: labels(:)
+        character(len=:), allocatable :: text
+        character(len=:), allocatable :: piece
+        integer :: status, comma, n
+
+        allocate (labels(0))
+        call git_text(root, git_words('config', '--get-all', name), text, status)
+        if (status /= 0) return
+        text = adjustl(text)
+        if (len_trim(text) == 0) return
+        n = 0
+        do
+            comma = index(text, ',')
+            piece = trim(text(:comma - 1))
+            if (comma == 0) piece = trim(text)
+            if (len_trim(piece) > 0) then
+                n = n + 1
+                call append(labels, piece)
+            end if
+            if (comma == 0) exit
+            text = adjustl(text(comma + 1:))
+            if (len_trim(text) == 0) exit
+        end do
+    end subroutine config_labels
+
+    subroutine append(labels, value)
+        type(string_t), allocatable, intent(inout) :: labels(:)
+        character(len=*), intent(in) :: value
+        type(string_t), allocatable :: grown(:)
+        integer :: n
+
+        n = size(labels)
+        allocate (grown(n + 1))
+        if (n > 0) grown(:n) = labels
+        grown(n + 1)%s = trim(value)
+        call move_alloc(grown, labels)
+    end subroutine append
 
     integer function config_seconds(root, name, fallback) result(value)
         character(len=*), intent(in) :: root, name
@@ -584,10 +651,13 @@ contains
         end do
     end subroutine split_paths
 
-    subroutine report(json, code, tree, key, hit, built, passed, deferred, warnings, message)
+    subroutine report(json, code, tree, key, hit, built, passed, deferred, warnings, &
+            message, backend, excluded)
         logical, intent(in) :: json, hit, built
         integer, intent(in) :: code, passed
         character(len=*), intent(in) :: tree, key, message
+        character(len=*), intent(in), optional :: backend
+        type(string_t), intent(in), optional :: excluded(:)
         type(string_t), intent(in) :: deferred(:), warnings(:)
         type(json_builder_t) :: jb
         character(len=:), allocatable :: summary
@@ -614,6 +684,11 @@ contains
             call json_key_string(jb, 'build', trim(merge('PASS    ', 'UNPROVEN', built)))
             call json_key_int(jb, 'exit_code', code)
             call json_key_int(jb, 'fast_passed', passed)
+            if (present(backend)) call json_key_string(jb, 'backend', backend)
+            if (present(excluded)) then
+                call json_key_int(jb, 'exclude_label_count', size(excluded))
+                call names('exclude_labels', excluded)
+            end if
             call json_key_int(jb, 'deferred_count', size(deferred))
             call names('deferred', deferred)
             call names('slow_fast_tests', warnings)
