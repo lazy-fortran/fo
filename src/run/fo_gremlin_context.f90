@@ -433,6 +433,7 @@ contains
         if (backend%kind == BACKEND_CMAKE) then
             call append_environment_value(context%environment, 'FO_BACKEND')
             call append_environment_value(context%environment, 'FO_CMAKE_NATIVE')
+            call append_environment_value(context%environment, 'FO_CTEST_DELEGATE')
             call append_environment_value(context%environment, 'FO_CMAKE_BUILD_DIR')
             call append_environment_value(context%environment, 'FO_CMAKE_CONFIG')
             call append_environment_value(context%environment, 'FO_CMAKE_GENERATOR')

@@ -19,6 +19,7 @@ module fo_ctest_run
     !! ctest_import_junit turns the JUnit file of a delegated ctest run into
     !! the same lines, so verdicts and names need no console scraping.
     use, intrinsic :: iso_fortran_env, only: int64, error_unit
+    use, intrinsic :: iso_c_binding, only: c_int, c_char, c_null_char
     use fx_string, only: string_t
     use fo_util, only: make_tmpfile, read_text_file_alloc
     use fo_fs, only: fs_sleep_ms, fs_find_executable, fs_append_file, fs_remove_file
@@ -33,7 +34,7 @@ module fo_ctest_run
     private
 
     public :: ctest_native_select, ctest_native_run, ctest_import_junit
-    public :: ctest_log_note
+    public :: ctest_log_note, ctest_fixture_support_case
 
     integer, parameter :: PENDING = 0, RUNNING = 1, FINISHED = 2
     integer, parameter :: MAX_ENV_BYTES = 3000
@@ -69,6 +70,29 @@ module fo_ctest_run
     end type run_case_t
 
 contains
+
+    logical function ctest_fixture_support_case(model, idx, eligible) result(helper)
+        type(project_model_t), intent(in) :: model
+        integer, intent(in) :: idx, eligible(:)
+        type(string_t), allocatable :: setup(:), cleanup(:), required(:)
+        integer :: i, j, k
+
+        helper = .false.
+        call attr_items(model%cases(idx), 'FIXTURES_SETUP', setup)
+        call attr_items(model%cases(idx), 'FIXTURES_CLEANUP', cleanup)
+        do i = 1, size(eligible)
+            if (eligible(i) == idx) cycle
+            call attr_items(model%cases(eligible(i)), 'FIXTURES_REQUIRED', required)
+            do j = 1, size(required)
+                do k = 1, size(setup)
+                    if (required(j)%s == setup(k)%s) helper = .true.
+                end do
+                do k = 1, size(cleanup)
+                    if (required(j)%s == cleanup(k)%s) helper = .true.
+                end do
+            end do
+        end do
+    end function ctest_fixture_support_case
 
     subroutine ctest_native_select(model, cases, native, reasons)
         !! native(k): cases(k) runs natively. Otherwise reasons(k) says why not.
@@ -126,11 +150,40 @@ contains
         integer, intent(out) :: exitcode
         type(run_case_t), allocatable :: rcs(:)
         integer, allocatable :: members(:), where(:)
-        integer :: u, ios
+        integer :: u, ios, i
+        integer(c_int) :: fixture_lock
+        logical :: fixtures
+        interface
+            function lock_fixture(path) bind(C, name='fo_sys_lock_fixture') result(fd)
+                import c_char, c_int
+                character(c_char), intent(in) :: path(*)
+                integer(c_int) :: fd
+            end function
+            subroutine unlock_fixture(fd) bind(C, name='fo_sys_unlock')
+                import c_int
+                integer(c_int), value :: fd
+            end subroutine
+        end interface
 
         exitcode = 0
         call closure_members(model, cases, members)
         call build_cases(model, members, rcs, where)
+        fixtures = .false.
+        do i = 1, size(rcs)
+            if (size(rcs(i)%fix_req) + size(rcs(i)%fix_setup) + &
+                size(rcs(i)%fix_cleanup) > 0) fixtures = .true.
+        end do
+        fixture_lock = -1_c_int
+        if (fixtures) then
+            ! Separate Gremlin children share CTest's configured fixture paths.
+            fixture_lock = lock_fixture(model%build_dir// &
+                '/.fo-ctest-fixtures.lock'//c_null_char)
+            if (fixture_lock < 0) then
+                call ctest_log_note(log_file, 'fo: cannot lock CTest fixture lifecycle')
+                exitcode = 1
+                return
+            end if
+        end if
         if (append) then
             open (newunit=u, file=trim(log_file), position='append', &
                 status='unknown', action='write', iostat=ios)
@@ -145,6 +198,7 @@ contains
         end if
         call schedule(rcs, job_count())
         call report(rcs, log_file, exitcode)
+        if (fixture_lock >= 0) call unlock_fixture(fixture_lock)
     end subroutine ctest_native_run
 
     subroutine ctest_log_note(log_file, text)
@@ -250,7 +304,7 @@ contains
                     k = k + 1
                     setup_buffer(k) = j
                 else if (shares_any(rcs(i)%fix_cleanup, rcs(j)%fix_req) .or. &
-                    shares_any(rcs(i)%fix_cleanup, rcs(j)%fix_setup)) then
+                        shares_any(rcs(i)%fix_cleanup, rcs(j)%fix_setup)) then
                     count = count + 1
                     buffer(count) = j
                 end if

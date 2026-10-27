@@ -22,6 +22,7 @@ int fo_sys_publish_file(const char *path, const void *data, size_t length);
 
 /* Open (creating) and flock a file: returns the descriptor or -errno. */
 int fo_sys_lock_file(const char *path, int extra_flags, int mode, int operation);
+int fo_sys_lock_fixture(const char *path);
 void fo_sys_unlock(int fd);
 
 /* Classify one complete line: 1 same id, 0 other id, -1 not a valid record. */
