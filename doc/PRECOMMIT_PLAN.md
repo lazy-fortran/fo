@@ -29,7 +29,10 @@ input inventory and shared store. No new scheduler or test registry:
    case is never PASS and blocks the bounded commit command. No wait for active Gremlin work,
    graph ranking, sampling or full suite in the hook. Fo Git acquisition is
    restricted to local files; acquire dependencies before committing. Both hook modes add the disconnected flags to the existing CMake configuration
-   identity and disable FetchContent downloads and updates. Acquire prerequisites
+   identity and disable FetchContent downloads and updates. A project that is
+   already configured contributes its populated dependency source roots to that
+   identity, so the staged copy builds against the dependencies the project holds
+   instead of acquiring new ones. Acquire prerequisites
    with normal `fo build` before explicit hook preparation;
    arbitrary project configure scripts retain responsibility for their own network contract.
 
@@ -54,6 +57,26 @@ git config fo.hookBuildCap 60
 git config fo.hookFastThreshold 1
 ```
 
+When both manifests exist, a CMake cache whose home directory matches the
+checkout establishes CMake as its build authority. The hook reuses populated
+dependency source roots from that build, including header-only roots referenced
+by its File API metadata. Set `FO_CMAKE_BUILD_DIR` for a nondefault build directory;
+staged build outputs remain private. The CMake hook invokes the project's own
+CMake build rules, including compile launchers. Native fpm hook builds enable
+Fo's relocatable object cache across successive staged views.
+
+Projects can apply their native fast-test label policy with Git configuration.
+For example, a project whose fast CTest target excludes reference comparisons
+can use:
+
+```sh
+git config fo.hookExcludeLabels 'slow|regression|performance|scalability'
+```
+
+`fo.hookIncludeLabels` applies the corresponding inclusion filter. Each
+comma-separated entry is a label expression, with the same matching rules as
+`fo test -L` and `fo test -LE`. The result reports label exclusions.
+
 Fast test invocations record elapsed time and warn by name above the threshold;
 this is advisory, not a new classification database. Mark slow tests using the
 existing declarations (they remain available explicitly outside the hook):
@@ -66,6 +89,16 @@ slow = { tests = ["test_expensive", "test_reference_*"] }
 
 ```cmake
 set_tests_properties(test_expensive PROPERTIES LABELS slow)
+```
+
+A CMake project can also keep a whole label out of the commit tier, which suits
+cases that need a reference checkout or a network and therefore can never pass
+inside a commit. Each comma-separated entry is handled as one `-LE` argument of
+`fo test`, so the usual CMake idiom is one alternation:
+
+```sh
+git config fo.hookExcludeLabels "slow|regression|performance|scalability"
+git config fo.hookIncludeLabels "unit"
 ```
 
 JSON contains the staged tree, build verdict, cache hit, fast PASS count,

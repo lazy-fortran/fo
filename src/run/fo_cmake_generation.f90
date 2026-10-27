@@ -3,7 +3,7 @@ module fo_cmake_generation
     !! and registered-test semantics; no FPM manifest or source scanner is used.
     use fo_build_backend, only: backend_t, cmake_configure
     use fo_cmake_context, only: cmake_context_build_path, cmake_context_t, &
-        cmake_context_read_reply
+        cmake_context_read_reply, cmake_context_init
     use fo_cmake_native_config, only: native_cmake_selected, native_cmake_configure
     use fo_cmake_native_model, only: cm_plan_t
     use fo_cmake_native_snapshot, only: native_snapshot_write
@@ -11,7 +11,7 @@ module fo_cmake_generation
         input_inventory_cmake_reference, input_inventory_cmake_missing_include, &
         input_inventory_cmake_include_search, input_inventory_cmake_provider_file
     use fo_fs, only: fs_make_dir, fs_write_text, fs_collect_files, fs_remove_tree, &
-        fs_realpath, fs_path_is_absolute, fs_parent_path
+        fs_realpath, fs_canonical_path, fs_path_is_absolute, fs_parent_path
     use fo_util, only: make_tmpfile, delete_tmpfile, read_text_file, &
         read_text_file_alloc
     use fo_dep_resolve, only: normalize_path
@@ -33,7 +33,7 @@ module fo_cmake_generation
         character(:), allocatable :: authored, replacement
     end type path_alias_t
     public :: cmake_capture_inventory, cmake_registered_names, cmake_capture_cleanup
-    public :: cmake_stage_git
+    public :: cmake_stage_git, cmake_populated_dependency_args
 contains
     subroutine cmake_capture_inventory(backend, inventory, ierr, message, flags, &
             configured)
@@ -246,8 +246,8 @@ contains
             if (library_hint) then
                 rewritten = trim(normalized)
             else if (kind == 'PATH' .and. native_package_hint(key, value, &
-                trim(project_path), trim(build_path), roots(:n_roots), &
-                labels(:n_roots))) then
+                    trim(project_path), trim(build_path), roots(:n_roots), &
+                    labels(:n_roots))) then
                 rewritten = value
             else
                 call relocate_value(value, trim(project_path), &
@@ -547,6 +547,75 @@ contains
         close(unit, iostat=closed)
         if (ierr == 0) ierr = closed
     end subroutine cmake_stage_git
+
+    subroutine cmake_populated_dependency_args(populated_build, target_base, &
+            args, ierr, message)
+        !! Reuse cache roots and the File API discovery used by frozen Gremlin
+        !! generations, including populated dependencies without a subproject.
+        character(len=*), intent(in) :: populated_build, target_base
+        character(len=:), allocatable, intent(out) :: args
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+        type(backend_t) :: backend
+        character(len=PATH_LEN) :: roots(MAX_ROOTS), bundles(MAX_ROOTS)
+        character(len=256) :: labels(MAX_ROOTS), names(MAX_ROOTS)
+        character(len=:), allocatable :: cache, line, key, kind, value, base, name
+        integer :: cursor, n, i
+        logical :: exists
+
+        ierr = 0
+        message = ''
+        args = ''
+        call read_text_file_alloc(trim(populated_build)//'/CMakeCache.txt', cache, ierr)
+        if (ierr /= 0) return
+        base = trim(populated_build)//'/_deps'
+        cursor = 1
+        do while (next_cache_line(cache, cursor, line))
+            call cache_entry(line, key, kind, value)
+            if (key == 'FETCHCONTENT_BASE_DIR' .and. len_trim(value) > 0) &
+                base = fs_canonical_path(value)
+            if (key == 'CMAKE_HOME_DIRECTORY') backend%project_dir = value
+        end do
+        n = 0
+        cursor = 1
+        do while (next_cache_line(cache, cursor, line))
+            call cache_entry(line, key, kind, value)
+            if (len_trim(value) == 0) cycle
+            if (index(key, 'FETCHCONTENT_SOURCE_DIR_') == 1) then
+                name = key(25:)
+            else
+                if (len(key) <= 11) cycle
+                if (key(len(key) - 10:) /= '_SOURCE_DIR') cycle
+                if (.not. inside(value, base)) cycle
+                name = key(:len(key) - 11)
+                if (index(value(len_trim(base) + 2:), '/') /= 0) cycle
+            end if
+            inquire(file=value, exist=exists)
+            if (.not. exists) cycle
+            call add_source(value, name, n, roots, bundles, labels, names, &
+                ierr, message, .false.)
+            if (ierr /= 0) return
+        end do
+        inquire(file=trim(populated_build)//'/.cmake/api/v1/reply', exist=exists)
+        if (exists .and. len_trim(backend%project_dir) > 0) then
+            call cmake_context_init(backend%cmake, backend%project_dir, &
+                build_root=populated_build)
+            call capture_populated_sources(backend, base, n, roots, bundles, &
+                labels, names, ierr, message)
+            if (ierr /= 0) return
+        end if
+        do i = 1, n
+            value = trim(roots(i))
+            if (scan(value, ';"'//achar(92)) /= 0) then
+                ierr = 1
+                message = 'unsupported character in dependency path: '//value
+                return
+            end if
+            args = args//' "-DFETCHCONTENT_SOURCE_DIR_'//upper(trim(names(i)))// &
+                '='//value//'"'
+        end do
+        if (n > 0) args = ' "-DFETCHCONTENT_BASE_DIR='//trim(target_base)//'"'//args
+    end subroutine cmake_populated_dependency_args
 
     subroutine capture_project_git(source, metadata, script, ierr, message)
         character(len=*), intent(in) :: source, metadata
@@ -1057,7 +1126,7 @@ contains
         escaped = ''
         do i = 1, len(value)
             if (value(i:i) == '"' .or. iachar(value(i:i)) == 92 .or. &
-                    (quote_dollar .and. value(i:i) == '$')) &
+                (quote_dollar .and. value(i:i) == '$')) &
                 escaped = escaped//achar(92)
             escaped = escaped//value(i:i)
         end do
@@ -1320,7 +1389,7 @@ contains
                                 ! CMake permits absent search directories. The
                                 ! project scan detects their later creation.
                                 if (input_inventory_cmake_missing_include( &
-                                        trim(project), trim(authored))) then
+                                    trim(project), trim(authored))) then
                                     if (present(inventory)) then
                                         call input_inventory_cmake_include_search( &
                                             inventory, trim(authored), ierr, message)

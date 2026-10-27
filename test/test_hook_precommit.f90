@@ -12,8 +12,9 @@ program test_hook_precommit
     character(len=:), allocatable :: driver, scratch, project, original, tree, session
     type(process_result_t) :: result
     type(json_value_t) :: reply
-    type(string_list_t) :: args, environment
+    type(string_list_t) :: args, environment, cmake_args
     integer(int64) :: started, finished, rate
+    character(len=:), allocatable :: tag
     logical :: downloaded
 
     call resolve_driver(driver)
@@ -289,6 +290,125 @@ program test_hook_precommit
     call bounded_hook()
     call assert_true(result%exit_code /= 0, 'external source deletion rejects old proof')
     call assert_contains(result%stdout, '"cache_hit":false', 'external source deletion invalidates proof')
+
+    ! An fpm manifest beside a CMake project that is already configured does not
+    ! become its build authority. The fpm manifest names a dependency a commit
+    ! cannot acquire, so the fpm route fails while the configured CMake tree builds.
+    project = join_path(scratch, 'cmake-authority')
+    call write_text(project//'/fpm.toml', 'name = "hook_authority"'//nl// &
+        '[dependencies]'//nl//'hookdep = { git = "https://example.invalid/hookdep.git" }'//nl)
+    call write_text(project//'/CMakeLists.txt', 'cmake_minimum_required(VERSION 3.20)'//nl// &
+        'project(hook_authority LANGUAGES Fortran)'//nl// &
+        'set_property(GLOBAL PROPERTY RULE_LAUNCH_COMPILE '// &
+        '"${CMAKE_COMMAND} -E touch compile-launched &&")'//nl// &
+        'option(HOOK_TESTING "Enable tests" ON)'//nl// &
+        'add_executable(answer.x src/answer.f90)'//nl// &
+        'if(HOOK_TESTING)'//nl//'  enable_testing()'//nl// &
+        '  add_test(NAME answer COMMAND answer.x)'//nl//'endif()'//nl)
+    call write_text(project//'/src/answer.f90', 'program answer'//nl// &
+        '    implicit none'//nl//'    if (42 /= 42) stop 1'//nl//'end program answer'//nl)
+    call git([character(len=64) :: 'init', '-q'])
+    call git([character(len=64) :: 'add', 'fpm.toml', 'CMakeLists.txt', 'src/answer.f90'])
+    call git([character(len=64) :: 'commit', '-qm', 'Synthetic dual-manifest project'])
+    call configure_cmake(project)
+    call write_text(project//'/src/answer.f90', 'program answer'//nl// &
+        '    implicit none'//nl//'    logical :: launched'//nl// &
+        '    inquire (file="compile-launched", exist=launched)'//nl// &
+        '    if (.not. launched) stop 1'//nl//'    if (42 /= 42) stop 1'//nl// &
+        '    if (43 /= 43) stop 1'//nl//'end program answer'//nl)
+    call git([character(len=64) :: 'add', 'src/answer.f90'])
+    call hook()
+    call assert_process_ok(result, 'configured CMake project keeps its native authority')
+    call assert_contains(result%stdout, '"backend":"cmake"', 'CMake chosen over fpm.toml')
+    call assert_contains(result%stdout, '"build":"PASS', 'mandatory build ran on the CMake tree')
+    call assert_contains(result%stdout, '"fast_passed":1', &
+        'CTest case observes the native CMake compile launcher')
+
+    ! A staged copy of a project with fetched dependencies reuses the dependency
+    ! roots the project already populated; a commit never acquires a dependency.
+    project = join_path(scratch, 'fetched-dependency')
+    call write_text(project//'/CMakeLists.txt', 'cmake_minimum_required(VERSION 3.20)'//nl// &
+        'project(hookdep LANGUAGES Fortran)'//nl//'add_library(dep dep.f90)'//nl// &
+        'set_target_properties(dep PROPERTIES '// &
+        'Fortran_MODULE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/mod")'//nl// &
+        'target_include_directories(dep PUBLIC "${CMAKE_CURRENT_BINARY_DIR}/mod")'//nl)
+    call write_text(project//'/dep.f90', 'module hook_dep_mod'//nl//'    implicit none'//nl// &
+        '    integer, parameter :: dep_answer = 7'//nl//'end module hook_dep_mod'//nl)
+    call git([character(len=64) :: 'init', '-q'])
+    call git([character(len=64) :: 'add', 'CMakeLists.txt', 'dep.f90'])
+    call git([character(len=64) :: 'commit', '-qm', 'Synthetic fetched dependency'])
+    call git([character(len=64) :: 'rev-parse', 'HEAD'])
+    tag = trim(result%stdout)
+    project = join_path(scratch, 'fetch-content')
+    call write_text(project//'/CMakeLists.txt', 'cmake_minimum_required(VERSION 3.20)'//nl// &
+        'project(hook_fetch LANGUAGES Fortran)'//nl//'include(FetchContent)'//nl// &
+        'FetchContent_Declare(hookdep GIT_REPOSITORY "'// &
+        join_path(scratch, 'fetched-dependency')//'" GIT_TAG '//trim(tag)//')'//nl// &
+        'FetchContent_MakeAvailable(hookdep)'//nl//'enable_testing()'//nl// &
+        'add_executable(app.x app.f90)'//nl// &
+        'target_link_libraries(app.x PRIVATE dep)'//nl// &
+        'add_test(NAME app COMMAND app.x)'//nl)
+    call write_text(project//'/app.f90', 'program app'//nl// &
+        '    use hook_dep_mod, only: dep_answer'//nl//'    implicit none'//nl// &
+        '    if (dep_answer /= 7) stop 1'//nl//'end program app'//nl)
+    call git([character(len=64) :: 'init', '-q'])
+    call git([character(len=64) :: 'add', 'CMakeLists.txt', 'app.f90'])
+    call git([character(len=64) :: 'commit', '-qm', 'Synthetic FetchContent project'])
+    call configure_cmake(project)
+    call write_text(project//'/app.f90', 'program app'//nl// &
+        '    use hook_dep_mod, only: dep_answer'//nl//'    implicit none'//nl// &
+        '    if (dep_answer /= 7) stop 1'//nl//'    if (dep_answer < 7) stop 1'//nl// &
+        'end program app'//nl)
+    call git([character(len=64) :: 'add', 'app.f90'])
+    call hook()
+    call assert_process_ok(result, 'staged copy reuses populated FetchContent roots')
+    call assert_contains(result%stdout, '"backend":"cmake"', 'FetchContent project configures')
+    call assert_contains(result%stdout, '"fast_passed":1', 'fetched dependency test ran in the hook')
+
+    call write_text(scratch//'/header.inc', 'integer, parameter :: header_answer = 9'//nl)
+    call write_text(project//'/CMakeLists.txt', read_text(project//'/CMakeLists.txt')// &
+        'FetchContent_Declare(headerdep URL "file://'//scratch//'/header.inc" '// &
+        'DOWNLOAD_NO_EXTRACT TRUE)'//nl//'FetchContent_MakeAvailable(headerdep)'//nl// &
+        'target_include_directories(app.x PRIVATE "${headerdep_SOURCE_DIR}")'//nl)
+    call write_text(project//'/app.f90', 'program app'//nl// &
+        '    use hook_dep_mod, only: dep_answer'//nl//'    implicit none'//nl// &
+        '    include "header.inc"'//nl// &
+        '    if (dep_answer /= 7 .or. header_answer /= 9) stop 1'//nl// &
+        'end program app'//nl)
+    call configure_cmake(project)
+    call git([character(len=64) :: 'add', 'CMakeLists.txt', 'app.f90'])
+    call hook()
+    call assert_process_ok(result, 'reuse header-only populated roots discovered by File API')
+    call assert_contains(result%stdout, '"fast_passed":1', 'fetched header test ran')
+
+    ! An explicit absolute build directory belongs to the real checkout, while
+    ! the staged build must stay private and use that tree only for source roots.
+    call configure_cmake(project, 'alternate')
+    call remove_tree(project//'/build')
+    environment = string_list_t()
+    call list_add(environment, 'FO_CMAKE_BUILD_DIR='//project//'/alternate')
+    call hook(environment)
+    call assert_process_ok(result, 'absolute populated build root stays usable in the hook')
+    call assert_contains(result%stdout, '"fast_passed":1', 'absolute root test ran')
+
+    ! The project's own CTest labels keep reference-comparison cases out of a
+    ! commit; without that declaration the hook runs them and is blocked.
+    project = join_path(scratch, 'label-tier')
+    call write_text(project//'/CMakeLists.txt', 'cmake_minimum_required(VERSION 3.20)'//nl// &
+        'project(hook_tier LANGUAGES Fortran)'//nl//'enable_testing()'//nl// &
+        'add_test(NAME fast_ok COMMAND "${CMAKE_COMMAND}" -E true)'//nl// &
+        'add_test(NAME reference COMMAND "${CMAKE_COMMAND}" -E false)'//nl// &
+        'set_tests_properties(reference PROPERTIES LABELS "regression")'//nl)
+    call git([character(len=64) :: 'init', '-q'])
+    call git([character(len=64) :: 'add', 'CMakeLists.txt'])
+    call hook()
+    call assert_true(result%exit_code /= 0, 'unlabelled tier runs the reference case')
+    call assert_contains(result%stdout, 'fast test failed: reference', 'reference case actually ran')
+    call git([character(len=64) :: 'config', 'fo.hookExcludeLabels', 'regression'])
+    call hook()
+    call assert_process_ok(result, 'declared label exclusion keeps reference out of the commit')
+    call assert_contains(result%stdout, '"fast_passed":1', 'fast case still verified')
+    call assert_contains(result%stdout, '"exclude_labels":["regression"]', 'exclusion is reported')
     call finish_assertions(retain_failed_scratch=.true.)
     call remove_tree(scratch)
 contains
@@ -302,6 +422,21 @@ contains
         call list_add(args, '--lane')
         call list_add(args, 'hook-proof')
     end subroutine lane_args
+    subroutine configure_cmake(directory, build_dir)
+        character(len=*), intent(in) :: directory
+        character(len=*), intent(in), optional :: build_dir
+        character(len=:), allocatable :: selected
+        selected = 'build'
+        if (present(build_dir)) selected = build_dir
+        call write_text(directory//'/'//selected//'/.cmake/api/v1/query/codemodel-v2', '')
+        cmake_args = string_list_t()
+        call list_add(cmake_args, '-S')
+        call list_add(cmake_args, '.')
+        call list_add(cmake_args, '-B')
+        call list_add(cmake_args, selected)
+        call run_external('cmake', cmake_args, directory, result, timeout_ms=180000)
+        call assert_process_ok(result, 'configure the CMake fixture')
+    end subroutine configure_cmake
     subroutine git(words)
         character(len=*), intent(in) :: words(:)
         integer :: i
@@ -312,12 +447,14 @@ contains
         call run_external('git', args, project, result)
         call assert_process_ok(result, 'git fixture command')
     end subroutine git
-    subroutine hook()
+    subroutine hook(extra)
+        type(string_list_t), intent(in), optional :: extra
         args = string_list_t()
         call list_add(args, 'hook')
         call list_add(args, 'pre-commit')
         call list_add(args, '--json')
-        call run_fo(driver, args, project, scratch//'/cache', result, timeout_ms=90000)
+        call run_fo(driver, args, project, scratch//'/cache', result, &
+            extra_environment=extra, timeout_ms=90000)
     end subroutine hook
     subroutine bounded_hook(extra_environment)
         type(string_list_t), optional, intent(in) :: extra_environment

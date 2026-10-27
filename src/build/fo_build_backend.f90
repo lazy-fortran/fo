@@ -2,12 +2,13 @@ module fo_build_backend
     use, intrinsic :: iso_fortran_env, only: error_unit
     use fo_fs, only: fs_make_dir, fs_remove_tree, fs_mkdir_excl, fs_sleep_ms, &
         fs_pid_alive, fs_native_path, fs_is_windows, fs_realpath, &
-        fs_path_is_absolute, fs_parent_path
+        fs_canonical_path, fs_path_is_absolute, fs_parent_path
     use fo_process, only: process_detect_nproc, process_getpid, &
         process_getcwd, process_run_argv_logged, argv_push
     use fo_gfortran_build, only: gfortran_build, gfortran_test, &
         gfortran_run_tests
-    use fo_util, only: read_text_file, make_tmpfile, delete_tmpfile
+    use fo_util, only: read_text_file, read_text_file_alloc, make_tmpfile, &
+        delete_tmpfile
     use fo_ctest_run, only: ctest_import_junit
     use fx_string, only: string_t
     use fo_test_budget, only: test_timeout_seconds, test_wall_cap_seconds
@@ -26,6 +27,7 @@ module fo_build_backend
     implicit none
     private
     public :: backend_t, detect_backend, detect_nproc, detect_jobs
+    public :: cmake_configured_build_dir
     public :: backend_build, backend_test, backend_test_names
     public :: backend_test_cases, backend_set_build_targets
     public :: backend_clean
@@ -44,8 +46,67 @@ module fo_build_backend
 
 contains
 
-    function detect_backend(dir) result(b)
+    subroutine cmake_configured_build_dir(project, build_dir, found)
+        !! Absolute build directory of the CMake tree that `project` is already
+        !! configured with, or empty when it is not configured. A populated
+        !! cache naming `project` as its home is the project's own evidence of
+        !! its native build authority, ahead of any fpm manifest beside it.
+        character(len=*), intent(in) :: project
+        character(len=:), allocatable, intent(out) :: build_dir
+        logical, intent(out), optional :: found
+        character(len=:), allocatable :: cache, hint, candidate, project_path
+        integer :: status, step, length
+
+        build_dir = ''
+        if (present(found)) found = .false.
+        project_path = fs_canonical_path(trim(project))
+        call get_environment_variable('FO_CMAKE_BUILD_DIR', length=length, status=status)
+        if (status /= 0) length = 0
+        allocate(character(len=length) :: hint)
+        if (length > 0) call get_environment_variable('FO_CMAKE_BUILD_DIR', hint)
+        do step = 1, 2
+            if (step == 1) then
+                if (len_trim(hint) == 0) cycle
+                candidate = trim(hint)
+            else
+                candidate = 'build'
+            end if
+            if (.not. fs_path_is_absolute(candidate)) &
+                candidate = trim(project_path)//'/'//candidate
+            call read_text_file_alloc(candidate//'/CMakeCache.txt', cache, status)
+            if (status /= 0 .or. len_trim(cache) == 0) cycle
+            if (.not. cache_home_is(cache, trim(project_path))) cycle
+            build_dir = candidate
+            if (present(found)) found = .true.
+            return
+        end do
+    end subroutine cmake_configured_build_dir
+
+    logical function cache_home_is(cache, project_path) result(matches)
+        !! True when a CMake cache names `project_path` as CMAKE_HOME_DIRECTORY.
+        character(len=*), intent(in) :: cache, project_path
+        character(len=:), allocatable :: line, home
+        integer :: at, ending, newline
+
+        matches = .false.
+        at = index(cache, 'CMAKE_HOME_DIRECTORY:')
+        if (at == 0) return
+        line = cache(at:)
+        ending = index(line, new_line('a'))
+        if (ending > 1) line = line(:ending - 1)
+        newline = index(line, '=')
+        if (newline == 0) return
+        home = line(newline + 1:)
+        if (len_trim(home) == 0) return
+        matches = fs_canonical_path(trim(home)) == trim(project_path)
+    end function cache_home_is
+
+    function detect_backend(dir, authority_dir) result(b)
+        !! `authority_dir` is a populated checkout of the same project whose
+        !! configured build tree decides the backend when `dir` is an empty
+        !! copy that carries both manifests.
         character(len=*), intent(in) :: dir
+        character(len=*), intent(in), optional :: authority_dir
         type(backend_t) :: b
         logical :: has_fpm, has_cmake, has_cmake_tests
         logical :: force_cmake, force_fpm
@@ -82,6 +143,13 @@ contains
                 b%kind = BACKEND_CMAKE
                 call cmake_context_init(b%cmake, trim(current))
                 return
+            else if (.not. force_cmake .and. .not. force_fpm .and. has_fpm .and. &
+                    has_cmake .and. configured_here(current, authority_dir)) then
+                ! An fpm manifest beside a CMake project that is already
+                ! configured and populated is not its build authority.
+                b%kind = BACKEND_CMAKE
+                call cmake_context_init(b%cmake, trim(current))
+                return
             else if (.not. force_cmake .and. .not. force_fpm .and. has_fpm) then
                 b%kind = BACKEND_NATIVE
                 return
@@ -99,6 +167,21 @@ contains
         b%kind = BACKEND_NONE
         b%project_dir = ''
     end function detect_backend
+
+    logical function configured_here(project, authority_dir) result(configured)
+        !! True when the project, or the populated checkout that stands for
+        !! it, already holds a configured CMake build tree.
+        character(len=*), intent(in) :: project
+        character(len=*), intent(in), optional :: authority_dir
+        character(len=:), allocatable :: unused
+        logical :: found
+
+        call cmake_configured_build_dir(project, unused, found)
+        configured = found
+        if (configured .or. .not. present(authority_dir)) return
+        call cmake_configured_build_dir(authority_dir, unused, found)
+        configured = found
+    end function configured_here
 
     logical function cmake_declares_tests(filename) result(declares_tests)
         !! True when the top-level file unconditionally declares a CTest contract.
