@@ -634,6 +634,26 @@ contains
                 '='//value//'"'
         end do
         if (n > 0) args = ' "-DFETCHCONTENT_BASE_DIR='//trim(target_base)//'"'//args
+        ! A fresh configure would rerun CMake's compiler search, which can pick a
+        ! different compiler than the one this project was configured with.
+        cursor = 1
+        do while (next_cache_line(cache, cursor, line))
+            call cache_entry(line, key, kind, value)
+            select case (key)
+            case ('CMAKE_Fortran_COMPILER')
+                name = 'FC'
+            case ('CMAKE_C_COMPILER')
+                name = 'CC'
+            case ('CMAKE_CXX_COMPILER')
+                name = 'CXX'
+            case default
+                cycle
+            end select
+            if (len_trim(value) == 0 .or. scan(value, ';"'//achar(92)) /= 0) cycle
+            call get_environment_variable(name, length=i)
+            if (i > 0) cycle
+            args = args//' "-D'//key//'='//trim(value)//'"'
+        end do
     end subroutine cmake_populated_dependency_args
 
     subroutine capture_project_git(source, metadata, script, ierr, message)
