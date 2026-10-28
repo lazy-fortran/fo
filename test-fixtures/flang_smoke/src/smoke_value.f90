@@ -4,6 +4,6 @@ module smoke_value
     public :: answer
 contains
     pure integer function answer() result(value)
-        value = 42
+        value = 41
     end function answer
 end module smoke_value
