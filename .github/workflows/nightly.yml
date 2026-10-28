@@ -1,0 +1,103 @@
+name: nightly
+
+# Slow checks run once a night on main instead of in every merge-queue entry:
+# bootstrapping Fo with LLVM Flang and building the Flang consumer fixtures.
+# When a cell fails, the triage job bisects it between the last green commit
+# and this one and files or updates one issue labelled nightly-failure; the
+# next green run that covers the recorded cells closes it.
+run-name: "nightly: Flang ${{ inputs.cells || '21,22' }}"
+
+on:
+  schedule:
+    - cron: "43 1 * * *"
+  workflow_dispatch:
+    inputs:
+      cells:
+        description: Comma-separated LLVM versions to run, for example 21 (empty runs 21,22)
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    name: Plan cells
+    runs-on: [self-hosted, itp-light]
+    outputs:
+      cells: ${{ steps.plan.outputs.cells }}
+      list: ${{ steps.plan.outputs.list }}
+    steps:
+      - id: plan
+        env:
+          CELLS: ${{ inputs.cells || '21,22' }}
+        run: |
+          echo "$CELLS" | grep -Eq '^[0-9]+(,[0-9]+)*$'
+          echo "list=$CELLS" >> "$GITHUB_OUTPUT"
+          echo "cells=[$CELLS]" >> "$GITHUB_OUTPUT"
+
+  flang_compiler:
+    name: Flang ${{ matrix.llvm }} bootstrap + consumers
+    needs: plan
+    runs-on: [self-hosted, itp-ubuntu24]
+    # Two-CPU cold bootstrap measured 12m52s; focused-test compilation then
+    # exhausted 20m. Allow another 20m for tests/consumers plus 7m margin.
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        llvm: ${{ fromJSON(needs.plan.outputs.cells) }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install LLVM Flang ${{ matrix.llvm }} and fpm
+        run: ci/flang-setup.sh ${{ matrix.llvm }}
+      - name: Bootstrap Fo with Flang and test it with Flang consumers
+        run: ci/flang-cell.sh ${{ matrix.llvm }}
+      - name: Retain Flang failure logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flang-${{ matrix.llvm }}-failure-logs
+          if-no-files-found: ignore
+          path: |
+            build/fo/test-logs/*.log
+            ${{ runner.temp }}/flang-${{ matrix.llvm }}/tmp/**/*.log
+
+  triage:
+    name: Bisect failing cells and report
+    needs: [plan, flang_compiler]
+    if: failure() && needs.flang_compiler.result == 'failure'
+    runs-on: [self-hosted, itp-ubuntu24]
+    timeout-minutes: 360
+    permissions:
+      actions: read
+      contents: read
+      issues: write
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Bisect and file or update the nightly-failure issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ci/nightly-triage.sh failure
+
+  close:
+    name: Close the nightly-failure issue
+    needs: [plan, flang_compiler]
+    if: always() && needs.flang_compiler.result == 'success'
+    runs-on: [self-hosted, itp-ubuntu24]
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Close the issue once its cells pass
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ci/nightly-triage.sh success "${{ needs.plan.outputs.list }}"
