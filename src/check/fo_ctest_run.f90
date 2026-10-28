@@ -227,8 +227,8 @@ contains
     ! Case construction
 
     subroutine closure_members(model, cases, members)
-        !! The cases plus, as CTest does, the setup and cleanup cases of every
-        !! fixture a member requires. Model order.
+        !! Include fixture setup/cleanup cases and all DEPENDS predecessors so
+        !! isolated selections retain their producers. Preserve model order.
         type(project_model_t), intent(in) :: model
         integer, intent(in) :: cases(:)
         integer, allocatable, intent(out) :: members(:)
@@ -245,6 +245,14 @@ contains
             changed = .false.
             do i = 1, model%n_cases
                 if (.not. inc(i)) cycle
+                call attr_items(model%cases(i), 'DEPENDS', req)
+                do f = 1, size(req)
+                    m = model_find_case(model, req(f)%s)
+                    if (m == 0) cycle
+                    if (inc(m)) cycle
+                    inc(m) = .true.
+                    changed = .true.
+                end do
                 call attr_items(model%cases(i), 'FIXTURES_REQUIRED', req)
                 do f = 1, size(req)
                     do m = 1, model%n_cases
