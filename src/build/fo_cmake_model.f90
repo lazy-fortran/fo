@@ -489,12 +489,12 @@ contains
         has_preset = len_trim(context%test_preset) > 0
         call run_ctest(context, has_preset, text, message)
         if (.not. allocated(text)) return
-        call parse_ctest(text, model, .false., .false., message)
+        call parse_ctest(text, context, model, .false., .false., message)
         if (len(message) > 0) return
         if (has_preset) then
             call run_ctest(context, .false., text, message)
             if (.not. allocated(text)) return
-            call parse_ctest(text, model, .true., .true., message)
+            call parse_ctest(text, context, model, .true., .true., message)
             if (len(message) > 0) return
         else
             deallocate (model%default_exclude)
@@ -522,13 +522,14 @@ contains
             '/CTestTestfile.cmake', model)
     end subroutine map_declared_commands
 
-    recursive subroutine scan_testfile(path, model)
+    recursive subroutine scan_testfile(path, model, registration_dir)
         !! Walk one CTestTestfile.cmake: add_test maps a case, subdirs() and
         !! include() are followed. Missing files are skipped silently (an
         !! include of a not yet generated discovery file).
         character(len=*), intent(in) :: path
+        character(len=*), intent(in), optional :: registration_dir
         type(project_model_t), intent(inout) :: model
-        character(len=:), allocatable :: text, command, dir
+        character(len=:), allocatable :: text, command, dir, registration
         type(string_t), allocatable :: args(:)
         integer :: pos, n_args, k, slash, t, target_index
 
@@ -537,6 +538,8 @@ contains
         slash = index(path, '/', back=.true.)
         dir = '.'
         if (slash > 1) dir = path(:slash - 1)
+        registration = dir
+        if (present(registration_dir)) registration = registration_dir
         pos = 1
         do
             call next_command(text, pos, command, args, n_args)
@@ -545,6 +548,13 @@ contains
             case ('add_test')
                 if (n_args < 2) cycle
                 k = model_find_case(model, args(1)%s)
+                if (k == 0) then
+                    if (index(registration, model%build_dir//'/') == 1) &
+                        k = model_find_case(model, &
+                        registration(len(model%build_dir) + 2:)//'::'//args(1)%s)
+                    if (registration == model%build_dir) &
+                        k = model_find_case(model, '.::'//args(1)%s)
+                end if
                 if (k == 0) cycle
                 if (model%cases(k)%command_target /= 0) cycle
                 do t = 2, n_args
@@ -568,9 +578,9 @@ contains
                 if (n_args < 1) cycle
                 if (len(args(1)%s) == 0) cycle
                 if (args(1)%s(1:1) == '/') then
-                    call scan_testfile(args(1)%s, model)
+                    call scan_testfile(args(1)%s, model, registration)
                 else
-                    call scan_testfile(dir//'/'//args(1)%s, model)
+                    call scan_testfile(dir//'/'//args(1)%s, model, registration)
                 end if
             end select
         end do
@@ -774,11 +784,197 @@ contains
         call delete_tmpfile(log_file)
     end subroutine run_ctest
 
-    subroutine parse_ctest(text, model, flag_cases, skip_known, message)
+    subroutine ctest_identities(text, context, names, ids, dirs, message)
+        character(len=*), intent(in) :: text
+        type(cmake_context_t), intent(in) :: context
+        type(string_t), allocatable, intent(out) :: names(:), ids(:), dirs(:)
+        character(len=:), allocatable, intent(out) :: message
+        type(json_parser_t) :: parser
+        type(json_event_t) :: event
+        type(walker_t) :: w
+        type(string_t), allocatable :: registered(:), directories(:)
+        character(len=:), allocatable :: path, root
+        integer :: n, count, i, j, k
+        logical :: duplicate, valid
+
+        message = ''
+        n = 0
+        allocate (names(8))
+        call json_parser_init_strict(parser, text)
+        do
+            call json_parser_next(parser, event)
+            if (event%event_type == JSON_END_OF_INPUT) exit
+            if (event%event_type == JSON_ERROR) then
+                message = 'invalid CTest registered-test JSON'
+                return
+            end if
+            call walker_step(w, event, path)
+            if (event%event_type /= JSON_STRING) cycle
+            if (path == 'tests/#/name') call push_string(names, n, event%string_val)
+        end do
+        names = names(1:n)
+        allocate (ids(n), dirs(n))
+        do i = 1, n
+            dirs(i)%s = ''
+        end do
+        ids = names(1:n)
+        duplicate = .false.
+        do i = 1, n
+            do j = 1, i - 1
+                if (names(i)%s == names(j)%s) duplicate = .true.
+            end do
+        end do
+        if (.not. duplicate) return
+        if (len_trim(context%test_preset) > 0) then
+            message = 'directory-local duplicate CTest names with test presets '// &
+                'are not supported'
+            return
+        end if
+        root = cmake_context_build_path(context)
+        count = 0
+        allocate (registered(8), directories(8))
+        valid = .true.
+        call ctest_registry(root//'/CTestTestfile.cmake', root, root, &
+            registered, directories, count, valid)
+        if (.not. valid) then
+            message = 'unsupported CTest directory registry script'
+            return
+        end if
+        if (count /= n) then
+            message = 'CTest directory registry does not match registered tests'
+            return
+        end if
+        do i = 1, n
+            if (registered(i)%s /= names(i)%s) then
+                message = 'CTest directory registry does not match registered tests'
+                return
+            end if
+        end do
+        dirs = directories(1:n)
+        do i = 1, n
+            do j = 1, n
+                if (i == j) cycle
+                if (names(i)%s /= names(j)%s) cycle
+                ids(i)%s = directories(i)%s//'::'//names(i)%s
+                do k = 1, len(ids(i)%s)
+                    if (iachar(ids(i)%s(k:k)) > 32 .and. &
+                        iachar(ids(i)%s(k:k)) /= 127) cycle
+                    message = 'directory-qualified CTest IDs cannot contain whitespace '// &
+                        'or control characters'
+                    return
+                end do
+                exit
+            end do
+        end do
+    end subroutine ctest_identities
+
+    recursive subroutine ctest_registry(file, directory, root, names, dirs, n, valid)
+        character(len=*), intent(in) :: file, directory, root
+        type(string_t), allocatable, intent(inout) :: names(:), dirs(:)
+        integer, intent(inout) :: n
+        logical, intent(inout) :: valid
+        type(string_t), allocatable :: args(:), children(:)
+        character(len=:), allocatable :: text, command, child, relative
+        integer :: pos, argc, i, m, count
+
+        call cmake_context_read_file(file, text)
+        if (.not. allocated(text)) then
+            valid = .false.
+            return
+        end if
+        allocate (children(8))
+        m = 0
+        pos = 1
+        do
+            call next_command(text, pos, command, args, argc)
+            if (len(command) == 0) exit
+            do i = 1, argc
+                if (index(args(i)%s, '${') == 0 .and. &
+                    index(args(i)%s, '$ENV{') == 0) cycle
+                valid = .false.
+                return
+            end do
+            if (argc < 1) then
+                valid = .false.
+                return
+            end if
+            select case (command)
+            case ('add_test')
+                relative = '.'
+                if (directory /= root) then
+                    if (index(directory, root//'/') /= 1) then
+                        valid = .false.
+                        return
+                    end if
+                    relative = directory(len(root) + 2:)
+                end if
+                count = n
+                call push_string(names, n, args(1)%s)
+                call push_string(dirs, count, relative)
+            case ('include')
+                child = absolute_path(args(1)%s, directory)
+                call ctest_registry(child, directory, root, names, dirs, n, valid)
+            case ('subdirs')
+                do i = 1, argc
+                    call push_string(children, m, absolute_path(args(i)%s, directory))
+                end do
+            case ('set_tests_properties')
+            case default
+                valid = .false.
+                return
+            end select
+            if (.not. valid) return
+        end do
+        ! CTest lists all tests in this directory before descending into children.
+        do i = 1, m
+            child = children(i)%s
+            call ctest_registry(child//'/CTestTestfile.cmake', child, root, &
+                names, dirs, n, valid)
+        end do
+    end subroutine ctest_registry
+
+    subroutine qualify_ctest_depends(attrs, n, names, ids, dirs, test, message)
+        type(model_attr_t), intent(inout) :: attrs(:)
+        integer, intent(in) :: n, test
+        type(string_t), intent(in) :: names(:), ids(:), dirs(:)
+        character(len=:), allocatable, intent(out) :: message
+        integer :: a, i, j
+        logical :: ambiguous, resolved
+
+        message = ''
+        if (len(dirs(test)%s) == 0) return
+        do a = 1, n
+            if (attrs(a)%key /= 'DEPENDS') cycle
+            do i = 1, size(attrs(a)%items)
+                ambiguous = .false.
+                resolved = .false.
+                do j = 1, size(ids)
+                    if (names(j)%s /= attrs(a)%items(i)%s) cycle
+                    if (ids(j)%s /= names(j)%s) ambiguous = .true.
+                    if (dirs(j)%s /= dirs(test)%s) cycle
+                    attrs(a)%items(i)%s = ids(j)%s
+                    resolved = .true.
+                    exit
+                end do
+                if (ambiguous .and. .not. resolved) then
+                    message = 'ambiguous CTest dependency outside registration directory'
+                    return
+                end if
+            end do
+            attrs(a)%value = ''
+            do i = 1, size(attrs(a)%items)
+                if (i > 1) attrs(a)%value = attrs(a)%value//';'
+                attrs(a)%value = attrs(a)%value//attrs(a)%items(i)%s
+            end do
+        end do
+    end subroutine qualify_ctest_depends
+
+    subroutine parse_ctest(text, context, model, flag_cases, skip_known, message)
         !! Add the tests of a json-v1 listing. skip_known: ignore names the
         !! model already has. flag_cases: set default_excluded on added cases.
         !! message is empty on success.
         character(len=*), intent(in) :: text
+        type(cmake_context_t), intent(in) :: context
         type(project_model_t), intent(inout) :: model
         logical, intent(in) :: flag_cases, skip_known
         character(len=:), allocatable, intent(out) :: message
@@ -786,13 +982,18 @@ contains
         type(json_event_t) :: event
         type(walker_t) :: w
         character(len=:), allocatable :: path, name, prop, value, word
-        type(string_t), allocatable :: labels(:)
+        type(string_t), allocatable :: labels(:), ids(:), local_names(:), dirs(:)
         type(string_t), allocatable :: argv(:), items(:)
         type(model_attr_t), allocatable :: attrs(:)
         integer :: n_labels, n_attrs, n_argv, n_items, command_target, hit, k
+        integer :: test_number
+        character(len=32) :: ordinal
         logical :: in_value
 
         message = ''
+        call ctest_identities(text, context, local_names, ids, dirs, message)
+        if (len(message) > 0) return
+        test_number = 0
         call json_parser_init_strict(parser, text)
         name = ''
         prop = ''
@@ -877,9 +1078,20 @@ contains
                         end do
                     end if
                 else if (path == 'tests/#') then
+                    test_number = test_number + 1
                     if (len(name) == 0) then
                         message = 'CTest listing has a test without a name'
                         return
+                    end if
+                    call qualify_ctest_depends(attrs, n_attrs, local_names, &
+                        ids, dirs, test_number, message)
+                    if (len(message) > 0) return
+                    if (ids(test_number)%s /= name) then
+                        write (ordinal, '(i0)') test_number
+                        call push_attr(attrs, n_attrs, 'FO_CTEST_NAME', name, [string_t(name)])
+                        call push_attr(attrs, n_attrs, 'FO_CTEST_NUMBER', trim(ordinal), &
+                            [string_t(trim(ordinal))])
+                        name = ids(test_number)%s
                     end if
                     if (skip_known) then
                         if (model_find_case(model, name) > 0) cycle

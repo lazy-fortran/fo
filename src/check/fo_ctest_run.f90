@@ -482,7 +482,7 @@ contains
                         rc%reason = 'unsupported FO_SLOW_TERMINATE_AFTER'
                         return
                     end if
-                case ('COST', '_BACKTRACE_TRIPLES')
+                case ('COST', '_BACKTRACE_TRIPLES', 'FO_CTEST_NAME', 'FO_CTEST_NUMBER')
                 case default
                     rc%reason = 'property '//key//' not implemented natively'
                     return
@@ -978,18 +978,28 @@ contains
     ! ------------------------------------------------------------------
     ! JUnit import (delegated ctest runs)
 
-    subroutine ctest_import_junit(junit_file, log_file)
+    subroutine ctest_import_junit(junit_file, log_file, local_name, reported_name, imported)
         !! Append the verdicts of a ctest --output-junit file to the log as
         !! TEST_RESULT lines, after a TEST_JUNIT_IMPORT marker that makes the
         !! reader drop the console results of the same run. A missing,
         !! unreadable or unrepresentable file leaves the console to the reader.
         character(len=*), intent(in) :: junit_file, log_file
+        character(len=*), intent(in), optional :: local_name, reported_name
+        logical, intent(out), optional :: imported
         character(len=:), allocatable :: text, body, name, status, message, lines, time_text
-        integer :: ierr, pos, head_end, close_pos, n
+        integer :: ierr, pos, head_end, close_pos, n, matched
         real :: secs
 
+        if (present(imported)) imported = .false.
+        matched = 0
         call read_text_file_alloc(junit_file, text, ierr)
         if (ierr /= 0) return
+        if (present(local_name)) then
+            if (len(local_name) > 0) then
+                if (index(text, '<testsuite ') == 0 .or. &
+                    index(text, '</testsuite>') == 0) return
+            end if
+        end if
         lines = ''
         n = 0
         pos = 1
@@ -1001,6 +1011,12 @@ contains
             if (head_end == 0) return
             head_end = pos + head_end - 1
             name = xml_unescape(attribute(text(pos:head_end), 'name'))
+            if (present(local_name) .and. present(reported_name)) then
+                if (name == local_name) then
+                    name = reported_name
+                    matched = matched + 1
+                end if
+            end if
             status = attribute(text(pos:head_end), 'status')
             secs = 0.0
             time_text = attribute(text(pos:head_end), 'time')
@@ -1023,8 +1039,14 @@ contains
             if (pos > len(text)) exit
         end do
         if (n == 0) return
+        if (present(local_name)) then
+            if (len(local_name) > 0) then
+                if (matched /= 1 .or. n /= 1) return
+            end if
+        end if
         call ctest_log_note(log_file, 'TEST_JUNIT_IMPORT')
         call ctest_log_note(log_file, lines(:len(lines) - 1))
+        if (present(imported)) imported = .true.
     end subroutine ctest_import_junit
 
     subroutine junit_verdict(status, body, message)
