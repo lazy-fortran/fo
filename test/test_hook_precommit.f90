@@ -485,6 +485,38 @@ program test_hook_precommit
     call assert_process_ok(result, 'staged configure keeps the configured compiler')
     call assert_contains(result%stdout, '"fast_passed":1', 'configured-compiler case ran')
 
+    ! A compiler recorded at configuration but removed since (a toolchain
+    ! upgrade) is not forced on the staged configure.
+    project = join_path(scratch, 'removed-compiler')
+    call write_text(project//'/CMakeLists.txt', 'cmake_minimum_required(VERSION 3.20)'//nl// &
+        'project(hook_removed_compiler LANGUAGES Fortran)'//nl//'enable_testing()'//nl// &
+        'add_test(NAME removed_compiler_ok COMMAND "${CMAKE_COMMAND}" -E true)'//nl)
+    call git([character(len=64) :: 'init', '-q'])
+    call git([character(len=64) :: 'add', 'CMakeLists.txt'])
+    block
+        character(len=4096) :: compiler
+        logical :: located
+        call fs_find_executable('gfortran', compiler, located)
+        call assert_true(located, 'locate the real Fortran compiler')
+        call make_directory(project//'/toolchain')
+        call make_symlink(trim(compiler), project//'/toolchain/old-fortran')
+    end block
+    call write_text(project//'/build/.cmake/api/v1/query/codemodel-v2', '')
+    cmake_args = string_list_t()
+    call list_add(cmake_args, '-S')
+    call list_add(cmake_args, '.')
+    call list_add(cmake_args, '-B')
+    call list_add(cmake_args, 'build')
+    call list_add(cmake_args, '-DCMAKE_Fortran_COMPILER='//project//'/toolchain/old-fortran')
+    environment = string_list_t()
+    call list_add(environment, 'FC=')
+    call run_external('cmake', cmake_args, project, result, environment, timeout_ms=180000)
+    call assert_process_ok(result, 'configure with a compiler that is later removed')
+    call remove_tree(project//'/toolchain')
+    call hook(environment)
+    call assert_process_ok(result, 'staged configure ignores a removed compiler')
+    call assert_contains(result%stdout, '"fast_passed":1', 'removed-compiler case ran')
+
     ! The project's own CTest labels keep reference-comparison cases out of a
     ! commit; without that declaration the hook runs them and is blocked.
     project = join_path(scratch, 'label-tier')

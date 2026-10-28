@@ -652,6 +652,10 @@ contains
             if (len_trim(value) == 0 .or. scan(value, ';"'//achar(92)) /= 0) cycle
             call get_environment_variable(name, length=i)
             if (i > 0) cycle
+            ! A compiler removed since configuration (e.g. a toolchain upgrade)
+            ! leaves CMake's own search as the only working choice.
+            inquire(file=trim(value), exist=exists)
+            if (.not. exists) cycle
             args = args//' "-D'//key//'='//trim(value)//'"'
         end do
     end subroutine cmake_populated_dependency_args
