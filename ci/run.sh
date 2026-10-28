@@ -53,7 +53,20 @@ case "$tier" in
     export GIT_TERMINAL_PROMPT="0"
     echo Build
     (
-fpm build
+# Freeze the source inputs before the sole native bootstrap.
+receipt="$RUNNER_TEMP/fo-bootstrap-receipt.sha256"
+compiler=$(realpath "$FC")
+{
+  find "$src/src" "$src/app" "$src/test-support" -type f -print0
+  if [ -d "$src/include" ]; then find "$src/include" -type f -print0; fi
+  printf '%s\0' "$src/fpm.toml" "$src/test/test_random_tests.f90" "$compiler"
+  if [ -f "$src/fpm.lock" ]; then printf '%s\0' "$src/fpm.lock"; fi
+  if [ -d "$src/build/dependencies" ]; then
+    find "$src/build/dependencies" -type f \( \
+      -path '*/src/*' -o -path '*/include/*' -o -name fpm.toml \) -print0
+  fi
+} | sort -zu | xargs -0 -r sha256sum > "$receipt"
+fpm build --verbose 2>&1 | tee "$RUNNER_TEMP/fo-bootstrap.log"
     )
     load_job_environment
     echo 'Install fo onto PATH'
@@ -88,6 +101,68 @@ echo "FO_DRIVER_A=$pinned" >> "$GITHUB_ENV"
 
     )
     load_job_environment
+    echo 'Record native core identity for self-refresh fixture'
+    (
+receipt="$RUNNER_TEMP/fo-bootstrap-receipt.sha256"
+sha256sum --check --status "$receipt"
+# The one native app link identifies its archive and module directory.
+archive=$(awk '
+  /app_main[.]f90[.]o/ && /libfo[.]a/ && / -o / {
+    for (i=1; i<=NF; i++) if ($i ~ /\/libfo[.]a$/) { path=$i; count++ }
+  }
+  END { if (count != 1) exit 1; print path }
+' "$RUNNER_TEMP/fo-bootstrap.log")
+archive=$(realpath "$src/$archive")
+# fpm may give the archive a different hash directory from its module outputs.
+module_dir=$(awk '
+  / -c / && /fo_cli_entry[.]f90([[:space:]]|$)/ {
+    for (i=1; i<=NF; i++) {
+      if ($i == "-J") { path=$(i+1); count++ }
+      else if ($i ~ /^-J.+/) { path=substr($i, 3); count++ }
+    }
+  }
+  END { if (count != 1 || path == "") exit 1; print path }
+' "$RUNNER_TEMP/fo-bootstrap.log")
+module_dir=$(realpath "$src/$module_dir")
+test -f "$module_dir/fo_cli_entry.mod"
+compiler=$(realpath "$FC")
+{
+  cmp "$FO_INSTALL_PREFIX/bin/fo" "$FO_DRIVER_A"
+  printf '%s\0' "$archive" "$compiler" "$FO_DRIVER_A" "$FO_INSTALL_PREFIX/bin/fo"
+  find "$module_dir" -maxdepth 1 -type f -name '*.mod' -print0
+  find "$src/build/dependencies" -type f \( \
+    -path '*/src/*' -o -path '*/include/*' -o -name fpm.toml \) -print0
+  if [ -f "$src/fpm.lock" ]; then printf '%s\0' "$src/fpm.lock"; fi
+} | sort -zu | xargs -0 -r sha256sum >> "$receipt"
+printf '%s\n' "FO_SELF_REFRESH_CORE_ARCHIVE=$archive" \
+  "FO_SELF_REFRESH_CORE_MODULE_DIR=$module_dir" \
+  "FO_SELF_REFRESH_IDENTITY_RECEIPT=$receipt" \
+  "FO_SELF_REFRESH_COMPILER=$compiler" >> "$GITHUB_ENV"
+
+    )
+    load_job_environment
+    echo 'Prepare focused test programs once'
+    (
+export FO_DISABLE_SELF_REFRESH=1 FO_SELF_REFRESH=0 FO_JOBS="$SCI_CPUS"
+export FO_CACHE_DIR="$RUNNER_TEMP/fo-test-preparation-cache"
+export TMPDIR="$RUNNER_TEMP/fo-test-preparation-tmp"
+mkdir -p "$TMPDIR"
+# Runtime groups keep separate state while reusing this exact prepared tree.
+focused_tests=(
+  test_project_model test_fpm_project_model test_cmake_project_model
+  test_cmake_capture_paths test_cmake_capture_inputs test_cmake_parent_modules
+  test_project_selection_cli test_project_layering_cli test_gremlin_case_reuse
+  test_gremlin_cmake test_atomic_link_artifacts test_cmake_native_build_cli
+  test_gremlin_journal_recovery test_gremlin_coverage_restart
+  test_gremlin_campaign_resolution test_mcp_system test_self_refresh
+  test_install_help test_mcp_gremlin_stale test_mcp_cancel_error test_self_refresh_profile
+)
+prepare_args=(build --tests)
+for name in "${focused_tests[@]}"; do prepare_args+=(--case "$name"); done
+"$FO_DRIVER_A" "${prepare_args[@]}"
+
+    )
+    load_job_environment
     echo 'Test project model and scoped Gremlin behavior'
     (
 export PATH="$FO_INSTALL_PREFIX/bin:$PATH"
@@ -95,7 +170,7 @@ export FO="$FO_DRIVER_A" FO_BIN="$FO_DRIVER_A"
 export FO_DISABLE_SELF_REFRESH=1 FO_SELF_REFRESH=0 FO_JOBS=1
 export TMPDIR="$RUNNER_TEMP/fo-focused-tests"
 mkdir -p "$TMPDIR"
-"$FO_DRIVER_A" test test_project_model test_fpm_project_model \
+"$FO_DRIVER_A" test --no-build test_project_model test_fpm_project_model \
   test_cmake_project_model test_cmake_capture_paths test_cmake_capture_inputs \
   test_cmake_parent_modules \
   test_project_selection_cli test_project_layering_cli test_gremlin_case_reuse \
@@ -112,7 +187,7 @@ export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
 export FO_TEST_WALL_TIMEOUT=300
 export TMPDIR="$RUNNER_TEMP/fo-recovery-tests"
 mkdir -p "$TMPDIR"
-"$FO_DRIVER_A" test test_gremlin_journal_recovery \
+"$FO_DRIVER_A" test --no-build test_gremlin_journal_recovery \
   test_gremlin_coverage_restart test_gremlin_campaign_resolution
 
     )
@@ -124,7 +199,7 @@ export FO="$FO_INSTALL_PREFIX/bin/fo"
 export FO_DISABLE_SELF_REFRESH=1 FO_SELF_REFRESH=0
 FO_TEST_WALL_TIMEOUT=180 \
 FO_CACHE_DIR="$RUNNER_TEMP/fo-mcp-system" \
-  "$FO_INSTALL_PREFIX/bin/fo" test test_mcp_system
+  "$FO_INSTALL_PREFIX/bin/fo" test --no-build test_mcp_system
 
     )
     load_job_environment
@@ -132,19 +207,16 @@ FO_CACHE_DIR="$RUNNER_TEMP/fo-mcp-system" \
     (
 export TMPDIR="$RUNNER_TEMP/fo-self-refresh-oracle-tmp"
 mkdir -p "$TMPDIR"
-# Cold profiles plus release install exceed the ordinary 600-second
-# test cap on CI. These are safety bounds, not timing assertions.
-# Each nested command has a 900-second cap (317 s measured install).
-# Run this expensive oracle once so its first failure reaches the log
-# collector instead of a cold retry consuming the job's safety budget.
+# Keep the command bounds and report the first failure without retrying.
+FO_SELF_REFRESH_FIXTURE="$RUNNER_TEMP/fo-self-refresh-fixture" \
 FO_BIN="$FO_INSTALL_PREFIX/bin/fo" \
 FO_RUN_SELF_REFRESH_ORACLE=1 \
 FO_TEST_WALL_TIMEOUT=1800 \
 FO_DISABLE_SELF_REFRESH=1 \
 FO_SELF_REFRESH=0 \
 FO_CACHE_DIR="$RUNNER_TEMP/fo-self-refresh-oracle-cache" \
-  "$FO_INSTALL_PREFIX/bin/fo" test --rerun --retries 0 --verbose \
-    test_self_refresh
+  "$FO_INSTALL_PREFIX/bin/fo" test --no-build --rerun --retries 0 --verbose \
+    test_self_refresh test_self_refresh_profile
 
     )
     load_job_environment
@@ -159,7 +231,7 @@ export FO_INSTALL_HELP_PREFIX="$RUNNER_TEMP/fo-install-help-prefix"
 export TMPDIR="/var/tmp"
 mkdir -p "$HOME" "$FO_CACHE_DIR"
 driver="$FO_DRIVER_A"
-FO_BIN="$driver" "$driver" test test_install_help
+FO_BIN="$driver" "$driver" test --no-build test_install_help
 
     )
     load_job_environment
@@ -167,7 +239,7 @@ FO_BIN="$driver" "$driver" test test_install_help
     (
 driver="$FO_DRIVER_A"
 FO="$driver" FO_BIN="$driver" FO_DISABLE_SELF_REFRESH=1 FO_SELF_REFRESH=0 \
-  "$driver" test test_mcp_gremlin_stale
+  "$driver" test --no-build test_mcp_gremlin_stale
 
     )
     load_job_environment
@@ -175,7 +247,7 @@ FO="$driver" FO_BIN="$driver" FO_DISABLE_SELF_REFRESH=1 FO_SELF_REFRESH=0 \
     (
 driver="$FO_DRIVER_A"
 FO="$driver" FO_BIN="$driver" FO_DISABLE_SELF_REFRESH=1 FO_SELF_REFRESH=0 \
-  "$driver" test test_mcp_cancel_error
+  "$driver" test --no-build test_mcp_cancel_error
 
     )
     load_job_environment

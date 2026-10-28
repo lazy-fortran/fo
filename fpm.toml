@@ -395,3 +395,8 @@ main = "test_hook_precommit.f90"
 # Process-boundary hook oracle deliberately exercises multi-second budgets.
 [extra.fo.test-groups]
 slow = { tests = ["test_hook_precommit"] }
+
+[[test]]
+name = "test_self_refresh_profile"
+source-dir = "test"
+main = "test_self_refresh_profile.f90"
