@@ -63,6 +63,14 @@ fo processes, while separate projects can share the CAS concurrently.
 
 ### Shared filesystems
 
+`FO_COMPILE_CACHE_DIR`, when nonempty, selects a separate root for immutable
+compiler action outputs (`store/v2` beneath that root). It defaults to
+`FO_CACHE_DIR`. Compiler probes, mutable build state, test results, link outputs,
+and Gremlin state continue to use `FO_CACHE_DIR`. Reuse requires the same
+compiler, flags, dependency contents, source argument, compilation directory,
+and exact include/module arguments;
+copying a project to another directory conservatively recompiles its sources.
+
 The shared store (`FO_CACHE_DIR`) uses no lock for correctness; README
 "Cache and concurrency" states the protocol. It relies only on the
 property below that held everywhere, an exclusive `link(2)`. Readers treat
