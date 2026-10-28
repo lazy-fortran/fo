@@ -412,7 +412,9 @@ contains
 
         if (use_fprettify(config_file)) then
             call run_fprettify(config_file, filepath, exitcode)
-            return
+            ! fprettify rejects options of newer releases without touching the
+            ! file; such configurations keep the native formatter.
+            if (exitcode == 0) return
         end if
         call fprettify_indent_width(config_file, indent_width)
         call format_file_with_indent(filepath, exitcode, indent_width)
