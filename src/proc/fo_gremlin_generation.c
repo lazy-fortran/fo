@@ -56,13 +56,16 @@ static int excluded_entry(const char *parent_rel, const char *name,
         strcmp(name, ".gremlin") == 0) {
         return 1;
     }
+    /* Hidden environment caches are outputs even when tools nest them. */
+    if (exclusion_policy >= 2 &&
+        (strcmp(name, ".cache") == 0 || strcmp(name, ".venv") == 0)) return 1;
     if (parent_rel[0] != '\0') return 0;
+    if (exclusion_policy == 4) return 0;
     /* Build is always excluded at a whole-tree scan root. */
     if (exclusion_policy >= 1 && strcmp(name, "build") == 0) return 1;
     /* Input inventories also skip other root output/cache directories. */
     return exclusion_policy >= 2 &&
-           (strcmp(name, ".cache") == 0 || strcmp(name, ".venv") == 0 ||
-            strcmp(name, "cache") == 0 ||
+           (strcmp(name, "cache") == 0 ||
             strcmp(name, "caches") == 0 || strcmp(name, "session") == 0 ||
             strcmp(name, "sessions") == 0 || strcmp(name, "log") == 0 ||
             strcmp(name, "logs") == 0);
@@ -616,8 +619,9 @@ static int list_input_tree(const char *root, const char *manifest,
     if (validate_tree_root(root) != 0) return errno == 0 ? 1 : errno;
     out = fopen(manifest, "w");
     if (out == NULL) return errno == 0 ? 1 : errno;
-    rc = walk_tree_excluding(root, "", out, 0, exclude_root_outputs == 2 ? 3 :
-                   (exclude_root_outputs != 0 ? 2 : 0), 1, excluded_directory);
+    rc = walk_tree_excluding(root, "", out, 0, exclude_root_outputs == 3 ? 4 :
+                   (exclude_root_outputs == 2 ? 3 :
+                   (exclude_root_outputs != 0 ? 2 : 0)), 1, excluded_directory);
     if (fclose(out) != 0 && rc == 0) rc = -1;
     return rc == 0 ? 0 : (errno == 0 ? 1 : errno);
 }
