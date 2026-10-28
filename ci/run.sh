@@ -113,7 +113,17 @@ archive=$(awk '
   END { if (count != 1) exit 1; print path }
 ' "$RUNNER_TEMP/fo-bootstrap.log")
 archive=$(realpath "$src/$archive")
-module_dir=$(dirname "$(dirname "$archive")")
+# fpm may give the archive a different hash directory from its module outputs.
+module_dir=$(awk '
+  / -c / && /fo_cli_entry[.]f90([[:space:]]|$)/ {
+    for (i=1; i<=NF; i++) {
+      if ($i == "-J") { path=$(i+1); count++ }
+      else if ($i ~ /^-J.+/) { path=substr($i, 3); count++ }
+    }
+  }
+  END { if (count != 1 || path == "") exit 1; print path }
+' "$RUNNER_TEMP/fo-bootstrap.log")
+module_dir=$(realpath "$src/$module_dir")
 test -f "$module_dir/fo_cli_entry.mod"
 compiler=$(realpath "$FC")
 {
