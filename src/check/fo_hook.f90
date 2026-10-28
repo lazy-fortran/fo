@@ -303,7 +303,22 @@ contains
             if (size(included) > 0) request%include_labels = included
             call project_affected(backend, '', request, changed, model, selection, &
                 reasons, status, message)
-            if (status /= 0) exit validation
+            if (status /= 0) then
+                ! The hook allows no network fetch, so say how to populate them.
+                if (trim(message) == 'cannot acquire dependencies') then
+                    inquire(file=root//'/CMakeLists.txt', exist=found)
+                    if (found) then
+                        message = 'dependencies are not populated in this checkout '// &
+                            'and a commit never fetches them; configure its CMake '// &
+                            'build directory or run `fo build` here once, then commit again'
+                    else
+                        message = 'dependencies are not populated in this checkout '// &
+                            'and a commit never fetches them; run `fo build` here once, '// &
+                            'then commit again'
+                    end if
+                end if
+                exit validation
+            end if
             call sha256_file(trim(driver), driver_digest, status)
             identity_ok = .false.
             if (status == 0) call case_identity_capture(backend, driver_digest, '', &
