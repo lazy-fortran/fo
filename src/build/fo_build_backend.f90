@@ -823,6 +823,13 @@ contains
             return
         end if
 
+        if (len_trim(flags) > 0 .and. len_trim(context%configuration) > 0 .and. &
+            len_trim(context%configure_preset) == 0 .and. &
+            .not. context%build_root_hint) then
+            ! Fo's flags would persist in the project's default cache and leak
+            ! into later plain CMake/CTest runs there.
+            context%build_root = 'build/fo-cmake/'//trim(context%configuration)
+        end if
         effective_flags = flags
         if (allocated(context%profile)) then
             if (len_trim(context%profile) > 0 .and. len_trim(flags) > 0) then
