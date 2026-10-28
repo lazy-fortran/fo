@@ -3,11 +3,13 @@ program test_self_refresh
     !! `FO_RUN_SELF_REFRESH_ORACLE=1 FO_BIN=<worktree>/build/fo/app/fo fo test
     !! test_self_refresh`. Child commands use a temporary HOME and cache.
     use fo_util, only: temporary_root, wall_time_seconds
+    use fx_hash, only: sha256_file
+    use fo_test_harness, only: set_mode
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_long_long, &
         c_null_char
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit, dp => real64
     use fo_fs, only: fs_copy_exec, fs_identity, fs_make_dir, fs_remove_tree, &
-        fs_stat, fs_write_text
+        fs_stat, fs_write_text, fs_collect_files, fs_canonical_path
     use fo_process, only: argv_push, process_getcwd, process_getpid, &
         process_run_argv_logged
     implicit none
@@ -31,7 +33,7 @@ program test_self_refresh
 contains
 
     subroutine run_oracle()
-        character(len=4096) :: root, driver, copied_driver
+        character(len=4096) :: root, driver, copied_driver, source_root, fixture_root, frozen_root
         character(len=4096) :: home, cache, local_bin, global_fo, prefix
         character(len=4096) :: build_log, test_log, disabled_log, install_log
         character(len=4096) :: profile_a_log, profile_b_log, profile_a_hit_log
@@ -52,7 +54,7 @@ contains
         integer(c_long_long) :: profile_device_after, profile_inode_after
         integer :: root_status, env_status, exitcode, n_args, pid
         integer(c_int) :: env_rc
-        logical :: ok, exists
+        logical :: ok, exists, linked_fixture
 
         call get_environment_variable('FO_RUN_SELF_REFRESH_ORACLE', env, &
             status=env_status)
@@ -65,6 +67,16 @@ contains
         call process_getcwd(root, root_status)
         call check(root_status == 0, 'current worktree directory is available')
         if (root_status /= 0) return
+        linked_fixture = .false.
+        call get_environment_variable('FO_SELF_REFRESH_FIXTURE', fixture_root, &
+            status=env_status)
+        if (env_status == 0 .and. len_trim(fixture_root) > 0) linked_fixture = .true.
+        if (linked_fixture) then
+            call get_environment_variable('FO_GREMLIN_FROZEN_ROOT', frozen_root, &
+                status=env_status)
+            if (env_status == 0 .and. len_trim(frozen_root) > 0) root = frozen_root
+        end if
+        source_root = root
         inquire (file=trim(root)//'/src/build/fo_build_backend.f90', &
             exist=exists)
         call check(exists, 'oracle runs from the fo linked worktree')
@@ -72,14 +84,28 @@ contains
 
         call get_environment_variable('FO_BIN', driver, status=env_status)
         if (env_status /= 0) driver = ''
-        if (len_trim(driver) == 0) driver = trim(root)//'/build/fo/app/fo'
-        if (driver(1:1) /= '/') driver = trim(root)//'/'//trim(driver)
+        if (len_trim(driver) == 0) driver = trim(source_root)//'/build/fo/app/fo'
+        if (driver(1:1) /= '/') driver = trim(source_root)//'/'//trim(driver)
         call fs_stat(trim(driver), mtime_ns, size, ok)
         call check(ok, 'a current fo driver is available to start the build')
         if (.not. ok) return
-
         pid = process_getpid()
         write (pid_text, '(i0)') pid
+        if (linked_fixture) then
+            fixture_root = trim(fixture_root)//'-'//trim(pid_text)
+            call prepare_linked_fixture(trim(source_root), trim(driver), &
+                trim(fixture_root), ok)
+            call check(ok, 'linked fixture source and native core identity are verified')
+            if (.not. ok) return
+            root = fixture_root
+            linked_fixture = .true.
+            ! The fixture declares its frozen core as an external library.
+            env_rc = c_setenv('FO_LIBRARY_PATH'//c_null_char, &
+                trim(root)//'/core'//c_null_char, 1_c_int)
+            call check(env_rc == 0, 'linked fixture library path is applied')
+            if (env_rc /= 0) return
+        end if
+
         root = trim(root)
         home = temporary_root()//'/fo-self-refresh-oracle-'//trim(pid_text)//'/home'
         cache = temporary_root()//'/fo-self-refresh-oracle-'//trim(pid_text)//'/cache'
@@ -103,8 +129,9 @@ contains
         profile_a_hit_log = temporary_root()//'/fo-self-refresh-oracle-'// &
             trim(pid_text)//'/profile-a-hit.log'
         install_bin = trim(prefix)//'/bin/fo'
-        write (profile_a_flags, '(a,i0)') '-O3 -fmax-errors=', pid + 1
-        write (profile_b_flags, '(a,i0)') '-O0 -fmax-errors=', pid + 2
+        ! Distinct profiles exercise A/B/A without discarding reusable actions.
+        profile_a_flags = '-O3 -fmax-errors=1'
+        profile_b_flags = '-O0 -fmax-errors=2'
 
         call fs_remove_tree(temporary_root()//'/fo-self-refresh-oracle-'// &
             trim(pid_text))
@@ -239,6 +266,7 @@ contains
         end if
 
         if (n_fail == 0) then
+            if (linked_fixture) call fs_remove_tree(trim(root))
             call fs_remove_tree(temporary_root()//'/fo-self-refresh-oracle-'// &
                 trim(pid_text))
         else
@@ -247,6 +275,214 @@ contains
         end if
         call report()
     end subroutine run_oracle
+
+    subroutine prepare_linked_fixture(source_root, driver, fixture, ok)
+        character(len=*), intent(in) :: source_root, driver, fixture
+        logical, intent(out) :: ok
+        character(len=4096) :: archive, module_dir, receipt, compiler, line, origin
+        character(len=4096), allocatable :: paths(:), modules(:)
+        character(len=64), allocatable :: hashes(:)
+        character(len=64) :: actual
+        character(len=:), allocatable :: path, name
+        integer :: status, unit, n, i, n_modules, collect_status
+        logical :: exists
+
+        ok = .false.
+        call get_environment_variable('FO_SELF_REFRESH_CORE_ARCHIVE', archive, &
+            status=status)
+        if (status /= 0 .or. len_trim(archive) == 0) return
+        call get_environment_variable('FO_SELF_REFRESH_CORE_MODULE_DIR', module_dir, &
+            status=status)
+        if (status /= 0 .or. len_trim(module_dir) == 0) return
+        call get_environment_variable('FO_SELF_REFRESH_IDENTITY_RECEIPT', receipt, &
+            status=status)
+        if (status /= 0 .or. len_trim(receipt) == 0) return
+        call get_environment_variable('FO_SELF_REFRESH_COMPILER', compiler, status=status)
+        if (status /= 0 .or. len_trim(compiler) == 0) return
+        call get_environment_variable('FO_SELF_REFRESH_SOURCE_ROOT', origin, status=status)
+        if (status /= 0 .or. len_trim(origin) == 0) origin = source_root
+        allocate(paths(4096), hashes(4096), modules(4096))
+        open(newunit=unit, file=trim(receipt), status='old', action='read', iostat=status)
+        if (status /= 0) return
+        n = 0
+        do
+            read(unit, '(a)', iostat=status) line
+            if (status < 0) exit
+            if (status /= 0 .or. len_trim(line) < 67 .or. n == size(paths)) then
+                close(unit)
+                return
+            end if
+            if (line(65:66) /= '  ') then
+                close(unit)
+                return
+            end if
+            path = trim(line(67:))
+            call sha256_file(path, actual, status)
+            if (status /= 0 .or. actual /= line(:64)) then
+                write(error_unit, '(a)') 'fixture identity mismatch: '//path
+                close(unit)
+                return
+            end if
+            n = n + 1
+            paths(n) = fs_canonical_path(path)
+            hashes(n) = actual
+        end do
+        close(unit)
+        origin = fs_canonical_path(trim(origin))
+        do i = 1, n
+            if (index(paths(i), trim(origin)//'/') /= 1) cycle
+            name = trim(paths(i)(len_trim(origin) + 1:))
+            if (.not. (index(name, '/src/') == 1 .or. index(name, '/app/') == 1 .or. &
+                index(name, '/include/') == 1 .or. index(name, '/test-support/') == 1 .or. &
+                name == '/fpm.toml' .or. name == '/fpm.lock' .or. &
+                name == '/test/test_random_tests.f90')) cycle
+            if (.not. source_receipt_has(trim(source_root)//name, source_root, &
+                origin, paths, hashes, n)) return
+        end do
+        if (.not. receipt_has(archive, paths, n)) return
+        if (.not. receipt_has(compiler, paths, n)) return
+        call sha256_file(driver, actual, status)
+        if (status /= 0) return
+        exists = .false.
+        do i = 1, n
+            if (hashes(i) /= actual) cycle
+            path = trim(paths(i))
+            if (len(path) < 64) cycle
+            if (path(len(path) - 63:) == actual) exists = .true.
+        end do
+        if (.not. exists) return
+        if (.not. source_receipt_has(trim(source_root)//'/fpm.toml', source_root, origin, &
+            paths, hashes, n)) return
+        if (.not. source_receipt_has(trim(source_root)//'/test/test_random_tests.f90', &
+            source_root, origin, paths, hashes, n)) return
+        call require_receipt_tree(trim(source_root)//'/src', '', source_root, origin, paths, hashes, n, ok)
+        if (.not. ok) return
+        call require_receipt_tree(trim(source_root)//'/app', '', source_root, origin, paths, hashes, n, ok)
+        if (.not. ok) return
+        call require_receipt_tree(trim(source_root)//'/include', '', source_root, origin, paths, hashes, n, ok)
+        if (.not. ok) return
+        call require_receipt_tree(trim(source_root)//'/test-support', '', source_root, origin, paths, hashes, n, ok)
+        if (.not. ok) return
+        call require_receipt_tree(trim(source_root)//'/build/dependencies', &
+            '/src/', source_root, origin, paths, hashes, n, ok)
+        if (.not. ok) return
+        call require_receipt_tree(trim(source_root)//'/build/dependencies', &
+            '/include/', source_root, origin, paths, hashes, n, ok)
+        if (.not. ok) return
+        ok = .false.
+        call fs_collect_files(trim(source_root)//'/build/dependencies', '', &
+            'fpm.toml', '', modules, n_modules, ierr=collect_status)
+        if (collect_status /= 0) return
+        do i = 1, n_modules
+            if (.not. source_receipt_has(trim(modules(i)), source_root, origin, &
+                paths, hashes, n)) return
+        end do
+        inquire(file=trim(source_root)//'/fpm.lock', exist=exists)
+        if (exists) then
+            if (.not. source_receipt_has(trim(source_root)//'/fpm.lock', &
+                source_root, origin, paths, hashes, n)) return
+        end if
+        inquire(file=trim(fixture), exist=exists)
+        ok = .false.
+        if (exists) return
+        call fs_collect_files(trim(module_dir), '', '.mod', '', modules, n_modules, &
+            recursive=.false., ierr=collect_status)
+        if (collect_status /= 0 .or. n_modules == 0) return
+        if (.not. receipt_has(trim(module_dir)//'/fo_cli_entry.mod', paths, n)) return
+        if (.not. receipt_has(trim(module_dir)//'/fo_test_random.mod', paths, n)) return
+        call fs_make_dir(trim(fixture)//'/core/mod')
+        call fs_make_dir(trim(fixture)//'/app')
+        call fs_make_dir(trim(fixture)//'/test')
+        call fs_make_dir(trim(fixture)//'/fixture-src')
+        call fs_make_dir(trim(fixture)//'/src/build')
+        call copy_receipt_file(archive, trim(fixture)//'/core/libfo.a', &
+            paths, hashes, n, ok)
+        if (.not. ok) return
+        do i = 1, n_modules
+            path = trim(modules(i))
+            name = path(index(path, '/', back=.true.) + 1:)
+            call copy_receipt_file(path, trim(fixture)//'/core/mod/'//name, &
+                paths, hashes, n, ok)
+            if (.not. ok) return
+        end do
+        call copy_receipt_file(trim(origin)//'/app/main.f90', &
+            trim(fixture)//'/app/main.f90', paths, hashes, n, ok)
+        if (.not. ok) return
+        call copy_receipt_file(trim(origin)//'/test/test_random_tests.f90', &
+            trim(fixture)//'/test/test_random_tests.f90', paths, hashes, n, ok)
+        if (.not. ok) return
+        call copy_receipt_file(trim(origin)//'/src/build/fo_build_backend.f90', &
+            trim(fixture)//'/src/build/fo_build_backend.f90', paths, hashes, n, ok)
+        if (.not. ok) return
+        call fs_write_text(trim(fixture)//'/fpm.toml', &
+            'name="fo"'//new_line('a')//'[build]'//new_line('a')// &
+            'external-modules=["fo_cli_entry","fo_test_random"]'//new_line('a')// &
+            'link=["fo"]'//new_line('a')//'[library]'//new_line('a')// &
+            'source-dir="fixture-src"'//new_line('a')// &
+            'include-dir="core/mod"'//new_line('a')//'[dependencies]'//new_line('a')// &
+            'openmp="*"'//new_line('a'))
+    end subroutine prepare_linked_fixture
+
+    logical function receipt_has(path, paths, n) result(found)
+        character(len=*), intent(in) :: path, paths(:)
+        integer, intent(in) :: n
+        found = any(paths(:n) == fs_canonical_path(path))
+        if (.not. found) write(error_unit, '(a)') 'fixture receipt omits: '//trim(path)
+    end function receipt_has
+
+    logical function source_receipt_has(path, root, origin, paths, hashes, n) result(found)
+        character(len=*), intent(in) :: path, root, origin, paths(:), hashes(:)
+        integer, intent(in) :: n
+        character(len=64) :: actual
+        integer :: status, i
+        found = .false.
+        call sha256_file(path, actual, status)
+        if (status /= 0) return
+        do i = 1, n
+            if (paths(i) /= fs_canonical_path(trim(origin)//path(len_trim(root) + 1:))) cycle
+            found = hashes(i) == actual
+            return
+        end do
+    end function source_receipt_has
+
+    subroutine require_receipt_tree(directory, needle, source_root, origin, &
+            paths, hashes, n, ok)
+        character(len=*), intent(in) :: directory, needle, source_root, origin
+        character(len=*), intent(in) :: paths(:), hashes(:)
+        integer, intent(in) :: n
+        logical, intent(out) :: ok
+        character(len=4096), allocatable :: files(:)
+        integer :: count, i, status
+        logical :: exists
+        inquire(file=directory, exist=exists)
+        ok = .true.
+        if (.not. exists) return
+        allocate(files(4096))
+        call fs_collect_files(directory, '', '', needle, files, count, ierr=status)
+        ok = status == 0
+        if (.not. ok) return
+        do i = 1, count
+            ok = source_receipt_has(trim(files(i)), source_root, origin, paths, hashes, n)
+            if (.not. ok) return
+        end do
+    end subroutine require_receipt_tree
+
+    subroutine copy_receipt_file(source, destination, paths, hashes, n, ok)
+        character(len=*), intent(in) :: source, destination, paths(:), hashes(:)
+        integer, intent(in) :: n
+        logical, intent(out) :: ok
+        character(len=64) :: actual
+        integer :: i, status
+        ok = .false.
+        do i = 1, n
+            if (paths(i) /= fs_canonical_path(source)) cycle
+            if (fs_copy_exec(source, destination) /= 0) return
+            call sha256_file(destination, actual, status)
+            ok = status == 0 .and. actual == hashes(i)
+            if (ok) call set_mode(destination, int(o'444'))
+            return
+        end do
+    end subroutine copy_receipt_file
 
     subroutine run_profile_build(root, home, cache, source_driver, copied_driver, &
             flags, log_path, output, exitcode, env_rc)
