@@ -2,14 +2,14 @@ program test_hook_precommit
     use fo_test_harness, only: string_list_t, process_result_t, list_add, &
         make_scratch, make_directory, join_path, write_text, read_text, remove_tree, &
         assert_contains, assert_equal_string, assert_true, assert_process_ok, &
-        finish_assertions, copy_mtime
+        finish_assertions, copy_mtime, set_mode
     use fo_test_gremlin_oracle, only: gremlin_json, gremlin_field, gremlin_stop_lane
     use fo_test_json, only: json_value_t
     use fo_test_cli, only: resolve_driver, run_fo, run_external
     use, intrinsic :: iso_fortran_env, only: int64
     implicit none
     character(len=*), parameter :: nl = new_line('a')
-    character(len=:), allocatable :: driver, scratch, project, original, tree, session
+    character(len=:), allocatable :: driver, scratch, project, original, tree, session, config_before
     type(process_result_t) :: result
     type(json_value_t) :: reply
     type(string_list_t) :: args, environment, cmake_args
@@ -160,6 +160,48 @@ program test_hook_precommit
     call bounded_hook()
     call assert_process_ok(result, 'verify changed tag at same staged tree')
     call assert_contains(result%stdout, '"cache_hit":false', 'tag change invalidates proof')
+    call write_text(project//'/answer.f90', original//'! Staged hook input'//nl)
+    call git([character(len=64) :: 'add', 'answer.f90'])
+    call git([character(len=64) :: 'write-tree'])
+    tree = trim(result%stdout)
+    environment = string_list_t()
+    call list_add(environment, 'GIT_INDEX_FILE='//project//'/.git/index')
+    call hook(environment)
+    call assert_process_ok(result, 'Git commit index environment validates staged CMake')
+    call assert_contains(result%stdout, '"build":"PASS', 'inherited-index build passes')
+    call git([character(len=64) :: 'write-tree'])
+    call assert_equal_string(trim(result%stdout), tree, 'hook preserves original staged index')
+    call git([character(len=128) :: 'remote', 'add', 'origin', &
+        'https://example.invalid/hook-fixture'])
+    config_before = read_text(project//'/.git/config')
+    call write_text(scratch//'/hooks/pre-commit', '#!/bin/sh'//nl// &
+        'exec "$FO_TEST_HOOK_DRIVER" hook pre-commit --json'//nl)
+    call set_mode(scratch//'/hooks/pre-commit', int(o'755'))
+    args = string_list_t()
+    call list_add(args, '-c')
+    call list_add(args, 'core.hooksPath='//scratch//'/hooks')
+    call list_add(args, '--git-dir='//project//'/.git')
+    call list_add(args, '--work-tree='//project)
+    call list_add(args, 'hook')
+    call list_add(args, 'run')
+    call list_add(args, 'pre-commit')
+    environment = string_list_t()
+    call list_add(environment, 'FO_TEST_HOOK_DRIVER='//driver)
+    call list_add(environment, 'FO_CACHE_DIR='//scratch//'/cache')
+    call run_external('git', args, project, result, environment, timeout_ms=90000)
+    call assert_process_ok(result, 'actual Git hook validates staged CMake')
+    call assert_contains(result%stdout//result%stderr, '"build":"PASS', &
+        'actual Git hook build passes')
+    call assert_equal_string(read_text(project//'/.git/config'), config_before, &
+        'actual Git hook preserves original repository configuration')
+    call write_text(project//'/.git/config', config_before)
+    call git([character(len=64) :: 'write-tree'])
+    call assert_equal_string(trim(result%stdout), tree, 'actual Git hook preserves index')
+    call git([character(len=128) :: 'read-tree', tree(:index(tree, nl) - 1)])
+    call git([character(len=64) :: 'remote', 'remove', 'origin'])
+    call write_text(project//'/answer.f90', original)
+    call git([character(len=64) :: 'add', 'answer.f90'])
+
     environment = string_list_t()
     call list_add(environment, 'FO_CMAKE_ARGS=-DHOOK_CONTEXT_FLAG=1')
     call bounded_hook(environment)

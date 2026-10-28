@@ -46,6 +46,20 @@ int fo_c_hook_prepare(const char *root, const char *view, int build_cap,
     }
     free(arguments);
     if (status) return status;
+    /* The staged tree is materialized; private Git operations must not use
+       the caller's repository, objects or commit index. Keep auth/config. */
+    const char *git_context[] = {
+        "GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_SHALLOW_FILE", "GIT_GRAFT_FILE"
+    };
+    for (size_t i = 0; i < sizeof(git_context) / sizeof(git_context[0]); ++i) {
+#if defined(_WIN32) && !defined(__CYGWIN__)
+        if (_putenv_s(git_context[i], "")) return EINVAL;
+#else
+        if (unsetenv(git_context[i])) return errno;
+#endif
+    }
     snprintf(seconds, sizeof(seconds), "%d", build_cap);
 #if defined(_WIN32) && !defined(__CYGWIN__)
     if (_putenv_s("FO_CACHE_RELOCATABLE", "1") ||
