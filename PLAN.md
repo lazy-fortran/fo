@@ -7,6 +7,19 @@ Issues define observable success and this plan orders delivery. Apply
 smallest complete change, and preserve supported behaviour and independent
 failure detection. The workspace master plan, when present, owns delivery order.
 
+## Emergency scanner selection (2026-10-28)
+
+- [V] Explicit fallback permission in CMake scanning ignored
+  `FO_SCAN_FALLBACK=regex`, leaving generated nested expressions in the optional
+  AST frontend. The environment selector now applies whenever fallback is allowed;
+  an explicit mandatory-AST request remains authoritative.
+- [V] `test_scan` reports 136 passes and one failure before the fix, and 137
+  passes after it. Private driver SHA256
+  `5d533d73448c1324fab1505b34aecd1b294ad003888c3b2ec82e1009e50773bc`
+  passes the focused `test_cmake_named_cli` resident gate and the real
+  [TIAGO](https://github.com/itpplasma/tiago) recorded-ECE CMake/CTest gate.
+  General AST performance remains outside this repair.
+
 ## Standalone subproject CMake modules (2026-10-22)
 
 - [V] Deployed driver `99c98f8a` rejects the parent `cmake/Util.cmake`

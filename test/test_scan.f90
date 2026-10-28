@@ -14,6 +14,13 @@ program test_scan
     implicit none
 
     interface
+        integer(c_int) function c_setenv(name, value, overwrite) &
+            bind(C, name='fo_test_setenv')
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: name(*), value(*)
+            integer(c_int), value :: overwrite
+        end function c_setenv
+
         integer(c_int) function c_chdir(path) bind(C, name='chdir')
             import :: c_char, c_int
             character(kind=c_char), intent(in) :: path(*)
@@ -34,6 +41,7 @@ program test_scan
     call test_scan_ast_and_regex_dag()
     call test_scan_ast_submodule_spans()
     call test_scan_parse_diagnostic_and_fallback()
+    call test_forced_regex_with_fallback_permission()
     call test_scan_module_def()
     call test_scan_mixed_units()
     call test_scan_module_name_containing_procedure()
@@ -250,6 +258,40 @@ contains
             'scan_failure: fallback preserves bootstrap DAG')
         call fs_remove_file(trim(path))
     end subroutine test_scan_parse_diagnostic_and_fallback
+
+    subroutine test_forced_regex_with_fallback_permission()
+        type(scan_unit_t) :: info
+        integer :: ierr, env_status
+        character(len=512) :: path
+        character(len=64) :: previous_policy
+        character(len=80) :: lines(3)
+
+        previous_policy = ''
+        call get_environment_variable('FO_SCAN_FALLBACK', previous_policy)
+        lines(1) = 'module forced_regex_module'
+        lines(2) = 'use forced_regex_dependency'
+        lines(3) = 'end module forced_regex_module'
+        call make_tmp_path('fo_test_forced_regex', path, '.f90')
+        call write_file(path, lines, 3)
+        env_status = int(c_setenv('FO_SCAN_FALLBACK'//c_null_char, &
+            'regex'//c_null_char, 1_c_int))
+        call assert(env_status == 0, 'forced_regex: set scanner policy')
+        call scan_file(path, info, ierr, allow_regex_fallback=.true.)
+        call assert(ierr == 0, 'forced_regex: permitted scanner succeeds')
+        call assert(info%has_other_units, &
+            'forced_regex: lexical scan retains unknown nesting')
+        call assert(trim(info%module_name) == 'forced_regex_module' .and. &
+            info%n_deps == 1 .and. &
+            trim(info%deps(1)) == 'forced_regex_dependency', &
+            'forced_regex: module and dependency retained')
+        call scan_file(path, info, ierr, allow_regex_fallback=.false.)
+        call assert(ierr == 0 .and. .not. info%has_other_units, &
+            'forced_regex: explicit mandatory AST still takes precedence')
+        env_status = int(c_setenv('FO_SCAN_FALLBACK'//c_null_char, &
+            trim(previous_policy)//c_null_char, 1_c_int))
+        call assert(env_status == 0, 'forced_regex: restore scanner policy')
+        call fs_remove_file(trim(path))
+    end subroutine test_forced_regex_with_fallback_permission
 
     subroutine test_scan_module_def()
         type(scan_unit_t) :: info

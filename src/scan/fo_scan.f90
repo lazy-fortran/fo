@@ -89,11 +89,10 @@ contains
         ast_diagnostic = ''
         if (present(diagnostic)) diagnostic = ''
         ! The environment policy is also the emergency backend selector for
-        ! sources that can crash the optional AST frontend.  An explicit
-        ! allow_regex_fallback argument retains the AST-first unit-test/API
-        ! behavior; FO_SCAN_FALLBACK=regex skips the AST process entirely.
+        ! sources that can crash the optional AST frontend. Explicitly
+        ! requiring the AST still takes precedence over the environment.
         use_fallback = regex_fallback_policy(allow_regex_fallback)
-        if (use_fallback .and. .not. present(allow_regex_fallback)) then
+        if (use_fallback .and. regex_fallback_policy()) then
             call scan_file_regex(filename, unit_info, ierr)
             return
         end if
