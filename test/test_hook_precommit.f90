@@ -2,7 +2,8 @@ program test_hook_precommit
     use fo_test_harness, only: string_list_t, process_result_t, list_add, &
         make_scratch, make_directory, join_path, write_text, read_text, remove_tree, &
         assert_contains, assert_equal_string, assert_true, assert_process_ok, &
-        finish_assertions, copy_mtime, set_mode
+        finish_assertions, copy_mtime, set_mode, make_symlink
+    use fo_fs, only: fs_find_executable
     use fo_test_gremlin_oracle, only: gremlin_json, gremlin_field, gremlin_stop_lane
     use fo_test_json, only: json_value_t
     use fo_test_cli, only: resolve_driver, run_fo, run_external
@@ -433,6 +434,41 @@ program test_hook_precommit
     call hook(environment)
     call assert_process_ok(result, 'absolute populated build root stays usable in the hook')
     call assert_contains(result%stdout, '"fast_passed":1', 'absolute root test ran')
+
+    ! The staged configure keeps the compiler the project was configured with
+    ! instead of repeating CMake's search, which may find another compiler.
+    project = join_path(scratch, 'configured-compiler')
+    call write_text(project//'/CMakeLists.txt', 'cmake_minimum_required(VERSION 3.20)'//nl// &
+        'project(hook_compiler LANGUAGES Fortran)'//nl// &
+        'get_filename_component(selected "${CMAKE_Fortran_COMPILER}" NAME)'//nl// &
+        'if(NOT selected STREQUAL "hook-fortran")'//nl// &
+        '  message(FATAL_ERROR "unexpected compiler ${CMAKE_Fortran_COMPILER}")'//nl// &
+        'endif()'//nl//'enable_testing()'//nl// &
+        'add_test(NAME compiler_ok COMMAND "${CMAKE_COMMAND}" -E true)'//nl)
+    call git([character(len=64) :: 'init', '-q'])
+    call git([character(len=64) :: 'add', 'CMakeLists.txt'])
+    block
+        character(len=4096) :: compiler
+        logical :: located
+        call fs_find_executable('gfortran', compiler, located)
+        call assert_true(located, 'locate the real Fortran compiler')
+        call make_directory(project//'/toolchain')
+        call make_symlink(trim(compiler), project//'/toolchain/hook-fortran')
+    end block
+    call write_text(project//'/build/.cmake/api/v1/query/codemodel-v2', '')
+    cmake_args = string_list_t()
+    call list_add(cmake_args, '-S')
+    call list_add(cmake_args, '.')
+    call list_add(cmake_args, '-B')
+    call list_add(cmake_args, 'build')
+    call list_add(cmake_args, '-DCMAKE_Fortran_COMPILER='//project//'/toolchain/hook-fortran')
+    environment = string_list_t()
+    call list_add(environment, 'FC=')
+    call run_external('cmake', cmake_args, project, result, environment, timeout_ms=180000)
+    call assert_process_ok(result, 'configure with an explicitly chosen compiler')
+    call hook(environment)
+    call assert_process_ok(result, 'staged configure keeps the configured compiler')
+    call assert_contains(result%stdout, '"fast_passed":1', 'configured-compiler case ran')
 
     ! The project's own CTest labels keep reference-comparison cases out of a
     ! commit; without that declaration the hook runs them and is blocked.
