@@ -401,14 +401,61 @@ contains
     end subroutine find_fprettify_config
 
     subroutine format_project_file(config_file, filepath, exitcode)
+        !! A project that declares an fprettify configuration is formatted by
+        !! fprettify itself: the native formatter differs from it (select-type
+        !! guards, continuation alignment, OpenMP sentinels), and such projects
+        !! check their sources with fprettify.
         character(len=*), intent(in) :: config_file, filepath
         integer, intent(out) :: exitcode
 
         integer :: indent_width
 
+        if (use_fprettify(config_file)) then
+            call run_fprettify(config_file, filepath, exitcode)
+            return
+        end if
         call fprettify_indent_width(config_file, indent_width)
         call format_file_with_indent(filepath, exitcode, indent_width)
     end subroutine format_project_file
+
+    logical function use_fprettify(config_file)
+        character(len=*), intent(in) :: config_file
+
+        logical, save :: probed = .false., available = .false.
+        character(len=:), allocatable :: packed
+        integer :: n_args, probe_exit
+
+        use_fprettify = .false.
+        if (len_trim(config_file) == 0) return
+        if (.not. probed) then
+            n_args = 0
+            packed = ''
+            call argv_push(packed, n_args, 'fprettify')
+            call argv_push(packed, n_args, '--version')
+            call process_run_argv_logged('', packed, n_args, '/dev/null', &
+                .false., 60, probe_exit)
+            available = probe_exit == 0
+            probed = .true.
+        end if
+        use_fprettify = available
+    end function use_fprettify
+
+    subroutine run_fprettify(config_file, filepath, exitcode)
+        character(len=*), intent(in) :: config_file, filepath
+        integer, intent(out) :: exitcode
+
+        character(len=:), allocatable :: packed
+        integer :: n_args
+
+        n_args = 0
+        packed = ''
+        call argv_push(packed, n_args, 'fprettify')
+        call argv_push(packed, n_args, '-c')
+        call argv_push(packed, n_args, trim(config_file))
+        call argv_push(packed, n_args, trim(filepath))
+        call process_run_argv_logged('', packed, n_args, '/dev/null', &
+            .false., 120, exitcode)
+    end subroutine run_fprettify
 
     subroutine fprettify_indent_width(config_file, indent_width)
         character(len=*), intent(in) :: config_file
@@ -459,7 +506,11 @@ contains
             call delete_tmpfile(manifest)
             return
         end if
-        write (out_u, '(a)') 'fo-fmt-native-v2'
+        if (use_fprettify(config_file)) then
+            write (out_u, '(a)') 'fo-fmt-fprettify-v1'
+        else
+            write (out_u, '(a)') 'fo-fmt-native-v2'
+        end if
         if (len_trim(config_file) > 0) then
             call sha256_file(trim(config_file), file_hash, ierr)
             if (ierr == 0) write (out_u, '(a,1x,a)') &
