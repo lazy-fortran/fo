@@ -163,7 +163,7 @@ for name in "${focused_tests[@]}"; do prepare_args+=(--case "$name"); done
 
     )
     load_job_environment
-    echo 'Test project model and scoped Gremlin behavior'
+    step_model() {  # Test project model and scoped Gremlin behavior
     (
 export PATH="$FO_INSTALL_PREFIX/bin:$PATH"
 export FO="$FO_DRIVER_A" FO_BIN="$FO_DRIVER_A"
@@ -177,8 +177,8 @@ mkdir -p "$TMPDIR"
   test_gremlin_cmake test_atomic_link_artifacts test_cmake_native_build_cli
 
     )
-    load_job_environment
-    echo 'Test campaign, journal and coverage recovery'
+    }
+    step_recovery() {  # Test campaign, journal and coverage recovery
     (
 export PATH="$FO_INSTALL_PREFIX/bin:$PATH"
 export FO="$FO_DRIVER_A" FO_BIN="$FO_DRIVER_A"
@@ -191,8 +191,8 @@ mkdir -p "$TMPDIR"
   test_gremlin_coverage_restart test_gremlin_campaign_resolution
 
     )
-    load_job_environment
-    echo 'Test public fo test dispatch'
+    }
+    step_dispatch() {  # Test public fo test dispatch
     (
 export PATH="$FO_INSTALL_PREFIX/bin:$PATH"
 export FO="$FO_INSTALL_PREFIX/bin/fo"
@@ -202,8 +202,8 @@ FO_CACHE_DIR="$RUNNER_TEMP/fo-mcp-system" \
   "$FO_INSTALL_PREFIX/bin/fo" test --no-build test_mcp_system
 
     )
-    load_job_environment
-    echo 'Test Gremlin self refresh'
+    }
+    step_self_refresh() {  # Test Gremlin self refresh
     (
 export TMPDIR="$RUNNER_TEMP/fo-self-refresh-oracle-tmp"
 mkdir -p "$TMPDIR"
@@ -219,8 +219,8 @@ FO_CACHE_DIR="$RUNNER_TEMP/fo-self-refresh-oracle-cache" \
     test_self_refresh test_self_refresh_profile
 
     )
-    load_job_environment
-    echo 'Test install help side effects'
+    }
+    step_install_help() {  # Test install help side effects
     (
 export FO_RUN_INSTALL_HELP_ORACLE="1"
 export FO_DISABLE_SELF_REFRESH="1"
@@ -234,24 +234,24 @@ driver="$FO_DRIVER_A"
 FO_BIN="$driver" "$driver" test --no-build test_install_help
 
     )
-    load_job_environment
-    echo 'Test stale MCP recovery'
+    }
+    step_mcp_stale() {  # Test stale MCP recovery
     (
 driver="$FO_DRIVER_A"
 FO="$driver" FO_BIN="$driver" FO_DISABLE_SELF_REFRESH=1 FO_SELF_REFRESH=0 \
   "$driver" test --no-build test_mcp_gremlin_stale
 
     )
-    load_job_environment
-    echo 'Test MCP cancellation and diagnostics'
+    }
+    step_mcp_cancel() {  # Test MCP cancellation and diagnostics
     (
 driver="$FO_DRIVER_A"
 FO="$driver" FO_BIN="$driver" FO_DISABLE_SELF_REFRESH=1 FO_SELF_REFRESH=0 \
   "$driver" test --no-build test_mcp_cancel_error
 
     )
-    load_job_environment
-    echo 'Test standalone asynchronous process C fixtures'
+    }
+    step_c_fixtures() {  # Test standalone asynchronous process C fixtures
     (
 export FO_TEST_CLI="$FO_DRIVER_A"
 export TMPDIR="$RUNNER_TEMP/fo-process-fixtures"
@@ -282,7 +282,35 @@ cc -std=gnu11 -O2 -Wall -Wextra -Wno-unused-function \
 "$verifier_dir/nested-cancel"
 
     )
-    load_job_environment
+    }
+    # The groups keep separate scratch and caches, so they run concurrently;
+    # the serial sum dominated the merge-queue time.
+    run_lane() {
+        local name=$1 step
+        shift
+        for step in "$@"; do
+            echo "::group::$step"
+            "$step"
+            echo "::endgroup::"
+        done > "$RUNNER_TEMP/lane-$name.log" 2>&1
+    }
+    lanes=(model recovery self_refresh)
+    run_lane model step_model &
+    pids=($!)
+    run_lane recovery step_recovery step_dispatch step_mcp_stale step_mcp_cancel \
+        step_c_fixtures &
+    pids+=($!)
+    run_lane self_refresh step_self_refresh step_install_help &
+    pids+=($!)
+    failed=0
+    for i in "${!lanes[@]}"; do
+        status=0
+        wait "${pids[$i]}" || status=$?
+        echo "Lane ${lanes[$i]}: exit $status"
+        cat "$RUNNER_TEMP/lane-${lanes[$i]}.log"
+        [ "$status" -eq 0 ] || failed=1
+    done
+    exit "$failed"
     ;;
   *) echo "unknown CI tier: $tier" >&2; exit 2 ;;
 esac
