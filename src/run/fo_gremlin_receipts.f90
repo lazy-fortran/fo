@@ -130,6 +130,7 @@ contains
         character(len=NAME_LEN) :: gate_success_cases(MAX_NODES)
         character(len=16) :: gate_success_status(MAX_NODES)
         integer :: i, j, ios, gate_count, gate_success_count, journal_index, at
+        integer :: receipt_epoch
         logical :: build_passed, gate_failure
 
         ierr = 0
@@ -256,6 +257,14 @@ contains
                     status_is_failure(trim(status_name))) &
                     input%failure_observed = .true.
                 if (trim(receipt_generation) /= trim(active_id)) cycle
+                if (have_coverage .and. trim(status_name) == 'TIMEOUT') then
+                    call gremlin_json_field(records(i)%json, 'coverage_epoch', raw)
+                    read(raw, *, iostat=ios) receipt_epoch
+                    if (ios == 0) then
+                        ! A deliberate deadline change renews timeout obligations.
+                        if (receipt_epoch < coverage%epoch) cycle
+                    end if
+                end if
                 if (trim(case_id) == '<build>' .and. &
                     trim(status_name) == 'BUILD_PASS') build_passed = .true.
                 if (status_is_failure(trim(status_name))) then
@@ -608,7 +617,7 @@ contains
         call fs_make_dir(trim(session%state_dir)//'/case-index')
         call case_index_path(session, case_name, path)
         if (c_publish_file(trim(path)//c_null_char, bytes, &
-                int(size(bytes), c_size_t)) /= 0) then
+            int(size(bytes), c_size_t)) /= 0) then
             ierr = 1
             message = 'cannot publish the case receipt index'
         end if
@@ -707,7 +716,7 @@ contains
                 if (entries(j)%pending .and. len_trim(identity) == HASH_LEN) then
                     if (entries(j)%identity == identity .and. &
                         strict_descendant(generation, entries(j)%generation, &
-                            children, parents)) entries(j)%pending = .false.
+                        children, parents)) entries(j)%pending = .false.
                 end if
                 if (entries(j)%pending) cycle
             else
@@ -741,7 +750,7 @@ contains
             if (.not. failures(i)%pending .or. failures(i)%name /= name) cycle
             if (failures(i)%identity /= identity) cycle
             if (strict_descendant(generation, failures(i)%generation, &
-                    children, parents)) completion = failures(i)%completion
+                children, parents)) completion = failures(i)%completion
             return
         end do
     end subroutine campaign_failure_resolution
@@ -868,7 +877,7 @@ contains
             if (name /= case_name .or. verdict /= 'PASS') cycle
             if (identity /= receipt_identity) cycle
             if (strict_descendant(generation%identity, receipt_generation, &
-                    children, parents)) then
+                children, parents)) then
                 passed = .true.
                 return
             end if
