@@ -139,6 +139,11 @@ source-dir = "test"
 main = "test_fmt_cli.f90"
 
 [[test]]
+name = "test_fmt_fprettify_cli"
+source-dir = "test"
+main = "test_fmt_fprettify_cli.f90"
+
+[[test]]
 name = "test_platform_link_cli"
 source-dir = "test"
 main = "test_platform_link_cli.f90"
