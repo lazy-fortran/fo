@@ -62,6 +62,11 @@ source-dir = "test"
 main = "test_cmake_named_cli.f90"
 
 [[test]]
+name = "test_cmake_profile_cache"
+source-dir = "test"
+main = "test_cmake_profile_cache.f90"
+
+[[test]]
 name = "test_native_cmake_cli"
 source-dir = "test"
 main = "test_native_cmake_cli.f90"
