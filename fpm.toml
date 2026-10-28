@@ -338,6 +338,10 @@ path = "src/util/fo_path.h"
 role = "test-fixture"
 
 [[extra.fo.inputs]]
+path = "src/util/fo_sys.h"
+role = "test-fixture"
+
+[[extra.fo.inputs]]
 path = "test/fixtures/gremlin_state_feature_macros.c.inc"
 role = "test-fixture"
 
