@@ -22,6 +22,7 @@ module fo_gremlin_coverage
         integer :: epoch = 1
         integer :: seed = 1
         integer :: cursor = 1
+        integer :: timeout_seconds = -1
         character(len=:), allocatable :: path
     end type coverage_epoch_t
 
@@ -52,19 +53,20 @@ contains
     ! All mutations reload the latest state under the same lock as publication.
     ! A process-local snapshot must never overwrite another process's completion.
     subroutine coverage_open(path, generation, names, n_names, seed, state, status, &
-            message, advance_completed, persist)
+            message, advance_completed, persist, timeout_seconds)
         character(len=*), intent(in) :: path, generation, names(:)
         integer, intent(in) :: n_names, seed
         type(coverage_epoch_t), intent(out) :: state
         integer, intent(out) :: status
         character(len=*), intent(out) :: message
         logical, intent(in), optional :: advance_completed, persist
+        integer, intent(in), optional :: timeout_seconds
         integer(c_int) :: fd
 
         call lock_state(path, fd, status, message)
         if (status /= COVERAGE_OK) return
         call coverage_open_locked(path, generation, names, n_names, seed, state, &
-            status, message, advance_completed, persist)
+            status, message, advance_completed, persist, timeout_seconds)
         call coverage_unlock(fd)
     end subroutine coverage_open
 
@@ -201,13 +203,14 @@ contains
     end subroutine coverage_read_view_path
 
     subroutine coverage_open_locked(path, generation, names, n_names, seed, state, &
-            status, message, advance_completed, persist)
+            status, message, advance_completed, persist, timeout_seconds)
         character(len=*), intent(in) :: path, generation, names(:)
         integer, intent(in) :: n_names, seed
         type(coverage_epoch_t), intent(out) :: state
         integer, intent(out) :: status
         character(len=*), intent(out) :: message
         logical, intent(in), optional :: advance_completed, persist
+        integer, intent(in), optional :: timeout_seconds
 
         character(len=NAME_LEN), allocatable :: canonical(:)
         character(len=HASH_LEN) :: digest
@@ -269,10 +272,18 @@ contains
             end if
             read(unit, '(a)', iostat=ios) text
             if (ios == 0) then
-                read(unit, *, iostat=ios) old_epoch, old_seed, old_cursor, old_count
+                if (trim(text) /= trim(generation)//'|'//trim(digest)) ios = 1
             end if
             if (ios == 0) then
-                if (trim(text) /= trim(generation)//'|'//trim(digest)) ios = 1
+                read(unit, '(a)', iostat=ios) text
+                if (ios == 0) then
+                    read(text, *, iostat=ios) old_epoch, old_seed, old_cursor, old_count
+                end if
+                if (ios == 0) then
+                    read(text, *, iostat=ios) old_epoch, old_seed, old_cursor, &
+                        old_count, state%timeout_seconds
+                    if (ios == iostat_end) ios = 0
+                end if
             end if
             if (ios == 0) then
                 if (old_count /= n_names) ios = 1
@@ -306,6 +317,17 @@ contains
                 message = 'coverage state is malformed or belongs to another inventory'
                 return
             end if
+        end if
+        if (present(timeout_seconds)) then
+            if (timeout_seconds > 0 .and. timeout_seconds /= state%timeout_seconds) then
+                if (any(state%outcome == 'TIMEOUT')) then
+                    ! Old timeout receipts must not discharge the renewed obligations.
+                    state%epoch = state%epoch + 1
+                    state%cursor = 1
+                    where (state%outcome == 'TIMEOUT') state%outcome = 'UNKNOWN'
+                end if
+            end if
+            state%timeout_seconds = timeout_seconds
         end if
         if (advance .and. coverage_remaining(state) == 0) then
             state%epoch = state%epoch + 1
@@ -649,8 +671,8 @@ contains
 
         allocate(lines(size(state%inventory) + 2))
         lines(1) = trim(state%generation)//'|'//trim(state%inventory_digest)
-        write(metadata, '(4(i0,1x))') state%epoch, state%seed, state%cursor, &
-            size(state%inventory)
+        write(metadata, '(5(i0,1x))') state%epoch, state%seed, state%cursor, &
+            size(state%inventory), state%timeout_seconds
         lines(2) = trim(metadata)
         do i = 1, size(state%inventory)
             lines(i + 2) = trim(state%inventory(i))//'|'//trim(state%outcome(i))
