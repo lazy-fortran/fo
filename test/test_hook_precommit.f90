@@ -435,6 +435,21 @@ program test_hook_precommit
     call assert_process_ok(result, 'absolute populated build root stays usable in the hook')
     call assert_contains(result%stdout, '"fast_passed":1', 'absolute root test ran')
 
+    ! A fresh checkout whose Git dependency was never populated cannot build in
+    ! the offline hook; the diagnostic names the step that populates it.
+    project = join_path(scratch, 'unpopulated-dependency')
+    call write_text(project//'/fpm.toml', 'name = "hook_unpopulated"'//nl// &
+        '[dependencies]'//nl//'hookdep = { git = "https://example.invalid/hookdep.git" }'//nl)
+    call write_text(project//'/src/answer.f90', original)
+    call git([character(len=64) :: 'init', '-q'])
+    call git([character(len=64) :: 'add', 'fpm.toml', 'src/answer.f90'])
+    call hook()
+    call assert_true(result%exit_code /= 0, 'unpopulated dependency blocks the commit')
+    call assert_contains(result%stdout, 'dependencies are not populated in this checkout', &
+        'hook explains the missing dependency checkout')
+    call assert_contains(result%stdout, 'run `fo build` here once', &
+        'hook names the command that populates dependencies')
+
     ! The staged configure keeps the compiler the project was configured with
     ! instead of repeating CMake's search, which may find another compiler.
     project = join_path(scratch, 'configured-compiler')
