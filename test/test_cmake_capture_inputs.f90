@@ -29,7 +29,7 @@ program test_cmake_capture_inputs
     type(process_result_t) :: process
     integer :: ierr, cleanup_status, i
     logical :: header_found, generated_found, present, found
-    logical :: implicit_found, declared_found, child_found
+    logical :: implicit_found, declared_found, child_found, mpi_found
     character(:), allocatable :: compiler_args, original_args, original_toolchain
     character(len=4096) :: compiler_paths(3)
     character(len=8), parameter :: compiler_tools(3) = &
@@ -53,6 +53,8 @@ program test_cmake_capture_inputs
     sdk = scratch//'/sdk/include'
     call make_directory(scratch//'/compiler/include/package')
     call make_directory(scratch//'/declared/include')
+    call make_directory(scratch//'/mpi/include')
+    call write_text(scratch//'/mpi/include/mpi.h', '#define MPI_NATIVE 1'//nl)
     call write_text(scratch//'/compiler/include/implicit.h', '#define IMPLICIT 5'//nl)
     call write_text(scratch//'/compiler/include/package/child.h', '#define CHILD 6'//nl)
     call write_text(scratch//'/declared/include/declared.h', '#define DECLARED 8'//nl)
@@ -74,6 +76,9 @@ program test_cmake_capture_inputs
         '/compiler/include/package" CACHE PATH "headers")'//nl// &
         'set_property(CACHE CMAKE_C_COMPILER PROPERTY HELPSTRING '// &
         '"authored compiler help")'//nl// &
+        'set(MPI_Fortran_COMPILER_INCLUDE_DIRS "'//scratch// &
+        '/mpi/include;${DECLARED_SOURCE_DIR}/include" '// &
+        'CACHE STRING "native MPI wrapper includes")'//nl// &
         'include(CTest)'//nl// &
         'include(GNUInstallDirs)'//nl// &
         'set(SDK_INCLUDE "'//scratch//'/include-alias" CACHE INTERNAL "headers")'//nl// &
@@ -89,7 +94,7 @@ program test_cmake_capture_inputs
         'target_include_directories(probe PRIVATE '// &
         '"${CMAKE_SOURCE_DIR}/optional/include" '// &
         '"${CMAKE_SOURCE_DIR}/include" '// &
-        '"${SDK_INCLUDE}" "${LOCAL_INCLUDE}")'//nl// &
+        '"${SDK_INCLUDE}" "${LOCAL_INCLUDE}" "'//scratch//'/mpi/include")'//nl// &
         'target_include_directories(probe SYSTEM PRIVATE "'// &
         scratch//'/compiler/include" "${DECLARED_SOURCE_DIR}/include" '// &
         '"${CHILD_INCLUDE}" "${SDK_INCLUDE}")'//nl// &
@@ -133,6 +138,7 @@ program test_cmake_capture_inputs
         header_found = .false.
         generated_found = .false.
         implicit_found = .false.
+        mpi_found = .false.
         declared_found = .false.
         child_found = .false.
         do i = 1, inventory%entry_count
@@ -141,6 +147,7 @@ program test_cmake_capture_inputs
                     header_found = len_trim(entry%content_digest) == 64
                 end if
                 if (entry%relative_path == 'implicit.h') implicit_found = .true.
+                if (entry%relative_path == 'mpi.h') mpi_found = .true.
                 if (entry%relative_path == 'include/declared.h') &
                     declared_found = len_trim(entry%content_digest) == 64
                 if (entry%relative_path == 'child.h') &
@@ -151,6 +158,7 @@ program test_cmake_capture_inputs
         end do
         call assert_true(.not. implicit_found, &
             'native compiler implicit include stays delegated')
+        call assert_true(.not. mpi_found, 'native MPI wrapper include stays delegated')
         call assert_true(declared_found, &
             'declared SYSTEM source overrides compiler implicit delegation')
         call assert_true(child_found, &
