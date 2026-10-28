@@ -261,14 +261,43 @@ jobs:
 
       - name: Install fpm
         run: |
-          curl --fail --location -o "$HOME/.local/bin/fpm" \
-            https://github.com/fortran-lang/fpm/releases/download/v0.13.0/fpm-0.13.0-linux-x86_64-gcc-12
-          chmod +x "$HOME/.local/bin/fpm"
-          "$HOME/.local/bin/fpm" --version
+          set -euo pipefail
+          source_sha=001cff6cf1145f215baa0888ba27acc06cea30a89b79d1a8be97db3fffbc8cd2
+          binary_sha=bd2b6fe90f836cb4dc8d135dde97ceede6545133ed1d073c65da6951180cd1e5
+          prebuilt=/opt/ci-tools/fpm-v0.13.0-openmp
+          tool_dir="$(mktemp -d "$RUNNER_TEMP/fpm-v0.13.0-openmp.XXXXXX")"
+          # The release's GCC12 binary is serial; qualify the image's dynamic build.
+          if test -x "$prebuilt/fpm" && test -s "$prebuilt/compiler.txt" &&
+             test -f "$prebuilt/fpm-0.13.0.F90" &&
+             test "$(sha256sum "$prebuilt/fpm" | cut -d' ' -f1)" = "$binary_sha" &&
+             test "$(sha256sum "$prebuilt/fpm-0.13.0.F90" | cut -d' ' -f1)" = "$source_sha"; then
+            install -m 0555 "$prebuilt/fpm" "$tool_dir/fpm"
+            test "$(sha256sum "$tool_dir/fpm" | cut -d' ' -f1)" = "$binary_sha"
+            echo 'fpm acquisition: pinned Ubuntu GNU13 image build'
+            cat "$prebuilt/compiler.txt"
+          else
+            echo 'fpm acquisition: exact official release source bootstrap'
+            curl --fail --location --max-time 120 -o "$tool_dir/fpm-0.13.0.F90" \
+              https://github.com/fortran-lang/fpm/releases/download/v0.13.0/fpm-0.13.0.F90
+            echo "$source_sha  $tool_dir/fpm-0.13.0.F90" | sha256sum --check --strict -
+            mkdir "$tool_dir/mods"
+            gfortran --version
+            # Official v0.13.0 README single-source recipe, with dynamic OpenMP.
+            timeout 600s gfortran -O2 -fopenmp "$tool_dir/fpm-0.13.0.F90" \
+              -J "$tool_dir/mods" -o "$tool_dir/fpm"
+            chmod 0555 "$tool_dir/fpm"
+          fi
+          echo 'fpm source: fortran-lang/fpm v0.13.0 (90bb83a70e9bcf04d941fb43cca014ae1c0fc5ea)'
+          echo "fpm source SHA256: $source_sha"
+          echo 'fpm recipe: gfortran -O2 -fopenmp; dynamic linking'
+          sha256sum "$tool_dir/fpm"
+          "$tool_dir/fpm" --version
+          echo "FPM_NATIVE=$tool_dir/fpm" >> "$GITHUB_ENV"
 
       - name: Build Fo and pin its exact image
         run: |
-          fpm install --compiler flang-${{ matrix.llvm }} --prefix "$HOME/.local"
+          OMP_NUM_THREADS="$FO_JOBS" "$FPM_NATIVE" install \
+            --compiler flang-${{ matrix.llvm }} --prefix "$HOME/.local"
           digest="$(sha256sum "$HOME/.local/bin/fo" | cut -d' ' -f1)"
           driver="$RUNNER_TEMP/fo-driver-pins/$digest"
           mkdir -p "$(dirname "$driver")"
