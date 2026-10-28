@@ -1129,13 +1129,13 @@ contains
             if (exitcode /= 0) return
             call backend_test_cases(b, names, size(names), exitcode, &
                 log_file=log_file, flags=flags, no_build=no_build, &
-                configured=.true., lift_preset_filter=lift)
+                configured=.true., lift_preset_filter=lift, model=model)
             return
         end if
         exitcode = 0
         if (.not. no_build) then
             call backend_test_cases(b, names, size(names), exitcode, &
-                log_file=log_file, flags=flags, configured=.true., build_only=.true.)
+                log_file=log_file, flags=flags, configured=.true., build_only=.true., model=model)
             if (exitcode /= 0) return
         end if
         call listed_cases(b, flags, model, pack(cases, native), &
@@ -1161,7 +1161,7 @@ contains
         call backend_test_cases(b, pack_names(names, .not. native), &
             count(.not. native), code, log_file=log_file, flags=flags, &
             no_build=.true., configured=.true., lift_preset_filter=lift, &
-            append_log=.true.)
+            append_log=.true., model=model)
         if (code /= 0) exitcode = code
     end subroutine run_cmake_cases
 

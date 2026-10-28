@@ -1,16 +1,18 @@
 program test_cmake_named_cli
+    use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
     use fo_test_harness, only: process_result_t, string_list_t, list_add
     use fo_test_harness, only: make_scratch, join_path, current_directory
     use fo_test_harness, only: write_lines, remove_path, remove_tree
     use fo_test_harness, only: assert_equal_integer, assert_equal_string
     use fo_test_harness, only: assert_file_exists, assert_file_absent
-    use fo_test_harness, only: assert_process_ok, assert_true
+    use fo_test_harness, only: assert_process_ok, assert_true, assert_contains
     use fo_test_cli, only: resolve_driver, run_fo, parse_json_report, exercise_harness
     use fo_test_json, only: json_value_t, json_member, json_element, json_size
     use fo_test_json, only: json_string_value
     use fo_test_harness, only: finish_assertions
     use fo_test_harness, only: run_process
-    use fo_test_harness, only: harness_probe_entry
+    use fo_test_harness, only: harness_probe_entry, environment_value, make_symlink, &
+        resolve_test_executable
     implicit none
 
     character(:), allocatable :: driver, project, scratch, selected, neighbor
@@ -19,6 +21,7 @@ program test_cmake_named_cli
     type(process_result_t) :: result
     type(json_value_t) :: report, tests, entry, field
 
+    call ctest_xml_wrapper_entry()
     call harness_probe_entry()
     selected = 'solovev_axis_regularity'
     neighbor = selected // '_extra'
@@ -68,12 +71,343 @@ program test_cmake_named_cli
     call assert_file_absent(neighbor_receipt, 'no-match does not run a similar case')
 
     call remove_tree(scratch)
+    call directory_local_names()
+    call directory_registry_rejection()
     call profile_isolation()
     call build_only_planned_targets()
     call preset_filter_execution()
     call finish_assertions()
     write(*, '(a)') 'cmake-named-cli: exact CTest ID ran alone; no-match failed'
 contains
+    subroutine directory_registry_rejection()
+        character(:), allocatable :: root
+        character(len=:), allocatable :: lines(:)
+        type(string_list_t) :: args, env
+        type(process_result_t) :: observed
+
+        call make_scratch('fo-ctest-registry-proof', root)
+        lines = [character(len=192) :: &
+            'cmake_minimum_required(VERSION 3.20)', &
+            'project(registry_proof NONE)', 'enable_testing()', &
+            'configure_file(runtime.in runtime.cmake @ONLY)', &
+            'configure_file(actual.in actual.cmake @ONLY)', &
+            'configure_file(false.in false/CTestTestfile.cmake @ONLY)', &
+            'set_property(DIRECTORY PROPERTY TEST_INCLUDE_FILES '// &
+            '"${CMAKE_BINARY_DIR}/runtime.cmake")', 'add_subdirectory(b)']
+        call write_lines(join_path(root, 'CMakeLists.txt'), lines)
+        lines = [character(len=192) :: &
+            'if(FALSE)', '  subdirs("@CMAKE_BINARY_DIR@/false")', 'endif()', &
+            'set(actual "@CMAKE_BINARY_DIR@/actual.cmake")', 'include("${actual}")']
+        call write_lines(join_path(root, 'runtime.in'), lines)
+        lines = [character(len=192) :: &
+            'add_test(duplicate "@CMAKE_COMMAND@" -E touch "@CMAKE_BINARY_DIR@/real.ran")']
+        call write_lines(join_path(root, 'actual.in'), lines)
+        lines = [character(len=192) :: &
+            'add_test(duplicate "@CMAKE_COMMAND@" -E touch "@CMAKE_BINARY_DIR@/false.ran")']
+        call write_lines(join_path(root, 'false.in'), lines)
+        lines = [character(len=192) :: &
+            'add_test(NAME duplicate COMMAND "${CMAKE_COMMAND}" -E touch '// &
+            '"${CMAKE_BINARY_DIR}/b.ran")']
+        call write_lines(join_path(root, 'b/CMakeLists.txt'), lines)
+        call list_add(args, 'cmake')
+        call list_add(args, '-S')
+        call list_add(args, root)
+        call list_add(args, '-B')
+        call list_add(args, join_path(root, 'build'))
+        call run_process(args, root, observed)
+        call assert_process_ok(observed, 'configure adversarial registry oracle')
+        args = string_list_t()
+        call list_add(args, 'ctest')
+        call list_add(args, '--test-dir')
+        call list_add(args, join_path(root, 'build'))
+        call list_add(args, '-I')
+        call list_add(args, '1,1')
+        call run_process(args, root, observed)
+        call assert_process_ok(observed, 'native CTest evaluates dynamic registry')
+        call assert_file_exists(join_path(root, 'build/real.ran'), 'actual root test ran')
+        call assert_file_absent(join_path(root, 'build/false.ran'), 'false directory unrun')
+        call remove_path(join_path(root, 'build/real.ran'))
+        args = string_list_t()
+        call list_add(args, 'test')
+        call list_add(args, 'false::duplicate')
+        call list_add(args, '--json=full')
+        call list_add(env, 'FO_BACKEND=cmake')
+        call run_fo(driver, args, root, join_path(root, 'cache'), observed, env)
+        call assert_true(observed%exit_code /= 0, 'dynamic registry cannot invent a test ID')
+        call assert_contains(observed%stderr, 'unsupported CTest directory registry script', &
+            'unsupported dynamic registry is explicit')
+        call assert_file_absent(join_path(root, 'build/real.ran'), 'unproven test stays unrun')
+        call assert_file_absent(join_path(root, 'build/false.ran'), 'false directory stays unrun')
+        call remove_tree(root)
+    end subroutine directory_registry_rejection
+
+    subroutine ctest_xml_wrapper_entry()
+        type(string_list_t) :: args
+        type(process_result_t) :: observed
+        character(:), allocatable :: mode, argument, xml, cwd
+        character(len=:), allocatable :: lines(:)
+        integer :: i, length
+        logical :: next_xml
+
+        mode = environment_value('FO_CTEST_XML_MODE')
+        if (len(mode) == 0) return
+        call list_add(args, environment_value('FO_REAL_CTEST'))
+        xml = ''
+        next_xml = .false.
+        do i = 1, command_argument_count()
+            call get_command_argument(i, length=length)
+            allocate (character(len=length) :: argument)
+            call get_command_argument(i, argument)
+            call list_add(args, argument)
+            if (next_xml) xml = argument
+            next_xml = argument == '--output-junit'
+            deallocate (argument)
+        end do
+        call current_directory(cwd)
+        call run_process(args, cwd, observed)
+        write (output_unit, '(a)', advance='no') observed%stdout
+        write (error_unit, '(a)', advance='no') observed%stderr
+        if (len(xml) > 0) then
+            if (mode == 'missing') call remove_path(xml)
+            if (mode == 'malformed') then
+                lines = [character(len=16) :: '<testsuite><bad>']
+                call write_lines(xml, lines)
+            end if
+        end if
+        if (observed%exit_code /= 0) stop 1
+        stop
+    end subroutine ctest_xml_wrapper_entry
+
+    subroutine directory_local_names()
+        character(:), allocatable :: root, receipt, executable, real_ctest
+        character(len=:), allocatable :: lines(:)
+        type(string_list_t) :: args, env, command
+        type(process_result_t) :: observed
+        type(json_value_t) :: doc, results, item
+        character(len=12), parameter :: selectors(*) = &
+            [character(len=12) :: 'a::duplicate', 'b::duplicate', 'unique']
+        character(len=6), parameter :: markers(*) = &
+            [character(len=6) :: 'a.ran', 'b.ran', 'u.ran']
+        integer :: i, j, mode, ending
+        logical :: found
+
+        call make_scratch('fo-ctest-local-names', root)
+        lines = [character(len=192) :: &
+            'cmake_minimum_required(VERSION 3.20)', &
+            'project(local_names NONE)', 'enable_testing()', &
+            'file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/shared")', &
+            'configure_file(registration.cmake.in outside/registration.cmake @ONLY)', &
+            'add_subdirectory(a)', 'add_subdirectory(b)', &
+            'add_test(NAME unique COMMAND "${CMAKE_COMMAND}" -E touch '// &
+            '"${CMAKE_BINARY_DIR}/u.ran")']
+        call write_lines(join_path(root, 'CMakeLists.txt'), lines)
+        lines = [character(len=192) :: &
+            'set_property(DIRECTORY PROPERTY TEST_INCLUDE_FILES '// &
+            '"${CMAKE_BINARY_DIR}/outside/registration.cmake")']
+        call write_lines(join_path(root, 'a/CMakeLists.txt'), lines)
+        lines = [character(len=192) :: &
+            'add_test(duplicate "@CMAKE_COMMAND@" -E touch '// &
+            '"@CMAKE_BINARY_DIR@/a.ran")', &
+            'set_tests_properties(duplicate PROPERTIES WORKING_DIRECTORY '// &
+            '"@CMAKE_BINARY_DIR@/shared")']
+        call write_lines(join_path(root, 'registration.cmake.in'), lines)
+        lines = [character(len=192) :: &
+            'add_test(NAME duplicate COMMAND "${CMAKE_COMMAND}" -E touch '// &
+            '"${CMAKE_BINARY_DIR}/b.ran")', &
+            'set_tests_properties(duplicate PROPERTIES WORKING_DIRECTORY '// &
+            '"${CMAKE_BINARY_DIR}/shared")']
+        call write_lines(join_path(root, 'b/CMakeLists.txt'), lines)
+        call list_add(command, 'cmake')
+        call list_add(command, '-S')
+        call list_add(command, root)
+        call list_add(command, '-B')
+        call list_add(command, join_path(root, 'build'))
+        call run_process(command, root, observed)
+        call assert_process_ok(observed, 'configure directory-local CTest oracle')
+        do mode = 0, 2
+            env = string_list_t()
+            call list_add(env, 'FO_BACKEND=cmake')
+            if (mode == 2) call list_add(env, 'FO_CTEST_DELEGATE=1')
+            do i = 1, size(selectors)
+                if (mode == 0) then
+                    args = string_list_t()
+                    call list_add(args, 'ctest')
+                    call list_add(args, '--test-dir')
+                    call list_add(args, join_path(root, 'build'))
+                    call list_add(args, '-I')
+                    select case (i)
+                    case (1)
+                        call list_add(args, '2,2')
+                    case (2)
+                        call list_add(args, '3,3')
+                    case (3)
+                        call list_add(args, '1,1')
+                    end select
+                    call run_process(args, root, observed)
+                else
+                    args = string_list_t()
+                    call list_add(args, 'test')
+                    call list_add(args, trim(selectors(i)))
+                    call list_add(args, '--json=full')
+                    call run_fo(driver, args, root, join_path(root, 'cache'), observed, env)
+                    call parse_json_report(observed, doc, 'directory-local CTest report')
+                    results = json_member(doc, 'tests')
+                    call assert_equal_integer(json_size(results), 1, &
+                        'only the requested directory-local test is reported')
+                    item = json_element(results, 1)
+                    call assert_equal_string(json_string_value(json_member(item, 'name')), &
+                        trim(selectors(i)), 'directory-local public test ID')
+                end if
+                call assert_process_ok(observed, 'selected directory-local test')
+                do j = 1, size(markers)
+                    receipt = join_path(root, 'build/'//trim(markers(j)))
+                    if (j == i) then
+                        call assert_file_exists(receipt, 'requested local test executed')
+                    else
+                        call assert_file_absent(receipt, 'unselected local test stayed unrun')
+                    end if
+                    call remove_path(receipt)
+                end do
+            end do
+        end do
+        args = string_list_t()
+        call list_add(args, 'sh')
+        call list_add(args, '-c')
+        call list_add(args, 'command -v ctest')
+        call run_process(args, root, observed)
+        call assert_process_ok(observed, 'locate native CTest for XML wrapper')
+        ending = index(observed%stdout, achar(10))
+        real_ctest = observed%stdout(:ending - 1)
+        call resolve_test_executable(executable, found)
+        call assert_true(found, 'resolve native XML wrapper executable')
+        lines = [character(len=1) :: '']
+        call write_lines(join_path(root, 'wrapper/ready'), lines)
+        call make_symlink(executable, join_path(root, 'wrapper/ctest'))
+        do mode = 1, 2
+            env = string_list_t()
+            call list_add(env, 'FO_BACKEND=cmake')
+            call list_add(env, 'FO_CTEST_DELEGATE=1')
+            call list_add(env, 'FO_REAL_CTEST='//real_ctest)
+            call list_add(env, 'PATH='//join_path(root, 'wrapper:')//environment_value('PATH'))
+            if (mode == 1) call list_add(env, 'FO_CTEST_XML_MODE=missing')
+            if (mode == 2) call list_add(env, 'FO_CTEST_XML_MODE=malformed')
+            args = string_list_t()
+            call list_add(args, 'test')
+            call list_add(args, 'a::duplicate')
+            call list_add(args, '--json=full')
+            call run_fo(driver, args, root, join_path(root, 'cache'), observed, env)
+            call assert_true(observed%exit_code /= 0, 'bad delegated JUnit fails closed')
+            call parse_json_report(observed, doc, 'bad delegated JUnit report')
+            results = json_member(doc, 'tests')
+            call assert_equal_integer(json_size(results), 1, 'one qualified failure reported')
+            item = json_element(results, 1)
+            call assert_equal_string(json_string_value(json_member(item, 'name')), &
+                'a::duplicate', 'failed delegated result keeps qualified identity')
+            call assert_equal_string(json_string_value(json_member(item, 'status')), &
+                'fail', 'missing or malformed JUnit cannot report pass')
+            call assert_file_exists(join_path(root, 'build/a.ran'), &
+                'the native test ran before its JUnit was removed or corrupted')
+            call assert_file_absent(join_path(root, 'build/b.ran'), 'other test stays unrun')
+            call remove_path(join_path(root, 'build/a.ran'))
+        end do
+        do i = 1, 2
+            lines = [character(len=192) :: &
+                'add_test(NAME producer COMMAND "${CMAKE_COMMAND}" -E touch '// &
+                '"${CMAKE_CURRENT_BINARY_DIR}/producer.ran")', &
+                'add_test(NAME consumer COMMAND "${CMAKE_COMMAND}" -P '// &
+                '"${CMAKE_SOURCE_DIR}/consume.cmake")', &
+                'set_tests_properties(consumer PROPERTIES DEPENDS producer)']
+            if (i == 1) then
+                call write_lines(join_path(root, 'a/CMakeLists.txt'), lines)
+            else
+                call write_lines(join_path(root, 'b/CMakeLists.txt'), lines)
+            end if
+        end do
+        lines = [character(len=192) :: &
+            'if(NOT EXISTS producer.ran)', '  message(FATAL_ERROR "producer missing")', &
+            'endif()', 'file(WRITE consumer.ran "consumed")']
+        call write_lines(join_path(root, 'consume.cmake'), lines)
+        call run_process(command, root, observed)
+        call assert_process_ok(observed, 'configure directory-local dependency oracle')
+        do mode = 0, 2
+            do i = 1, 2
+                args = string_list_t()
+                if (mode == 0) then
+                    call list_add(args, 'ctest')
+                    call list_add(args, '--test-dir')
+                    call list_add(args, join_path(root, 'build'))
+                    call list_add(args, '-I')
+                    if (i == 1) call list_add(args, '0,0,0,2,3')
+                    if (i == 2) call list_add(args, '0,0,0,4,5')
+                    call run_process(args, root, observed)
+                else
+                    env = string_list_t()
+                    call list_add(env, 'FO_BACKEND=cmake')
+                    if (mode == 2) call list_add(env, 'FO_CTEST_DELEGATE=1')
+                    call list_add(args, 'test')
+                    if (i == 1) then
+                        call list_add(args, 'a::consumer')
+                        call list_add(args, 'a::producer')
+                    else
+                        call list_add(args, 'b::consumer')
+                        call list_add(args, 'b::producer')
+                    end if
+                    call list_add(args, '--json=full')
+                    call run_fo(driver, args, root, join_path(root, 'cache'), observed, env)
+                    if (mode == 2) then
+                        call assert_true(observed%exit_code /= 0, &
+                            'ambiguous delegated dependency fails closed')
+                        call assert_contains(observed%stderr, &
+                            'directory-local CTest dependencies', &
+                            'unsupported delegated dependency is explicit')
+                        do j = 1, 2
+                            if (j == 1) receipt = join_path(root, 'build/a/')
+                            if (j == 2) receipt = join_path(root, 'build/b/')
+                            call assert_file_absent(receipt//'producer.ran', &
+                                'rejected producer stays unrun')
+                            call assert_file_absent(receipt//'consumer.ran', &
+                                'rejected consumer stays unrun')
+                        end do
+                        cycle
+                    end if
+                    call parse_json_report(observed, doc, 'local dependency report')
+                    call assert_equal_integer(json_size(json_member(doc, 'tests')), 2, &
+                        'local dependency pair is reported once')
+                end if
+                call assert_process_ok(observed, 'local producer precedes local consumer')
+                do j = 1, 2
+                    if (j == 1) receipt = join_path(root, 'build/a/')
+                    if (j == 2) receipt = join_path(root, 'build/b/')
+                    if (j == i) then
+                        call assert_file_exists(receipt//'producer.ran', 'local producer ran')
+                        call assert_file_exists(receipt//'consumer.ran', 'local consumer ran')
+                    else
+                        call assert_file_absent(receipt//'producer.ran', 'other producer unrun')
+                        call assert_file_absent(receipt//'consumer.ran', 'other consumer unrun')
+                    end if
+                    call remove_path(receipt//'producer.ran')
+                    call remove_path(receipt//'consumer.ran')
+                end do
+            end do
+        end do
+        lines = [character(len=192) :: &
+            'cmake_minimum_required(VERSION 3.20)', &
+            'project(space_names NONE)', 'enable_testing()', &
+            'add_subdirectory(a "space a")', 'add_subdirectory(b)']
+        call write_lines(join_path(root, 'CMakeLists.txt'), lines)
+        env = string_list_t()
+        call list_add(env, 'FO_BACKEND=cmake')
+        args = string_list_t()
+        call list_add(args, 'test')
+        call list_add(args, 'b::producer')
+        call list_add(args, '--json=full')
+        call run_fo(driver, args, root, join_path(root, 'cache'), observed, env)
+        call assert_true(observed%exit_code /= 0, 'unrepresentable qualified ID is rejected')
+        call assert_contains(observed%stderr, 'cannot contain whitespace', &
+            'registration-directory whitespace has an explicit diagnostic')
+        call remove_tree(root)
+    end subroutine directory_local_names
+
     function ran(result, name) result(found)
         type(process_result_t), intent(in) :: result
         character(*), intent(in) :: name

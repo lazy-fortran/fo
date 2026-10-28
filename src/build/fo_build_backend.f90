@@ -9,8 +9,9 @@ module fo_build_backend
         gfortran_run_tests
     use fo_util, only: read_text_file, read_text_file_alloc, make_tmpfile, &
         delete_tmpfile
-    use fo_ctest_run, only: ctest_import_junit
+    use fo_ctest_run, only: ctest_import_junit, ctest_log_note
     use fx_string, only: string_t
+    use fo_project_model, only: project_model_t, model_find_case
     use fo_test_budget, only: test_timeout_seconds, test_wall_cap_seconds
     use fo_compiler_dialect, only: compiler_dialect, compiler_dialect_t, &
         selected_compiler_command, COMPILER_UNKNOWN
@@ -625,7 +626,7 @@ contains
     end subroutine backend_set_build_targets
 
     subroutine backend_test_cases(self, names, n_names, exitcode, log_file, &
-            flags, no_build, configured, lift_preset_filter, build_only, append_log)
+            flags, no_build, configured, lift_preset_filter, build_only, append_log, model)
         !! Run exact CTest cases of a configured CMake project: build (the
         !! caller has set the plan targets, backend_set_build_targets) unless
         !! no_build, then ctest in batches with exact anchored names. A batch
@@ -642,6 +643,11 @@ contains
         character(len=*), intent(in), optional :: flags
         logical, intent(in), optional :: no_build, configured, lift_preset_filter
         logical, intent(in), optional :: build_only, append_log
+
+        type(project_model_t), intent(in), optional :: model
+        type(string_t), allocatable :: ordinals(:), local_names(:)
+        integer :: i, j, k, t
+        logical :: selected_fixture, ambiguous_fixture
 
         integer, parameter :: batch_bytes = 32000
         character(len=512) :: log_path, lock_dir, flag_text
@@ -684,13 +690,70 @@ contains
             if (build_only) return
         end if
 
+        allocate (ordinals(n_names), local_names(n_names))
+        do i = 1, n_names
+            ordinals(i)%s = ''
+            local_names(i)%s = ''
+            if (.not. present(model)) cycle
+            k = model_find_case(model, trim(names(i)))
+            if (k == 0) cycle
+            do j = 1, size(model%cases(k)%attrs)
+                associate (attr => model%cases(k)%attrs(j))
+                    if (attr%key == 'FO_CTEST_NUMBER') ordinals(i)%s = attr%value
+                    if (attr%key == 'FO_CTEST_NAME') local_names(i)%s = attr%value
+                end associate
+            end do
+        end do
+        selected_fixture = .false.
+        ambiguous_fixture = .false.
+        if (present(model)) then
+            do k = 1, model%n_cases
+                do j = 1, size(model%cases(k)%attrs)
+                    associate (attr => model%cases(k)%attrs(j))
+                        if (index(attr%key, 'FIXTURES_') /= 1 .and. &
+                            attr%key /= 'DEPENDS') cycle
+                        do i = 1, n_names
+                            if (model%cases(k)%name /= trim(names(i))) cycle
+                            if (index(attr%key, 'FIXTURES_') == 1) selected_fixture = .true.
+                            if (len(ordinals(i)%s) == 0) cycle
+                            write (error_unit, '(a)') &
+                                'fo: delegated directory-local CTest dependencies '// &
+                                'and fixtures are not supported'
+                            exitcode = 1
+                            return
+                        end do
+                        if (index(attr%key, 'FIXTURES_') /= 1) cycle
+                        do t = 1, size(model%cases(k)%attrs)
+                            if (model%cases(k)%attrs(t)%key == 'FO_CTEST_NUMBER') &
+                                ambiguous_fixture = .true.
+                        end do
+                    end associate
+                end do
+            end do
+            if (selected_fixture .and. ambiguous_fixture) then
+                write (error_unit, '(a)') &
+                    'fo: delegated directory-local CTest fixtures are not supported'
+                exitcode = 1
+                return
+            end if
+        end if
         first = 1
         do while (first <= n_names)
             last = first
             call ctest_batch_end(names, n_names, first, batch_bytes, last)
+            if (len(ordinals(first)%s) > 0) then
+                last = first
+            else
+                do i = first + 1, last
+                    if (len(ordinals(i)%s) == 0) cycle
+                    last = i - 1
+                    exit
+                end do
+            end if
             call names_to_ctest_regex(names(first:last), last - first + 1, regex)
             call cmake_test(self%cmake, regex, lift, .false., log_path, &
-                first > 1 .or. after_results, code)
+                first > 1 .or. after_results, code, ordinals(first)%s, &
+                local_names(first)%s, trim(names(first)))
             if (code /= 0) exitcode = code
             first = last + 1
         end do
@@ -1101,17 +1164,18 @@ contains
     end subroutine cmake_delegate_build
 
     subroutine cmake_test(context, regex, lift_preset_filter, exclude_slow, &
-            log_file, append, exitcode)
+            log_file, append, exitcode, test_number, local_name, reported_name)
         !! exclude_slow: the model-free default exclusion, label `slow` only.
         type(cmake_context_t), intent(in) :: context
         character(len=*), intent(in) :: regex, log_file
         logical, intent(in) :: lift_preset_filter, exclude_slow, append
         integer, intent(out) :: exitcode
+        character(len=*), intent(in), optional :: test_number, local_name, reported_name
 
         character(len=:), allocatable :: packed
         character(len=32) :: jobs_text, timeout_text
         character(len=4096) :: junit_file
-        logical :: has_tests
+        logical :: has_tests, imported
         integer :: n_args
 
         if (len_trim(context%configure_preset) > 0 .and. &
@@ -1150,7 +1214,15 @@ contains
         call argv_push(packed, n_args, '--no-tests=error')
         call argv_push(packed, n_args, '-j')
         call argv_push(packed, n_args, jobs_text)
-        if (len_trim(regex) > 0) then
+        if (present(test_number)) then
+            if (len(test_number) > 0) then
+                call argv_push(packed, n_args, '-I')
+                call argv_push(packed, n_args, test_number//','//test_number)
+            else if (len_trim(regex) > 0) then
+                call argv_push(packed, n_args, '-R')
+                call argv_push(packed, n_args, regex)
+            end if
+        else if (len_trim(regex) > 0) then
             call argv_push(packed, n_args, '-R')
             call argv_push(packed, n_args, regex)
         end if
@@ -1179,7 +1251,17 @@ contains
         call argv_push(packed, n_args, junit_file)
         call process_run_argv_logged(context%source_root, packed, n_args, log_file, &
             append, 86400, exitcode)
-        call ctest_import_junit(trim(junit_file), log_file)
+        call ctest_import_junit(trim(junit_file), log_file, local_name, &
+            reported_name, imported)
+        if (present(test_number) .and. present(reported_name)) then
+            if (len(test_number) > 0 .and. .not. imported) then
+                call ctest_log_note(log_file, 'TEST_JUNIT_IMPORT')
+                call ctest_log_note(log_file, 'TEST_REASON cannot import exact '// &
+                    'directory-local CTest JUnit result')
+                call ctest_log_note(log_file, 'TEST_RESULT '//reported_name//' FAIL 1 0.0')
+                exitcode = 1
+            end if
+        end if
         call delete_tmpfile(junit_file)
     end subroutine cmake_test
 
