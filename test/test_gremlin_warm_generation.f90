@@ -88,8 +88,10 @@ program test_gremlin_warm_generation
     bytes = copy_bytes(1_c_int)
     clones = clone_count(1_c_int)
     call generation_manifest_materialize_stats(.true., cloned, copied)
+    ! The Fx store ingests the payload outside these counters; the bundle
+    ! then clones each blob or, without clone support, byte-copies it.
     call require(bytes >= int(FILE_COUNT, c_long) * PAYLOAD_LEN / 2_c_long .or. &
-        cloned >= FILE_COUNT, 'cold capture pays for the tree once')
+        cloned + copied >= FILE_COUNT, 'cold capture pays for the tree once')
 
     call fs_write_text(file_path(7), unique_payload(7, 'b'))
     call discover()
