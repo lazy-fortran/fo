@@ -517,6 +517,19 @@ program test_hook_precommit
     call assert_process_ok(result, 'staged configure ignores a removed compiler')
     call assert_contains(result%stdout, '"fast_passed":1', 'removed-compiler case ran')
 
+    ! Without configuration the hard cap admits a cold build longer than a
+    ! minute, as in a fresh worktree; it bounds runaway builds only.
+    project = join_path(scratch, 'default-cap')
+    call write_text(project//'/CMakeLists.txt', 'cmake_minimum_required(VERSION 3.20)'//nl// &
+        'project(hook_default_cap NONE)'//nl//'enable_testing()'//nl// &
+        'add_custom_target(cold_build ALL COMMAND "${CMAKE_COMMAND}" -E sleep 65)'//nl// &
+        'add_test(NAME default_cap_ok COMMAND "${CMAKE_COMMAND}" -E true)'//nl)
+    call git([character(len=64) :: 'init', '-q'])
+    call git([character(len=64) :: 'add', 'CMakeLists.txt'])
+    call hook()
+    call assert_process_ok(result, 'default hard cap admits a cold build over one minute')
+    call assert_contains(result%stdout, '"build":"PASS', 'default-cap build completed')
+
     ! The project's own CTest labels keep reference-comparison cases out of a
     ! commit; without that declaration the hook runs them and is blocked.
     project = join_path(scratch, 'label-tier')

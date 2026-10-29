@@ -203,7 +203,9 @@ contains
                 exit validation
             end if
             budget = config_seconds(root, 'fo.hookBudget', 10)
-            cap = config_seconds(root, 'fo.hookBuildCap', 60)
+            ! A cold build in a fresh checkout routinely exceeds a minute; incremental
+            ! builds reuse the shared cache, so the cap only stops runaway builds.
+            cap = config_seconds(root, 'fo.hookBuildCap', 900)
             threshold = real(config_seconds(root, 'fo.hookFastThreshold', 1), dp)
             if (len(owned_view) > 0) then
                 if (index(owned_view, path_dirname(root)//'/.fo-hook-') /= 1) then
