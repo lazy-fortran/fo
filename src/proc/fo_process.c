@@ -28,6 +28,7 @@
 #include <linux/seccomp.h>
 #include <sys/syscall.h>
 #include <sys/prctl.h>
+#include <sched.h>
 #endif
 #ifdef __APPLE__
 #include <libproc.h>
@@ -1355,8 +1356,58 @@ void fo_c_suppress_heartbeats(int suppress) {
     heartbeats_suppressed = suppress != 0;
 }
 
+#ifdef __linux__
+/* CPUs a cgroup v2 quota allows (cpu.max of this cgroup and its ancestors),
+ * or 0 without a quota. Containers limit CPUs this way rather than by
+ * affinity, so the online count alone oversubscribes them. */
+static long cgroup_cpu_quota(void) {
+    char line[PATH_MAX], dir[PATH_MAX + 32], file[PATH_MAX + 48];
+    long best = 0;
+    FILE *f = fopen("/proc/self/cgroup", "r");
+    if (!f) return 0;
+    dir[0] = '\0';
+    while (fgets(line, sizeof line, f)) {
+        if (strncmp(line, "0::", 3) == 0) {
+            line[strcspn(line, "\n")] = '\0';
+            snprintf(dir, sizeof dir, "/sys/fs/cgroup%s", line + 3);
+            break;
+        }
+    }
+    fclose(f);
+    if (!dir[0]) return 0;
+    for (;;) {
+        char quota[32];
+        long long max, period;
+        snprintf(file, sizeof file, "%s/cpu.max", dir);
+        f = fopen(file, "r");
+        if (f) {
+            if (fscanf(f, "%31s %lld", quota, &period) == 2 && strcmp(quota, "max") != 0
+                && period > 0) {
+                max = atoll(quota);
+                long cpus = (long)((max + period - 1) / period);
+                if (cpus >= 1 && (best == 0 || cpus < best)) best = cpus;
+            }
+            fclose(f);
+        }
+        char *slash = strrchr(dir, '/');
+        if (!slash || strcmp(dir, "/sys/fs/cgroup") == 0) break;
+        *slash = '\0';
+        if (strlen(dir) < strlen("/sys/fs/cgroup")) break;
+    }
+    return best;
+}
+#endif
+
 void fo_c_detect_nproc(int *nproc) {
     long n = sysconf(_SC_NPROCESSORS_ONLN);
+#ifdef __linux__
+    cpu_set_t set;
+    if (sched_getaffinity(0, sizeof set, &set) == 0 && CPU_COUNT(&set) > 0
+        && CPU_COUNT(&set) < n)
+        n = CPU_COUNT(&set);
+    long quota = cgroup_cpu_quota();
+    if (quota > 0 && quota < n) n = quota;
+#endif
     if (n < 1) n = 1;
     *nproc = (int)n;
 }
