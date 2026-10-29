@@ -12,7 +12,7 @@ module fo_build_backend
     use fo_ctest_run, only: ctest_import_junit, ctest_log_note
     use fx_string, only: string_t
     use fo_project_model, only: project_model_t, model_find_case
-    use fo_test_budget, only: test_timeout_seconds, test_wall_cap_seconds
+    use fo_test_budget, only: ctest_default_timeout_seconds
     use fo_compiler_dialect, only: compiler_dialect, compiler_dialect_t, &
         selected_compiler_command, COMPILER_UNKNOWN
     use fo_cmake_context, only: cmake_context_t, cmake_context_init, &
@@ -1242,14 +1242,11 @@ contains
             call argv_push(packed, n_args, '-LE')
             call argv_push(packed, n_args, '^$')
         end if
-        ! FO_TEST_TIMEOUT is a per-test limit. It used to bound the whole ctest
-        ! run, so a suite of individually fast tests failed once their sum
-        ! passed ten seconds. ctest can only enforce wall time per test, so it
-        ! gets the generous wall-clock cap that accompanies the CPU budget. The
-        ! whole run keeps only a day-long backstop, which also keeps the
-        ! still-running heartbeats flowing.
-        write (timeout_text, '(i0)') &
-            test_wall_cap_seconds(budget=test_timeout_seconds())
+        ! ctest --timeout only fills in for tests without a TIMEOUT property,
+        ! so the project's own limits stay in force; the fpm CPU budget is
+        ! not a CMake project's limit. The whole run keeps only a day-long
+        ! backstop, which also keeps the still-running heartbeats flowing.
+        write (timeout_text, '(i0)') ctest_default_timeout_seconds()
         call argv_push(packed, n_args, '--timeout')
         call argv_push(packed, n_args, timeout_text)
         ! Verdicts come from the JUnit file; the console stays the fallback.

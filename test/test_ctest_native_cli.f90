@@ -47,6 +47,8 @@ program test_ctest_native_cli
         call assert_equal_string(status_of(tests, trim(NAMES(k))), &
             trim(EXPECTED(k)), 'native verdict of '//trim(NAMES(k)))
     end do
+    call assert_contains(observed%stdout, 'exceeded the limit of 1.0 s', &
+        'a native timeout names the TIMEOUT property it enforced')
     call assert_equal_string(status_of(tests, DELEGATED), 'pass', &
         'delegated case keeps its full name and verdict')
     call assert_contains(last_test, DELEGATED, 'ctest ran the unsupported case')

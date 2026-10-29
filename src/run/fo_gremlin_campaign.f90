@@ -6,7 +6,7 @@ module fo_gremlin_campaign
     use, intrinsic :: iso_fortran_env, only: int64
     use fo_build_backend, only: BACKEND_NATIVE, BACKEND_CMAKE, backend_t, detect_backend
     use fo_cache, only: HASH_LEN, cache_digest
-    use fo_ctest_run, only: ctest_fixture_support_case
+    use fo_ctest_run, only: ctest_fixture_support_case, ctest_run_timeout_seconds
     use fo_cmake_generation, only: cmake_registered_names
     use fo_fpm_config, only: fpm_config_t, fpm_config_parse
     use fo_fs, only: fs_sleep_ms
@@ -38,7 +38,8 @@ module fo_gremlin_campaign
     use fo_project_model, only: model_find_case, model_select, model_request_t, &
         model_selection_t, SELECT_OK, SELECT_EMPTY
     use fo_scan, only: is_slow_test
-    use fo_test_budget, only: test_budget_seconds, test_wall_cap_seconds
+    use fo_test_budget, only: test_budget_seconds, test_wall_cap_seconds, &
+        ctest_default_timeout_seconds
     use fo_util, only: json_bool, int_text
     use fx_dag, only: MAX_NODES
     use fx_string, only: string_t
@@ -1184,16 +1185,37 @@ contains
             '-'//trim(filename)
     end subroutine log_path
 
-    integer function case_wall_timeout(project_dir, case_name, override) result(seconds)
-        character(len=*), intent(in) :: project_dir, case_name
+    integer function case_wall_timeout(generation, case_name, override) result(seconds)
+        !! Gremlin's backstop for one case process. It must not fire before
+        !! the runner's own limit: CTest cases get their TIMEOUT properties
+        !! (fixtures included) or ctest's default, fpm tests their wall cap.
+        type(generation_t), intent(in) :: generation
+        character(len=*), intent(in) :: case_name
         integer, intent(in) :: override
         type(fpm_config_t), allocatable :: config
-        integer :: ierr, budget
+        type(backend_t) :: backend
+        integer :: ierr, budget, k
+        logical :: fpm
 
         seconds = override
         if (seconds > 0) return
+        if (allocated(generation%model)) then
+            fpm = generation%model%backend == 'fpm'
+            k = model_find_case(generation%model, trim(case_name))
+            if (.not. fpm .and. k > 0) then
+                seconds = ctest_run_timeout_seconds(generation%model, k) + 5
+                return
+            end if
+        else
+            backend = detect_backend(generation%project_root)
+            fpm = backend%kind /= BACKEND_CMAKE
+        end if
+        if (.not. fpm) then
+            seconds = ctest_default_timeout_seconds() + 5
+            return
+        end if
         allocate (config)
-        call fpm_config_parse(project_dir, config, ierr)
+        call fpm_config_parse(trim(generation%project_root), config, ierr)
         budget = test_budget_seconds(config, is_slow_test(case_name))
         seconds = test_wall_cap_seconds(config, budget) + 5
     end function case_wall_timeout
