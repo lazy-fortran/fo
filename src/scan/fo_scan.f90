@@ -972,6 +972,13 @@ contains
         if (index(name, ' ') > 0) name = name(1:index(name, ' ') - 1)
         if (index(name, '!') > 0) name = name(1:index(name, '!') - 1)
         name = to_lower(name)
+        ! PROGRAM is not reserved: an assignment must not create a main program.
+        if (verify(name(1:1), 'abcdefghijklmnopqrstuvwxyz') /= 0) then
+            name = ''
+            return
+        end if
+        if (verify(trim(name), 'abcdefghijklmnopqrstuvwxyz0123456789_') /= 0) &
+            name = ''
     end subroutine extract_program_def
 
     logical function is_intrinsic(name)

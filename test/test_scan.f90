@@ -51,6 +51,7 @@ program test_scan
     call test_scan_external_after_internal_with_unit_expression()
     call test_scan_contained_subroutine_keeps_program()
     call test_scan_program_def()
+    call test_scan_program_assignment()
     call test_scan_intrinsic_skip()
     call test_slow_test_detection()
     call test_scan_dir_empty()
@@ -486,6 +487,47 @@ contains
         call assert(trim(info%deps(1)) == 'utils', 'scan_prog: dep is utils')
         call fs_remove_file(trim(path))
     end subroutine test_scan_program_def
+
+    subroutine test_scan_program_assignment()
+        type(scan_unit_t) :: info
+        integer :: ierr
+        character(len=512) :: path
+        character(len=80) :: lines(7)
+
+        lines(1) = 'module command_helper'
+        lines(2) = 'contains'
+        lines(3) = 'subroutine normalize(command)'
+        lines(4) = 'character(len=*), intent(inout) :: command'
+        lines(5) = 'character(len=512) :: program'
+        lines(6) = 'program = adjustl(command)'
+        lines(7) = 'end subroutine; end module command_helper'
+        call make_tmp_path('fo_test_program_assignment', path, '.f90')
+        call write_file(path, lines, size(lines))
+        call scan_file_regex(path, info, ierr)
+        call assert(ierr == 0, 'scan_program_assignment: no error')
+        call assert(.not. info%is_program, &
+            'scan_program_assignment: module is not a main program')
+        call assert(len_trim(info%program_name) == 0, &
+            'scan_program_assignment: no program name from assignment')
+        call assert(trim(info%module_name) == 'command_helper', &
+            'scan_program_assignment: module provider preserved')
+
+        lines(1) = 'PROGRAM Main_2 ! actual program declaration'
+        lines(2) = 'implicit none'
+        lines(3) = 'character(len=512) :: program'
+        lines(4) = 'PROGRAM = "command"'
+        lines(5) = 'program = adjustl(program)'
+        lines(6) = 'end program Main_2'
+        lines(7) = ''
+        call write_file(path, lines, size(lines))
+        call scan_file_regex(path, info, ierr)
+        call assert(ierr == 0, 'scan_program_assignment: program has no error')
+        call assert(info%is_program, &
+            'scan_program_assignment: actual declaration is a main program')
+        call assert(trim(info%program_name) == 'main_2', &
+            'scan_program_assignment: assignments preserve the actual name')
+        call fs_remove_file(trim(path))
+    end subroutine test_scan_program_assignment
 
     subroutine test_scan_intrinsic_skip()
         type(scan_unit_t) :: info
