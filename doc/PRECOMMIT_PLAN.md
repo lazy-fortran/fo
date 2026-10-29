@@ -46,14 +46,14 @@ The snapshot itself and native model loading still cost time on a receipt hit;
 millisecond latency is a target to measure, not a promised constant.
 
 The explicit manual preparation command retains a 10-second test budget, a
-60-second mandatory build cap and a 1-second fast-test warning threshold. The
+900-second mandatory build cap and a 1-second fast-test warning threshold. The
 bounded commit command cancels owned work after eight seconds, reserving about
 two seconds for process drainage and snapshot cleanup. Raising manual budgets
 does not extend the commit budget. Configure manual preparation per repository:
 
 ```sh
 git config fo.hookBudget 10
-git config fo.hookBuildCap 60
+git config fo.hookBuildCap 900
 git config fo.hookFastThreshold 1
 ```
 
