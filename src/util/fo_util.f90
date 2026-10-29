@@ -45,6 +45,14 @@ contains
     function temporary_root() result(root)
         !! Explicit TMPDIR, otherwise the native platform temporary directory.
         character(len=:), allocatable :: root
+
+        call temporary_root_into(root)
+    end function temporary_root
+
+    subroutine temporary_root_into(root)
+        ! gfortran keeps a deferred-length function result's length in a
+        ! static caller temporary (GCC PR 113797), so threads must use this.
+        character(len=:), allocatable, intent(out) :: root
         character(len=512) :: tmpdir
         integer :: tmpdir_len, tmpdir_status, i, root_len
         character(kind=c_char) :: native_tmp(513)
@@ -72,7 +80,7 @@ contains
             root = root(:len(root) - 1)
         end do
         if (root == '/') root = ''
-    end function temporary_root
+    end subroutine temporary_root_into
 
     subroutine make_tmpfile(prefix, path)
         character(len=*), intent(in) :: prefix
@@ -90,7 +98,7 @@ contains
         !$omp end critical (fo_tmpfile_serial)
         call fo_c_getpid(pid)
         call system_clock(count)
-        prefix_root = temporary_root()
+        call temporary_root_into(prefix_root)
         if (len(prefix_root) > 0) then
             if (prefix_root(len(prefix_root):) == '/') &
                 prefix_root = prefix_root(:len(prefix_root) - 1)
