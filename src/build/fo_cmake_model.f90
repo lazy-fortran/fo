@@ -41,7 +41,9 @@ module fo_cmake_model
     !! files (CTest's own add_test declarations, followed through subdirs()
     !! and include()) supply the command, so an unbuilt tree maps its cases
     !! to targets as well. A command that names no target artifact (a script)
-    !! stays unknown, which widens the plan.
+    !! stays unknown, which widens the plan. CTest before 3.30 leaves custom
+    !! properties out of json-v1, so the fo runner properties (FO_RETRIES,
+    !! FO_SLOW_*) it lacks are taken from their set_tests_properties there.
     use fx_string, only: string_t
     use fx_hash, only: fnv1a_string
     use fx_json_parse, only: json_parser_t, json_event_t, &
@@ -501,31 +503,17 @@ contains
             allocate (model%default_exclude(1))
             model%default_exclude(1)%s = 'slow'
         end if
-        call map_declared_commands(context, model)
+        if (model%n_cases > 0) call scan_testfile( &
+            cmake_context_build_path(context)//'/CTestTestfile.cmake', model)
         ierr = 0
     end subroutine cmake_model_load_cases
 
-    subroutine map_declared_commands(context, model)
-        !! Map cases that CTest listed without a command through the
-        !! add_test declarations of the generated CTestTestfile.cmake tree.
-        type(cmake_context_t), intent(in) :: context
-        type(project_model_t), intent(inout) :: model
-        integer :: k
-        logical :: unmapped
-
-        unmapped = .false.
-        do k = 1, model%n_cases
-            if (model%cases(k)%command_target == 0) unmapped = .true.
-        end do
-        if (.not. unmapped) return
-        call scan_testfile(cmake_context_build_path(context)// &
-            '/CTestTestfile.cmake', model)
-    end subroutine map_declared_commands
-
     recursive subroutine scan_testfile(path, model, registration_dir)
-        !! Walk one CTestTestfile.cmake: add_test maps a case, subdirs() and
-        !! include() are followed. Missing files are skipped silently (an
-        !! include of a not yet generated discovery file).
+        !! Walk one CTestTestfile.cmake: add_test maps a case listed without a
+        !! command, set_tests_properties supplies fo runner properties the
+        !! listing lacks, subdirs() and include() are followed. Missing files
+        !! are skipped silently (an include of a not yet generated discovery
+        !! file).
         character(len=*), intent(in) :: path
         character(len=*), intent(in), optional :: registration_dir
         type(project_model_t), intent(inout) :: model
@@ -547,14 +535,7 @@ contains
             select case (command)
             case ('add_test')
                 if (n_args < 2) cycle
-                k = model_find_case(model, args(1)%s)
-                if (k == 0) then
-                    if (index(registration, model%build_dir//'/') == 1) &
-                        k = model_find_case(model, &
-                        registration(len(model%build_dir) + 2:)//'::'//args(1)%s)
-                    if (registration == model%build_dir) &
-                        k = model_find_case(model, '.::'//args(1)%s)
-                end if
+                k = declared_case(model, args(1)%s, registration)
                 if (k == 0) cycle
                 if (model%cases(k)%command_target /= 0) cycle
                 do t = 2, n_args
@@ -564,6 +545,8 @@ contains
                     model%cases(k)%mapping = MAP_EXACT
                     exit
                 end do
+            case ('set_tests_properties')
+                call apply_runner_properties(model, args(1:n_args), registration)
             case ('subdirs')
                 do t = 1, n_args
                     if (len(args(t)%s) == 0) cycle
@@ -585,6 +568,67 @@ contains
             end select
         end do
     end subroutine scan_testfile
+
+    integer function declared_case(model, name, registration) result(k)
+        !! The case a CTestTestfile declaration in registration names.
+        type(project_model_t), intent(in) :: model
+        character(len=*), intent(in) :: name, registration
+
+        k = model_find_case(model, name)
+        if (k /= 0) return
+        if (index(registration, model%build_dir//'/') == 1) &
+            k = model_find_case(model, &
+            registration(len(model%build_dir) + 2:)//'::'//name)
+        if (registration == model%build_dir) k = model_find_case(model, '.::'//name)
+    end function declared_case
+
+    subroutine apply_runner_properties(model, args, registration)
+        !! set_tests_properties(NAME... PROPERTIES KEY VALUE...): add each fo
+        !! runner property a named case does not have yet.
+        type(project_model_t), intent(inout) :: model
+        type(string_t), intent(in) :: args(:)
+        character(len=*), intent(in) :: registration
+        type(model_attr_t), allocatable :: grown(:)
+        integer :: first, t, p, k, a, n
+        logical :: known
+
+        first = 0
+        do t = 1, size(args)
+            if (args(t)%s == 'PROPERTIES') then
+                first = t + 1
+                exit
+            end if
+        end do
+        if (first == 0) return
+        do t = 1, first - 2
+            k = declared_case(model, args(t)%s, registration)
+            if (k == 0) cycle
+            do p = first, size(args) - 1, 2
+                select case (args(p)%s)
+                case ('FO_RETRIES', 'FO_SLOW_PERIOD', 'FO_SLOW_TERMINATE_AFTER')
+                case default
+                    cycle
+                end select
+                if (.not. allocated(model%cases(k)%attrs)) &
+                    allocate (model%cases(k)%attrs(0))
+                known = .false.
+                do a = 1, size(model%cases(k)%attrs)
+                    if (model%cases(k)%attrs(a)%key == args(p)%s) known = .true.
+                end do
+                if (known) cycle
+                ! Element-wise: gfortran 12 leaves the key empty when this is
+                ! an array constructor of a structure constructor.
+                n = size(model%cases(k)%attrs)
+                allocate (grown(n + 1))
+                grown(1:n) = model%cases(k)%attrs
+                grown(n + 1)%key = args(p)%s
+                grown(n + 1)%value = args(p + 1)%s
+                allocate (grown(n + 1)%items(1))
+                grown(n + 1)%items(1)%s = args(p + 1)%s
+                call move_alloc(grown, model%cases(k)%attrs)
+            end do
+        end do
+    end subroutine apply_runner_properties
 
     subroutine next_command(text, pos, command, args, n_args)
         !! Next command invocation of a CMake script: its name (empty at the
