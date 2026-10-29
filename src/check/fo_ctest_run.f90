@@ -26,7 +26,7 @@ module fo_ctest_run
     use fo_pattern, only: pattern_t, pattern_compile, pattern_matches
     use fo_process, only: argv_push, process_start_argv_logged, &
         process_poll_pid, process_cancel_pid, process_detect_nproc
-    use fo_test_budget, only: test_wall_cap_seconds, test_timeout_seconds, &
+    use fo_test_budget, only: ctest_default_timeout_seconds, &
         test_strict_flaky, test_retries_override
     use fo_test_cases, only: CASE_SEP, case_list, case_listing_t, case_run_setup
     use fo_project_model, only: project_model_t, model_case_t, model_find_case
@@ -35,6 +35,7 @@ module fo_ctest_run
 
     public :: ctest_native_select, ctest_native_run, ctest_import_junit
     public :: ctest_log_note, ctest_fixture_support_case
+    public :: ctest_case_timeout, ctest_run_timeout_seconds
 
     integer, parameter :: PENDING = 0, RUNNING = 1, FINISHED = 2
     integer, parameter :: MAX_ENV_BYTES = 3000
@@ -70,6 +71,38 @@ module fo_ctest_run
     end type run_case_t
 
 contains
+
+    real function ctest_case_timeout(c) result(seconds)
+        !! Wall limit ctest applies to one case: its TIMEOUT property, else
+        !! the default for cases without one.
+        type(model_case_t), intent(in) :: c
+        type(string_t), allocatable :: items(:)
+        integer :: ios
+
+        seconds = 0.0
+        ios = 1
+        call attr_items(c, 'TIMEOUT', items)
+        if (size(items) == 1) read (items(1)%s, *, iostat=ios) seconds
+        if (ios /= 0 .or. seconds <= 0.0) &
+            seconds = real(ctest_default_timeout_seconds())
+    end function ctest_case_timeout
+
+    integer function ctest_run_timeout_seconds(model, case_index) result(seconds)
+        !! Wall time one selected case may take with the fixture and DEPENDS
+        !! cases that run alongside it, each within its own limit.
+        type(project_model_t), intent(in) :: model
+        integer, intent(in) :: case_index
+        integer, allocatable :: members(:)
+        real :: total
+        integer :: k
+
+        call closure_members(model, [case_index], members)
+        total = 0.0
+        do k = 1, size(members)
+            total = total + ctest_case_timeout(model%cases(members(k)))
+        end do
+        seconds = ceiling(total)
+    end function ctest_run_timeout_seconds
 
     logical function ctest_fixture_support_case(model, idx, eligible) result(helper)
         type(project_model_t), intent(in) :: model
@@ -528,8 +561,7 @@ contains
         if (override >= 0) rc%retries = override
         rc%supported = .true.
         rc%reason = ''
-        if (rc%timeout <= 0.0) rc%timeout = real(test_wall_cap_seconds( &
-            budget=test_timeout_seconds()))
+        if (rc%timeout <= 0.0) rc%timeout = real(ctest_default_timeout_seconds())
         if (rc%slow_period > 0 .and. rc%slow_after > 0) rc%timeout = &
             min(rc%timeout, real(rc%slow_period*rc%slow_after))
     end subroutine build_case
@@ -754,6 +786,7 @@ contains
         !! Poll a running case; classify and finish it when it ended. A
         !! failure with retries left runs the case again, not finished.
         type(run_case_t), intent(inout) :: rc
+        character(len=32) :: limit_text
         integer :: code, ec
         integer(int64) :: now, rate
         real :: elapsed
@@ -775,7 +808,8 @@ contains
             rc%secs = rc%prior_secs + elapsed
             rc%exit_code = 124
             rc%status = 'TIMEOUT'
-            rc%reason = 'Timeout'
+            write (limit_text, '(f0.1)') rc%timeout
+            rc%reason = 'Timeout: exceeded the limit of '//trim(limit_text)//' s'
             rc%state = FINISHED
             done = .true.
             return

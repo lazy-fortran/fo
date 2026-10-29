@@ -744,7 +744,7 @@ contains
         sequence = int(clock_count)
         call log_path(session, 'reproduce-'//int_text(sequence)//'.log', log_file)
         call log_path(session, 'reproduce-'//int_text(sequence)//'-build.log', build_log)
-        timeout = case_wall_timeout(generation%project_root, request%case_id, &
+        timeout = case_wall_timeout(generation, request%case_id, &
             request%timeout_seconds)
         write (view_owner, '(a,"-reproduce-",i0)') session%session_id, sequence
         call execution_view_create(session%state_dir//'/views', generation%identity, &

@@ -511,6 +511,7 @@ contains
                 o%tests(slot)%execution_view)
             if (o%tests(slot)%job%timed_out) then
                 outcome = 'TIMEOUT'
+                call note_case_timeout(o%tests(slot)%job)
             else
                 o%state = 'testing'
                 outcome = runner_case_outcome(o%tests(slot)%job%log_file, &
@@ -1095,7 +1096,7 @@ contains
             int_text(max(1, gremlin_host_jobs()/o%lane_jobs))
         call exec_start(o%tests(slot)%job, trim(o%active%build_project_root), packed, &
             n_args, trim(log_file), spawn_error, env, case_wall_timeout( &
-            o%active%project_root, name, o%request%timeout_seconds))
+            o%active, name, o%request%timeout_seconds))
         if (spawn_error /= 0) then
             call execution_view_release(o%tests(slot)%execution_view, .false., status, &
                 detail)
@@ -1626,5 +1627,19 @@ contains
         end do
     end subroutine read_last_lifecycle_event
 
+    subroutine note_case_timeout(job)
+        !! The log of a case Gremlin cancelled names the limit it used, so a
+        !! reader can tell Gremlin's backstop from the test's own verdict.
+        type(exec_job_t), intent(in) :: job
+        integer :: unit, ios
+
+        open (newunit=unit, file=trim(job%log_file), position='append', &
+            action='write', iostat=ios)
+        if (ios /= 0) return
+        write (unit, '(a,i0,a)') 'fo gremlin: TIMEOUT: case cancelled at its '// &
+            'Gremlin wall limit of ', (job%deadline_ms - job%started_ms)/1000_int64, &
+            ' s (CTest TIMEOUT or default, fpm wall cap, or --timeout-seconds)'
+        close (unit)
+    end subroutine note_case_timeout
 
 end module fo_gremlin_owner

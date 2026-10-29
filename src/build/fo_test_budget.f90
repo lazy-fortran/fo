@@ -16,6 +16,7 @@ module fo_test_budget
 
     public :: test_timeout_seconds, slow_test_timeout_seconds
     public :: test_budget_seconds, test_wall_cap_seconds
+    public :: ctest_default_timeout_seconds
     public :: timeout_detail
     public :: test_policy, test_strict_flaky, test_retries_override
     public :: test_set_retry_options
@@ -23,6 +24,9 @@ module fo_test_budget
     integer, parameter :: DEFAULT_TEST_TIMEOUT = 10
     integer, parameter :: DEFAULT_SLOW_TEST_TIMEOUT = 300
     integer, parameter :: WALL_CAP_FACTOR = 10
+    !! ctest's limit for a test without TIMEOUT (DART_TESTING_TIMEOUT of the
+    !! CTest module).
+    integer, parameter, public :: CTEST_DEFAULT_TIMEOUT = 1500
     !! The isolated rerun fo always did for a failure: one retry.
     integer, parameter, public :: DEFAULT_TEST_RETRIES = 1
     !! `fo test --retries N` and `--strict-flaky` of this process.
@@ -81,6 +85,22 @@ contains
         if (t <= 0) t = WALL_CAP_FACTOR * budget
         t = max(t, budget)
     end function test_wall_cap_seconds
+
+    integer function ctest_default_timeout_seconds() result(t)
+        !! Wall limit of a CTest case without its own TIMEOUT property:
+        !! FO_TEST_WALL_TIMEOUT, else the wall cap of an explicit
+        !! FO_TEST_TIMEOUT, else ctest's default. The fpm budget does not
+        !! apply because a CMake project never opted into it.
+        integer :: budget
+
+        t = 0
+        call environment_seconds('FO_TEST_WALL_TIMEOUT', t)
+        if (t > 0) return
+        budget = 0
+        call environment_seconds('FO_TEST_TIMEOUT', budget)
+        t = CTEST_DEFAULT_TIMEOUT
+        if (budget > 0) t = WALL_CAP_FACTOR*budget
+    end function ctest_default_timeout_seconds
 
     subroutine test_policy(config, name, source, retries, slow_period, slow_after)
         !! Retries after a failure and the SLOW period and terminate-after
