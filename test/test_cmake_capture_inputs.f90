@@ -13,7 +13,7 @@ program test_cmake_capture_inputs
     use fo_gremlin_generation, only: generation_context_t, generation_t, &
         generation_capture
     use fo_cache, only: cache_file_digest
-    use fo_fs, only: fs_remove_tree, fs_remove_file, fs_find_executable
+    use fo_fs, only: fs_remove_tree, fs_remove_file, fs_find_executable, fs_realpath
     use fo_gremlin_execution_view, only: execution_view_t, execution_view_create, &
         execution_view_release
     implicit none
@@ -271,7 +271,10 @@ contains
         type(string_list_t) :: command, selected
         type(process_result_t) :: result
         character(:), allocatable :: root, native_sdk, library, frozen, declared_bundle
+        character(:), allocatable :: physical_sdk
+        character(len=4096) :: resolved_sdk
         integer :: status, metadata, source_root, alias_index
+        logical :: sdk_resolved
 
         root = scratch//'/library-project'
         native_sdk = scratch//'/library-sdk'
@@ -304,6 +307,12 @@ contains
         call list_add(command, '1')
         call run_process(command, root, result, timeout_ms=30000)
         call assert_process_ok(result, 'native toy SDK archive builds')
+        ! Capture records resolved paths; the scratch root may itself be a
+        ! symlink, such as /var -> /private/var on macOS.
+        call fs_realpath(native_sdk, resolved_sdk, sdk_resolved)
+        call assert_true(sdk_resolved, 'native toy SDK root resolves')
+        physical_sdk = trim(resolved_sdk)
+        library = physical_sdk//'/lib/libtoy.a'
         call make_symlink('../lib/libtoy.a', native_sdk//'/include/libtoy.a')
         call make_symlink('../lib/libconfigure_only.a', &
             native_sdk//'/include/libconfigure_only.a')
@@ -354,7 +363,7 @@ contains
         frozen = read_text(trim(captured%roots(metadata)%physical_path)//'/cache.cmake')
         call assert_contains(frozen, 'set(TOY_LIBRARY "'//library//'" CACHE FILEPATH', &
             'native SDK library alias keeps its canonical target')
-        call assert_contains(frozen, 'set(TOY_CONFIGURE_LIBRARY "'//native_sdk// &
+        call assert_contains(frozen, 'set(TOY_CONFIGURE_LIBRARY "'//physical_sdk// &
             '/lib/libconfigure_only.a" CACHE FILEPATH', &
             'configure-only SDK library keeps its canonical target')
         call assert_contains(frozen, 'set(TOY_DATA_LIBRARY "'// &
@@ -431,7 +440,7 @@ contains
             declared_bundle = ''
             if (source_root > 0) then
                 call assert_equal_string( &
-                    trim(declared%roots(source_root)%physical_path), native_sdk, &
+                    trim(declared%roots(source_root)%physical_path), physical_sdk, &
                     'declared library root retains its native source identity')
                 do alias_index = 1, declared%roots(source_root)%alias_count
                     if (trim(declared%roots(source_root)%aliases(alias_index)) /= &

@@ -140,9 +140,11 @@ contains
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
         character(len=:), allocatable :: project, relative
+        character(len=PATH_LEN) :: canonical_root
         type(input_declaration_t) :: declaration
         type(input_declaration_t), allocatable :: grown(:)
         integer :: root_index, i
+        logical :: ok
 
         call reset_entry_index(inventory)
         ierr = 1
@@ -150,6 +152,12 @@ contains
         root_index = alias_root(inventory, 'project')
         if (root_index == 0) return
         project = trim(inventory%roots(root_index)%physical_path)
+        if (index(path, project//'/') /= 1) then
+            ! CMake reports the resolved source directory, while the root keeps
+            ! its authored spelling, e.g. /var versus /private/var on macOS.
+            call fs_realpath(project, canonical_root, ok)
+            if (ok) project = trim(canonical_root)
+        end if
         if (cmake_include_state(project, path) < 0) return
         relative = path(len(project) + 2:)
         ierr = 0
