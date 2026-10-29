@@ -971,6 +971,7 @@ contains
         name = adjustl(line(start:))
         if (index(name, ' ') > 0) name = name(1:index(name, ' ') - 1)
         if (index(name, '!') > 0) name = name(1:index(name, '!') - 1)
+        if (index(name, ';') > 0) name = name(1:index(name, ';') - 1)
         name = to_lower(name)
         ! PROGRAM is not reserved: an assignment must not create a main program.
         if (verify(name(1:1), 'abcdefghijklmnopqrstuvwxyz') /= 0) then

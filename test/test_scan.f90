@@ -526,6 +526,16 @@ contains
             'scan_program_assignment: actual declaration is a main program')
         call assert(trim(info%program_name) == 'main_2', &
             'scan_program_assignment: assignments preserve the actual name')
+
+        lines(1) = 'PROGRAM Main_2; implicit none'
+        lines(2) = ''
+        call write_file(path, lines, size(lines))
+        call scan_file_regex(path, info, ierr)
+        call assert(ierr == 0, 'scan_program_assignment: semicolon has no error')
+        call assert(info%is_program, &
+            'scan_program_assignment: semicolon preserves the main program')
+        call assert(trim(info%program_name) == 'main_2', &
+            'scan_program_assignment: semicolon ends the program declaration')
         call fs_remove_file(trim(path))
     end subroutine test_scan_program_assignment
 
