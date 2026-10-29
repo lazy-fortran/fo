@@ -79,6 +79,11 @@ module fo_gfortran_build
     !> fpm's own profile flags have to be visible to the compile path.
     character(len=512), save :: build_request_flags = ''
 
+    type, private :: test_link_inputs_t
+        character(len=512), allocatable :: objects(:)
+        character(len=HASH_LEN) :: digest = ''
+    end type test_link_inputs_t
+
     type, private :: current_test_t
         !! One selected test: what to run, where its log went, how it ended.
         character(len=MAX_PATH) :: name = ''
@@ -3727,6 +3732,45 @@ contains
         stem = trim(base)
     end subroutine app_prog_stem
 
+    subroutine compile_test_c_inputs(project_dir, source, obj_dir, config, &
+            library_inputs, log_file, inputs, exitcode)
+        character(len=*), intent(in) :: project_dir, source, obj_dir, log_file
+        type(fpm_config_t), intent(in) :: config
+        character(len=512), intent(in) :: library_inputs(:)
+        character(len=512), allocatable, intent(out) :: inputs(:)
+        integer, intent(out) :: exitcode
+        character(len=512), allocatable :: files(:), objects(:)
+        character(len=512) :: object_path, main_source
+        integer :: slash, n_files, n_objects, i, j
+        logical :: is_main
+
+        ! fpm links non-module helpers below each executable's own directory.
+        ! Registered C/C++ mains belong to their executable, never its neighbours.
+        slash = index(trim(source), '/', back=.true.)
+        allocate (files(MAX_SRC_OBJS), objects(MAX_SRC_OBJS))
+        call collect_c_family(source(:slash - 1), files, n_files)
+        n_objects = 0
+        exitcode = 0
+        do i = 1, n_files
+            is_main = .false.
+            do j = 1, config%n_tests
+                main_source = trim(project_dir)//'/'// &
+                    trim(config%tests(j)%source_dir)//'/'//trim(config%tests(j)%main)
+                if (trim(files(i)) == trim(main_source)) is_main = .true.
+            end do
+            if (is_main) cycle
+            call make_obj_path(trim(files(i)), project_dir, obj_dir, object_path)
+            call compile_c_family(trim(files(i)), object_path, project_dir, &
+                log_file, exitcode, .true.)
+            if (exitcode /= 0) return
+            n_objects = n_objects + 1
+            objects(n_objects) = object_path
+        end do
+        allocate (inputs(size(library_inputs) + n_objects))
+        inputs(:size(library_inputs)) = library_inputs
+        inputs(size(library_inputs) + 1:) = objects(:n_objects)
+    end subroutine compile_test_c_inputs
+
     subroutine compile_tests(project_dir, test_dir, mod_dir, obj_dir, &
             bin_dir, dep_includes, n_dep_includes, &
             dep_objs, n_dep_objs, lib_objs, n_lib_objs, &
@@ -3752,6 +3796,7 @@ contains
         logical, intent(in), optional :: use_cache
 
         type(scan_unit_t), allocatable :: tunits(:)
+        type(test_link_inputs_t), allocatable :: test_links(:)
         integer :: n_tests, i, ierr, node_id, n_run, team_size
         type(dag_t) :: dag
         character(len=MAX_PATH), allocatable :: filenames(:)
@@ -4002,9 +4047,21 @@ contains
             end if
         end if
 
+        allocate (test_links(n_run))
         do i = 1, n_run
             if (run_build_indices(i) /= i) cycle
             node_id = run_nodes(i)
+            call compile_test_c_inputs(project_dir, filenames(node_id), obj_dir, &
+                manifest_config, link_inputs(:n_link_inputs), log_file, &
+                test_links(i)%objects, exitcode)
+            if (exitcode /= 0) return
+            test_links(i)%digest = link_base
+            if (cache_ierr == 0 .and. &
+                size(test_links(i)%objects) > n_link_inputs) then
+                call link_base_digest(project_dir, test_links(i)%objects, &
+                    size(test_links(i)%objects), test_dep_objs, n_link_dep_objs, &
+                    link_libs, n_link_libs, test_links(i)%digest)
+            end if
             n_dep = 0
             call add_external_dep_keys(tunits, n_tests, filenames(node_id), &
                 test_includes, n_test_includes, &
@@ -4016,8 +4073,9 @@ contains
             test_key_flags = compile_key_flags(test_flags)//new_line('a')// &
                 'source-context:'//source_compile_context( &
                 filenames(node_id), project_dir, incl_flag)
-            if (len_trim(link_base) > 0) test_key_flags = &
-                trim(test_key_flags)//new_line('a')//'test-link:'//trim(link_base)
+            if (len_trim(test_links(i)%digest) > 0) test_key_flags = &
+                trim(test_key_flags)//new_line('a')//'test-link:'// &
+                trim(test_links(i)%digest)
             if (len_trim(run_args(i)) > 0) then
                 test_key_flags = trim(test_key_flags)//new_line('a')// &
                     'test-args:'//trim(run_args(i))
@@ -4052,9 +4110,10 @@ contains
             end if
             if (run_exits(i) == 0) then
                 bin_path = run_bins(i)
-                call link_binary(project_dir, obj_path, link_inputs, n_link_inputs, &
-                    test_dep_objs, n_link_dep_objs, link_libs, n_link_libs, bin_path, &
-                    log_local, run_exits(i), test_flags, c, link_base, &
+                call link_binary(project_dir, obj_path, test_links(i)%objects, &
+                    size(test_links(i)%objects), test_dep_objs, n_link_dep_objs, &
+                    link_libs, n_link_libs, bin_path, log_local, run_exits(i), &
+                    test_flags, c, test_links(i)%digest, &
                     compiler_identity=compiler)
             end if
         end do
