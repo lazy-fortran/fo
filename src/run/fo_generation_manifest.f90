@@ -67,11 +67,12 @@ module fo_generation_manifest
         end function fo_c_generation_create_link
 
         integer(c_int) function fo_c_generation_open_input(root, relative, &
-                expected_device, expected_inode) &
+                expected_device, expected_inode, sdk_headers) &
                 bind(C, name='fo_c_generation_open_input')
             import :: c_char, c_int, c_long_long
             character(kind=c_char), intent(in) :: root(*), relative(*)
             integer(c_long_long), value :: expected_device, expected_inode
+            integer(c_int), value :: sdk_headers
         end function fo_c_generation_open_input
 
         integer(c_int) function fo_c_generation_close_fd(fd) &
@@ -246,7 +247,9 @@ contains
                 trim(inventory%roots(root_index)%physical_path)//c_null_char, &
                 trim(inventory%entries(i)%relative_path)//c_null_char, &
                 inventory%roots(root_index)%device, &
-                inventory%roots(root_index)%inode)
+                inventory%roots(root_index)%inode, &
+                merge(1_c_int, 0_c_int, &
+                index(inventory%roots(root_index)%canonical_alias, 'cmake-include:sdk-') == 1))
             if (fd < 0) then
                 status = 1
                 message = 'descriptor-rooted input capture failed: '// &

@@ -366,7 +366,7 @@ contains
             [character(len=7) :: 'include', 'module']
         character(len=7), parameter :: manifests(2) = &
             [character(len=7) :: 'headers', 'modules']
-        logical :: provider_dir_exists
+        logical :: provider_dir_exists, sdk_headers
         type(input_entry_t) :: provider_dir
         character(len=7), parameter :: provider_dirs(2) = &
             [character(len=7) :: 'include', 'lib']
@@ -414,7 +414,8 @@ contains
                     'cmake-provider-input', .false., root_index, inventory, ierr, message)
             else
                 call scan_tree(inventory, root_index, labels(i), sources(i), '', &
-                    'cmake-dependency-input', .false., ierr, message, cmake_scan=.true.)
+                    'cmake-dependency-input', .false., ierr, message, cmake_scan=.true., &
+                    sdk_headers=index(labels(i), 'cmake-include:sdk-') == 1)
             end if
             if (ierr /= 0) return
         end do
@@ -430,10 +431,12 @@ contains
                             message = 'CMake input directory contains a newline'
                             return
                         end if
+                        sdk_headers = index(labels(i), 'cmake-include:sdk-') == 1
                         call cmake_input_digest(trim(sources(i)), header_digest, &
-                            ierr, message)
+                            ierr, message, sdk_headers=sdk_headers)
                         if (ierr /= 0) return
-                        headers = headers//header_digest//' '//trim(sources(i))// &
+                        headers = headers//header_digest//' '// &
+                            merge('S ', 'R ', sdk_headers)//trim(sources(i))// &
                             new_line('a')
                     end do
                     if (len(headers) > 0) then
@@ -465,11 +468,12 @@ contains
         inventory%valid = .true.
     end subroutine input_inventory_discover_cmake
 
-    subroutine cmake_input_digest(root, digest, ierr, message)
+    subroutine cmake_input_digest(root, digest, ierr, message, sdk_headers)
         character(len=*), intent(in) :: root
         character(len=*), intent(out) :: digest, message
         integer, intent(out) :: ierr
         type(input_inventory_t) :: headers
+        logical, intent(in) :: sdk_headers
         integer :: root_index
 
         digest = ''
@@ -480,7 +484,8 @@ contains
         call add_root(headers, 'headers', root, root_index, ierr, message, 'headers')
         if (ierr /= 0) return
         call scan_tree(headers, root_index, 'headers', root, '', &
-            'cmake-header-input', .false., ierr, message, cmake_scan=.true.)
+            'cmake-header-input', .false., ierr, message, cmake_scan=.true., &
+            sdk_headers=sdk_headers)
         if (ierr /= 0) return
         call canonicalize_inventory(headers, ierr, message)
         digest = headers%digest
@@ -503,8 +508,8 @@ contains
         character(len=*), intent(out) :: message
         character(len=PATH_LEN + HASH_LEN + 1) :: line
         character(len=HASH_LEN) :: digest
-        integer :: unit, ios
-        logical :: exists
+        integer :: unit, ios, path_start
+        logical :: exists, sdk_headers
 
         ierr = 0
         message = ''
@@ -524,10 +529,18 @@ contains
                 message = 'invalid captured CMake '//group//' fingerprint'
                 exit
             end if
-            call cmake_input_digest(trim(line(HASH_LEN + 2:)), digest, ierr, message)
+            path_start = HASH_LEN + 2
+            sdk_headers = .false.
+            if (line(path_start:path_start + 1) == 'S ' .or. &
+                line(path_start:path_start + 1) == 'R ') then
+                sdk_headers = line(path_start:path_start) == 'S'
+                path_start = path_start + 2
+            end if
+            call cmake_input_digest(trim(line(path_start:)), digest, ierr, message, &
+                sdk_headers=sdk_headers)
             if (ierr /= 0 .or. digest /= line(:HASH_LEN)) then
                 ierr = 1
-                message = 'captured CMake '//group//' changed: '//trim(line(HASH_LEN + 2:))
+                message = 'captured CMake '//group//' changed: '//trim(line(path_start:))
                 exit
             end if
         end do
@@ -1742,7 +1755,7 @@ contains
 
     subroutine scan_tree(inventory, root_index, alias, physical_root, prefix, &
             role, writable, ierr, message, cmake_scan, excluded_directory, &
-            skip_hidden_caches)
+            skip_hidden_caches, sdk_headers)
         type(input_inventory_t), intent(inout) :: inventory
         integer, intent(in) :: root_index
         character(len=*), intent(in) :: alias, physical_root, prefix, role
@@ -1750,14 +1763,14 @@ contains
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
 
-        character(len=PATH_LEN) :: manifest, line, relative, target
+        character(len=PATH_LEN) :: manifest, line, relative, target, file_path
         character(len=PATH_LEN) :: symlink_parts(1)
         character(len=HASH_LEN) :: hash
         integer :: rc, unit, ios, kind, decode_status
         type(input_entry_t) :: entry
         character(kind=c_char, len=:), allocatable :: c_root, c_manifest
-        logical :: whole_root_scan
-        logical, intent(in), optional :: cmake_scan, skip_hidden_caches
+        logical :: whole_root_scan, resolved
+        logical, intent(in), optional :: cmake_scan, skip_hidden_caches, sdk_headers
         character(len=*), intent(in), optional :: excluded_directory
         character(kind=c_char, len=:), allocatable :: c_excluded
         integer(c_int) :: exclude_root_outputs
@@ -1779,6 +1792,9 @@ contains
         end if
         if (present(cmake_scan)) then
             if (cmake_scan .and. whole_root_scan) exclude_root_outputs = 2_c_int
+        end if
+        if (present(sdk_headers)) then
+            if (sdk_headers) exclude_root_outputs = 4_c_int
         end if
         c_manifest = trim(manifest)//c_null_char
         if (present(excluded_directory)) then
@@ -1856,8 +1872,19 @@ contains
             case (INPUT_DIRECTORY)
                 entry%mode = 0
             case (INPUT_FILE)
-                call action_result_file_mode(trim(physical_root)//'/'// &
-                    trim(relative), entry%mode, decode_status)
+                file_path = trim(physical_root)//'/'//trim(relative)
+                if (present(sdk_headers)) then
+                    if (sdk_headers) then
+                        call fs_realpath(trim(file_path), target, resolved)
+                        if (.not. resolved) then
+                            ierr = 1
+                            message = 'SDK header changed during enumeration: '//trim(relative)
+                            exit
+                        end if
+                        file_path = target
+                    end if
+                end if
+                call action_result_file_mode(trim(file_path), entry%mode, decode_status)
                 if (decode_status /= ACTION_RESULT_OK) then
                     ierr = 1
                     message = 'input file changed during enumeration: '// &
@@ -1865,8 +1892,7 @@ contains
                     exit
                 end if
                 entry%mode = iand(entry%mode, 511)
-                call immutable_store_hash_file(trim(physical_root)//'/'// &
-                    trim(relative), hash, decode_status)
+                call immutable_store_hash_file(trim(file_path), hash, decode_status)
                 if (decode_status /= IMMUTABLE_OK .or. &
                     len_trim(hash) /= HASH_LEN) then
                     ierr = 1

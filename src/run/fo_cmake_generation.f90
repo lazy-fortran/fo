@@ -1522,6 +1522,9 @@ contains
                                         ierr, message, .false.)
                                     if (ierr /= 0) return
                                     labels(n_roots) = 'cmake-include:'//digest(:16)
+                                    if (.not. inside(physical, project) .and. &
+                                        provider_root == 0) &
+                                        labels(n_roots) = 'cmake-include:sdk-'//digest(:16)
                                     if (provider_root > 0) then
                                         j = len_trim(roots(provider_root)) + 1
                                         bundles(n_roots) = &
