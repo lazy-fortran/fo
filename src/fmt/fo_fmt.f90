@@ -1,5 +1,6 @@
 module fo_fmt
-    use fo_util, only: make_tmpfile, delete_tmpfile, strip_toml_comment
+    use fo_util, only: make_tmpfile, delete_tmpfile, strip_toml_comment, &
+        read_text_file_alloc
     use fo_fs, only: fs_make_dir, fs_write_text, fs_append_file, fs_collect_files
     use fo_build_backend, only: backend_t, detect_backend, BACKEND_NONE
     use fo_cache, only: cache_store_root, HASH_LEN
@@ -12,7 +13,7 @@ module fo_fmt
     implicit none
     private
     public :: fmt_sources, FMT_SELECT_ALL, FMT_SELECT_FILES, FMT_SELECT_CHANGED
-    public :: write_git_changed_source_list
+    public :: write_git_changed_source_list, fmt_check_lines, fmt_diff_lines
 
     integer, parameter :: FMT_SELECT_ALL = 1, FMT_SELECT_FILES = 2, FMT_SELECT_CHANGED = 3
 
@@ -121,6 +122,164 @@ contains
         end if
         call delete_tmpfile(list_file)
     end subroutine fmt_sources
+
+    subroutine fmt_check_lines(dir, path, changed, output, exitcode)
+        !! Check only the lines of dir/path flagged in `changed`, so formatting
+        !! the formatter would apply elsewhere in a legacy file never blocks.
+        !! Appends a report to `output` and sets `exitcode` to 1 on a violation.
+        character(len=*), intent(in) :: dir, path
+        logical, intent(in) :: changed(:)
+        character(len=*), intent(inout) :: output
+        integer, intent(inout) :: exitcode
+
+        type(backend_t) :: b
+        character(len=512) :: scan_root, config_file, fpath, tmpf, difflog
+        character(len=:), allocatable :: packed, text, line
+        character(len=16) :: line_text
+        integer :: n_args, status, ierr, first, last, k, pos, eol
+        logical :: reporting
+
+        fpath = trim(path)
+        if (.not. is_fortran_source(fpath)) return
+        if (fpath(1:1) /= '/') fpath = trim(dir)//'/'//trim(fpath)
+        b = detect_backend(trim(dir))
+        scan_root = trim(dir)
+        if (b%kind /= BACKEND_NONE) scan_root = b%project_dir
+        if (skip_generated_source(scan_root, fpath, .false.)) return
+        call find_fprettify_config(scan_root, config_file)
+
+        call make_tmpfile('fo_fmt_check', tmpf)
+        call fs_append_file(trim(fpath), trim(tmpf))
+        call format_project_file(config_file, trim(tmpf), status)
+        if (status /= 0) then
+            call delete_tmpfile(tmpf)
+            output = trim(output)//trim(path)//': formatting failed'//achar(10)
+            exitcode = 1
+            return
+        end if
+        call make_tmpfile('fo_fmt_diff', difflog)
+        n_args = 0
+        packed = ''
+        call argv_push(packed, n_args, 'git')
+        call argv_push(packed, n_args, 'diff')
+        call argv_push(packed, n_args, '--no-index')
+        call argv_push(packed, n_args, '--no-color')
+        call argv_push(packed, n_args, '--no-ext-diff')
+        call argv_push(packed, n_args, '--no-textconv')
+        call argv_push(packed, n_args, '-U0')
+        call argv_push(packed, n_args, '--')
+        call argv_push(packed, n_args, trim(fpath))
+        call argv_push(packed, n_args, trim(tmpf))
+        call process_run_argv_logged('', packed, n_args, trim(difflog), &
+            .false., 0, status)
+        call delete_tmpfile(tmpf)
+        call read_text_file_alloc(trim(difflog), text, ierr)
+        call delete_tmpfile(difflog)
+        if (status == 0) return
+        if (status /= 1 .or. ierr /= 0) then
+            output = trim(output)//trim(path)//': formatting comparison failed'//achar(10)
+            exitcode = 1
+            return
+        end if
+
+        ! Report the first formatter hunk that rewrites a changed line.
+        reporting = .false.
+        pos = 1
+        do while (pos <= len(text))
+            eol = index(text(pos:), achar(10))
+            if (eol == 0) then
+                line = text(pos:)
+                pos = len(text) + 1
+            else
+                line = text(pos:pos + eol - 2)
+                pos = pos + eol
+            end if
+            if (index(line, '@@ ') == 1) then
+                if (reporting) exit
+                call fmt_hunk_range(line, .true., first, last)
+                do k = max(first, 1), min(last, size(changed))
+                    if (.not. changed(k)) cycle
+                    write (line_text, '(i0)') k
+                    output = trim(output)//trim(path)//':'//trim(line_text)// &
+                        ': needs formatting'//achar(10)
+                    exitcode = 1
+                    reporting = .true.
+                    exit
+                end do
+            else if (reporting .and. len(line) > 0) then
+                if (line(1:1) == '-' .or. line(1:1) == '+') &
+                    output = trim(output)//'  '//line//achar(10)
+            end if
+        end do
+    end subroutine fmt_check_lines
+
+    subroutine fmt_diff_lines(text, old_side, lines)
+        !! Lines of one side of a zero-context unified diff that the diff touches.
+        character(len=*), intent(in) :: text
+        logical, intent(in) :: old_side
+        logical, allocatable, intent(out) :: lines(:)
+
+        integer :: pass, pos, eol, first, last, top
+
+        top = 0
+        do pass = 1, 2
+            if (pass == 2) then
+                allocate (lines(top))
+                lines = .false.
+            end if
+            pos = 1
+            do while (pos <= len(text))
+                eol = index(text(pos:), achar(10))
+                if (eol == 0) eol = len(text) - pos + 2
+                if (index(text(pos:pos + eol - 2), '@@ ') == 1) then
+                    call fmt_hunk_range(text(pos:pos + eol - 2), old_side, first, last)
+                    if (pass == 1) top = max(top, last)
+                    if (pass == 2 .and. last >= first) lines(max(first, 1):last) = .true.
+                end if
+                pos = pos + eol
+            end do
+        end do
+    end subroutine fmt_diff_lines
+
+    subroutine fmt_hunk_range(header, old_side, first, last)
+        !! Line range of one side of a "@@ -a,b +c,d @@" header. A pure
+        !! insertion on the old side touches the lines around its position.
+        character(len=*), intent(in) :: header
+        logical, intent(in) :: old_side
+        integer, intent(out) :: first, last
+
+        integer :: start, stop_at, comma, count, ios
+        character(len=1) :: mark
+
+        first = 1
+        last = 0
+        mark = '+'
+        if (old_side) mark = '-'
+        start = index(header, ' '//mark)
+        if (start == 0) return
+        start = start + 2
+        stop_at = index(header(start:), ' ')
+        if (stop_at == 0) return
+        stop_at = start + stop_at - 2
+        comma = index(header(start:stop_at), ',')
+        count = 1
+        if (comma > 0) then
+            read (header(start:start + comma - 2), *, iostat=ios) first
+            if (ios /= 0) return
+            read (header(start + comma:stop_at), *, iostat=ios) count
+            if (ios /= 0) return
+        else
+            read (header(start:stop_at), *, iostat=ios) first
+            if (ios /= 0) return
+        end if
+        if (count > 0) then
+            last = first + count - 1
+        else if (old_side) then
+            last = first + 1
+        else
+            last = first - 1
+        end if
+    end subroutine fmt_hunk_range
 
     subroutine fo_fmt_list(config_file, list_file, exitcode)
         character(len=*), intent(in) :: config_file, list_file

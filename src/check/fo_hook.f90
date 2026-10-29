@@ -12,7 +12,7 @@ module fo_hook
     use fo_hook_evidence, only: hook_input_key, hook_receipt_read, &
         hook_receipt_write, hook_slow_case
     use fo_test_results, only: test_result_entry_t, parse_test_results
-    use fo_fmt, only: fmt_sources, FMT_SELECT_FILES
+    use fo_fmt, only: fmt_sources, FMT_SELECT_FILES, fmt_check_lines, fmt_diff_lines
     use fo_process, only: process_run_argv_logged, argv_push, process_self_executable, &
         process_getpid, process_exit, process_has_fortran_source_ext, TIMEOUT_WALL
     use fo_fs, only: fs_mkdir_excl, fs_remove_tree, fs_canonical_path, fs_sleep_ms
@@ -166,7 +166,8 @@ contains
         integer :: cleanup, attempts, nresults, r
         real :: seconds
         real(dp) :: started, elapsed, threshold
-        logical :: found, snapshot_owned, hit, built, identity_ok, populated_found
+        logical :: found, snapshot_owned, hit, built, identity_ok, populated_found, has_base
+        logical, allocatable :: added(:)
 
         code = 1
         message = ''
@@ -234,6 +235,7 @@ contains
             end if
             call git_text(root, git_words('diff-tree', '--no-commit-id', &
                 '--name-only', '-r', '-z', 'HEAD', tree), text, status, strip=.false.)
+            has_base = status == 0
             if (status /= 0) call git_text(root, git_words(&
                 'ls-tree', '-r', '-z', '--name-only', tree), text, status, strip=.false.)
             if (status /= 0) then
@@ -251,8 +253,25 @@ contains
                 nfiles = nfiles + 1
                 files(nfiles) = changed(i)%s
             end do
-            call fmt_sources(snapshot, FMT_SELECT_FILES, .true., .false., files, &
-                nfiles, formatting, status)
+            if (has_base) then
+                ! Only lines this commit adds or changes are checked, so legacy
+                ! formatting elsewhere in a touched file never blocks a commit.
+                formatting = ''
+                status = 0
+                do i = 1, nfiles
+                    call git_text(root, git_words('diff-tree', '-p', '-U0', 'HEAD', tree, &
+                        '--', ':(literal)'//trim(files(i))), text, j, strip=.false.)
+                    if (j /= 0) then
+                        message = 'cannot diff staged '//trim(files(i))
+                        exit validation
+                    end if
+                    call fmt_diff_lines(text, .false., added)
+                    call fmt_check_lines(snapshot, trim(files(i)), added, formatting, status)
+                end do
+            else
+                call fmt_sources(snapshot, FMT_SELECT_FILES, .true., .false., files, &
+                    nfiles, formatting, status)
+            end if
             if (status /= 0) then
                 message = trim(formatting)
                 exit validation

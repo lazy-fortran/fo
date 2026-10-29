@@ -548,6 +548,31 @@ program test_hook_precommit
     call assert_process_ok(result, 'declared label exclusion keeps reference out of the commit')
     call assert_contains(result%stdout, '"fast_passed":1', 'fast case still verified')
     call assert_contains(result%stdout, '"exclude_labels":["regression"]', 'exclusion is reported')
+
+    ! Legacy formatting on lines a commit does not touch never blocks it; the
+    ! changed lines are still checked.
+    project = join_path(scratch, 'legacy-format')
+    call write_text(project//'/fpm.toml', 'name = "hook_legacy"'//nl)
+    call write_text(project//'/src/legacy.f90', 'module legacy_mod'//nl// &
+        'implicit none'//nl//'    integer, parameter :: answer = 42'//nl// &
+        'end module legacy_mod'//nl)
+    call git([character(len=64) :: 'init', '-q'])
+    call git([character(len=64) :: 'add', 'fpm.toml', 'src/legacy.f90'])
+    call git([character(len=64) :: 'commit', '-qm', 'Synthetic legacy source'])
+    call write_text(project//'/src/legacy.f90', 'module legacy_mod'//nl// &
+        'implicit none'//nl//'    integer, parameter :: answer = 43'//nl// &
+        'end module legacy_mod'//nl)
+    call git([character(len=64) :: 'add', 'src/legacy.f90'])
+    call hook()
+    call assert_process_ok(result, 'clean change beside legacy formatting passes')
+    call write_text(project//'/src/legacy.f90', 'module legacy_mod'//nl// &
+        'implicit none'//nl//'integer,parameter::answer=43'//nl// &
+        'end module legacy_mod'//nl)
+    call git([character(len=64) :: 'add', 'src/legacy.f90'])
+    call hook()
+    call assert_true(result%exit_code /= 0, 'badly formatted changed line blocks')
+    call assert_contains(result%stdout, 'legacy.f90:3: needs formatting', &
+        'changed line is reported')
     call finish_assertions(retain_failed_scratch=.true.)
     call remove_tree(scratch)
 contains
