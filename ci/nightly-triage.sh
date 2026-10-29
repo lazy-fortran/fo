@@ -97,8 +97,8 @@ failure)
             git checkout -q "$head"
             git bisect start "$head" "$good"
             git bisect run "$tools/nightly-triage.sh" step "$cells" | tee "$RUNNER_TEMP/bisect.log"
-            bad=$(sed -n 's/^\([0-9a-f]\{40\}\) is the first bad commit$/\1/p' "$RUNNER_TEMP/bisect.log")
-            git bisect reset -q
+            bad=$(sed -n 's/^\([0-9a-f]\{40\}\) is the first bad commit$/\1/p' "$RUNNER_TEMP/bisect.log" | head -n 1)
+            git bisect reset > /dev/null
             if [ -n "$bad" ]; then
                 pr=$(gh api "repos/$repo/commits/$bad/pulls" --jq '.[0].number // empty' || true)
                 finding="First bad commit: $bad${pr:+ (#$pr)}, found by bisecting $good..$head."
