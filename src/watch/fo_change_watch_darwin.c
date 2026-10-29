@@ -187,13 +187,18 @@ static const char *apple_declared_path(const struct change_watch *w,
     return path;
 }
 
-/* FSEvents may replay the creation history of a stream root made just before
- * the stream started. The same directory still in place is no change; its
- * replacement or removal still reports through RootChanged. */
-static int apple_unchanged_stream_root(const struct change_watch *w,
-    const char *path) {
+/* FSEvents may replay the creation of a stream root made just before the
+ * stream started. A pure creation record for the same directory still in
+ * place is no change; metadata changes of the root itself remain inputs. */
+static int apple_replayed_stream_root(const struct change_watch *w,
+    const char *path, FSEventStreamEventFlags flags) {
+    const FSEventStreamEventFlags creation = kFSEventStreamEventFlagItemCreated |
+        kFSEventStreamEventFlagItemXattrMod | kFSEventStreamEventFlagItemIsDir |
+        kFSEventStreamEventFlagOwnEvent;
     struct stat st;
     size_t i;
+    if (!(flags & kFSEventStreamEventFlagItemCreated) || (flags & ~creation))
+        return 0;
     for (i = 0; i < w->nwatched; ++i) {
         if (strcmp(path, w->watched[i].path)) continue;
         return !stat(path, &st) && S_ISDIR(st.st_mode) &&
@@ -228,8 +233,7 @@ static void apple_callback(ConstFSEventStreamRef stream, void *info,
             apple_mark_dirty(w);
             continue;
         }
-        if ((flags[i] & kFSEventStreamEventFlagItemIsDir) &&
-            apple_unchanged_stream_root(w, path)) continue;
+        if (apple_replayed_stream_root(w, path, flags[i])) continue;
         if (flags[i] & kFSEventStreamEventFlagItemIsDir) {
             apple_mark_dirty(w);
             continue;
