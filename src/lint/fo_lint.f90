@@ -33,9 +33,10 @@ module fo_lint
     integer, parameter :: MAX_SYMS = 512
     logical :: findings_truncated = .false.
     integer, parameter :: MAX_SYM_LEN = 128
-    ! Usage-scan buffer. Sized for a module plus all of its submodule bodies and
-    ! their includes appended together (see lint_file_ex).
-    integer, parameter :: MAX_LINT_LINES = 60000
+    ! Initial usage-scan buffer; it grows, because a module plus all of its
+    ! submodule bodies can exceed any fixed size and a truncated scan reports
+    ! used imports as unused.
+    integer, parameter :: INITIAL_LINT_LINES = 60000
 
     type :: lint_finding_t
         character(len=256) :: file = ''
@@ -79,7 +80,7 @@ contains
         character(len=256), allocatable :: seen(:)
         integer :: n_lines, n_main, i, n_seen
 
-        allocate (lines(MAX_LINT_LINES), lowered(MAX_LINT_LINES), seen(2048))
+        allocate (lines(INITIAL_LINT_LINES), seen(2048))
         n_seen = 0
 
         n_lines = 0
@@ -105,6 +106,7 @@ contains
                 seen, n_seen)
         end do
 
+        allocate (lowered(max(1, n_lines)))
         do i = 1, n_lines
             lowered(i) = to_lower(lines(i))
         end do
@@ -129,18 +131,23 @@ contains
     subroutine append_file_body(filename, lines, n_lines)
         !! Append every line of filename to the usage-scan buffer.
         character(len=*), intent(in) :: filename
-        character(len=1024), intent(inout) :: lines(:)
+        character(len=1024), allocatable, intent(inout) :: lines(:)
         integer, intent(inout) :: n_lines
 
         character(len=1024) :: line
+        character(len=1024), allocatable :: bigger(:)
         integer :: u, iostat
 
         open (newunit=u, file=filename, status='old', iostat=iostat)
         if (iostat /= 0) return
         do
-            if (n_lines >= size(lines)) exit
             read (u, '(a)', iostat=iostat) line
             if (iostat /= 0) exit
+            if (n_lines >= size(lines)) then
+                allocate (bigger(2*size(lines)))
+                bigger(1:n_lines) = lines(1:n_lines)
+                call move_alloc(bigger, lines)
+            end if
             n_lines = n_lines + 1
             lines(n_lines) = line
         end do
@@ -155,7 +162,7 @@ contains
         !! at most once (no duplication when many siblings share includes), which
         !! also breaks circular includes.
         character(len=*), intent(in) :: filename
-        character(len=1024), intent(inout) :: lines(:)
+        character(len=1024), allocatable, intent(inout) :: lines(:)
         integer, intent(inout) :: n_lines
         character(len=256), intent(inout) :: seen(:)
         integer, intent(inout) :: n_seen
