@@ -23,6 +23,7 @@ program test_lint
     call test_lint_dir_skips_skbuild_tree()
     call test_lint_dir_skips_cmake_generated_sources()
     call test_lint_files_checks_only_selected_sources()
+    call test_import_used_late_in_large_submodule()
 
     write (output_unit, '(a,i0,a,i0,a)') 'lint: ', n_pass, ' pass, ', n_fail, ' fail'
     if (n_fail > 0) stop 1
@@ -64,6 +65,48 @@ contains
             'selected lint still reports unused imports in changed sources')
         call fs_remove_tree(dir)
     end subroutine test_lint_files_checks_only_selected_sources
+
+    subroutine test_import_used_late_in_large_submodule()
+        ! A module plus its submodules may exceed the initial scan buffer; an
+        ! import used only past that point must still count as used.
+        type(lint_finding_t) :: findings(MAX_FINDINGS)
+        character(len=512) :: selected(1), dir, parent_file, child_file
+        integer :: n_findings, u, i
+
+        dir = '/tmp/fo_lint_large_submodule'
+        parent_file = trim(dir)//'/parent.f90'
+        child_file = trim(dir)//'/parent_child.f90'
+        call fs_remove_tree(dir)
+        call fs_make_dir(dir)
+        open (newunit=u, file=parent_file, status='replace')
+        write (u, '(a)') 'module parent'
+        write (u, '(a)') 'use constants, only: late_symbol'
+        write (u, '(a)') 'implicit none'
+        write (u, '(a)') 'private'
+        write (u, '(a)') 'interface'
+        write (u, '(a)') 'module subroutine s()'
+        write (u, '(a)') 'end subroutine s'
+        write (u, '(a)') 'end interface'
+        write (u, '(a)') 'end module parent'
+        close (u)
+        open (newunit=u, file=child_file, status='replace')
+        write (u, '(a)') 'submodule (parent) parent_child'
+        write (u, '(a)') 'contains'
+        write (u, '(a)') 'module subroutine s()'
+        do i = 1, 70000
+            write (u, '(a)') '! filler'
+        end do
+        write (u, '(a)') 'print *, late_symbol'
+        write (u, '(a)') 'end subroutine s'
+        write (u, '(a)') 'end submodule parent_child'
+        close (u)
+
+        selected(1) = parent_file
+        call lint_files(dir, selected, 1, findings, n_findings)
+        call assert(n_findings == 0, &
+            'import used only late in a large submodule is not flagged unused')
+        call fs_remove_tree(dir)
+    end subroutine test_import_used_late_in_large_submodule
 
     subroutine assert(cond, msg)
         logical, intent(in) :: cond
