@@ -7,7 +7,7 @@ module fo_dep_resolve
     !! shadow downstream declarations; downstream dev edges are excluded.
     use fo_fpm_config, only: fpm_config_t, fpm_dep_t, fpm_config_parse, &
         fpm_config_allocate, dep_kind, &
-        DEP_PATH, DEP_GIT, DEP_REGISTRY, add_link_lib
+        DEP_PATH, DEP_GIT, DEP_REGISTRY, add_link_lib, merge_provider_link_flags
     use fo_registry, only: registry_resolve
     use fo_fs, only: fs_native_path, fs_path_root_len, fs_is_windows, &
         fs_path_has_drive, fs_identity
@@ -143,6 +143,7 @@ contains
             call fpm_config_parse(trim(deps(i)%dir), dcfg, ierr)
             if (ierr /= 0) cycle
             config%openmp = config%openmp .or. dcfg%openmp
+            call merge_provider_link_flags(dcfg, config)
             do j = 1, dcfg%n_link_libs
                 call add_link_lib(config, trim(dcfg%link_libs(j)))
             end do
@@ -151,6 +152,7 @@ contains
             call fpm_config_parse(trim(devs(i)%dir), dcfg, ierr)
             if (ierr /= 0) cycle
             config%openmp = config%openmp .or. dcfg%openmp
+            call merge_provider_link_flags(dcfg, config)
             do j = 1, dcfg%n_link_libs
                 call add_link_lib(config, trim(dcfg%link_libs(j)))
             end do

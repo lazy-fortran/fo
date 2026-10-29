@@ -15,7 +15,7 @@ module fo_fpm_config
     public :: valid_registry_version
     public :: manifest_exe_name, manifest_test_name, manifest_example_name
     public :: manifest_test_args
-    public :: MAX_LINK_LIBS, add_link_lib
+    public :: MAX_LINK_LIBS, add_link_lib, merge_provider_link_flags
     public :: MAX_EXTERNAL_MODULES
     public :: valid_manifest_module_name, absolute_dependency_destination
     public :: command_run, pkg_config_run
@@ -142,6 +142,7 @@ module fo_fpm_config
         character(len=128) :: external_modules(MAX_EXTERNAL_MODULES)
         integer :: n_flags = 0
         character(len=128) :: flags(MAX_FLAGS)
+        logical :: provider_link_flags(MAX_FLAGS) = .false.
         integer :: n_exes = 0
         type(fpm_exe_t), allocatable :: exes(:)
         integer :: n_tests = 0
@@ -337,6 +338,7 @@ contains
         c%external_modules = ''
         c%n_flags = 0
         c%flags = ''
+        c%provider_link_flags = .false.
         c%n_exes = 0
         if (allocated(c%exes)) deallocate (c%exes)
         if (allocated(c%tests)) deallocate (c%tests)
@@ -1122,16 +1124,37 @@ contains
         end select
     end subroutine parse_fortran
 
-    subroutine append_config_flag(flag, config)
+    subroutine append_config_flag(flag, config, link_requirement)
         character(len=*), intent(in) :: flag
+        type(fpm_config_t), intent(inout) :: config
+        logical, intent(in), optional :: link_requirement
+        integer :: i, previous_count
+
+        do i = 1, config%n_flags
+            if (trim(config%flags(i)) /= trim(flag)) cycle
+            if (present(link_requirement)) config%provider_link_flags(i) = &
+                config%provider_link_flags(i) .or. link_requirement
+            return
+        end do
+        previous_count = config%n_flags
+        call push_config_flag(flag, config)
+        if (present(link_requirement)) then
+            if (config%n_flags > previous_count) &
+                config%provider_link_flags(config%n_flags) = link_requirement
+        end if
+    end subroutine append_config_flag
+
+    subroutine merge_provider_link_flags(source, config)
+        type(fpm_config_t), intent(in) :: source
         type(fpm_config_t), intent(inout) :: config
         integer :: i
 
-        do i = 1, config%n_flags
-            if (trim(config%flags(i)) == trim(flag)) return
+        ! Compile-only provider options belong to their dependency's sources.
+        do i = 1, source%n_flags
+            if (.not. source%provider_link_flags(i)) cycle
+            call append_config_flag(trim(source%flags(i)), config, .true.)
         end do
-        call push_config_flag(flag, config)
-    end subroutine append_config_flag
+    end subroutine merge_provider_link_flags
 
     subroutine push_config_flag(flag, config)
         !! Store one compiler flag or fail the manifest: a dropped flag would
@@ -2647,7 +2670,7 @@ contains
             ierr = 1
             return
         end if
-        call append_pkg_config_flags(output, config)
+        call append_pkg_config_flags(output, config, .true.)
 
         call pkg_config_run(trim(package), '--cflags', output, exitcode)
         if (exitcode /= 0) then
@@ -2656,7 +2679,7 @@ contains
             ierr = 1
             return
         end if
-        call append_pkg_config_flags(output, config)
+        call append_pkg_config_flags(output, config, .false.)
         config%provider_packages = trim(config%provider_packages)//' '//trim(package)
     end subroutine import_pkg_config_package
 
@@ -2780,7 +2803,8 @@ contains
             call command_run(trim(wrapper), trim(option), output, exitcode)
             if (exitcode /= 0) cycle
             call append_command_flags(output, config, &
-                skip_command=(index(trim(option), 'showme') == 0))
+                skip_command=(index(trim(option), 'showme') == 0), &
+                link_requirement=(kind == 'link'))
             found = .true.
             return
         end do
@@ -2826,9 +2850,10 @@ contains
         call delete_tmpfile(trim(tmpfile))
     end subroutine pkg_config_run
 
-    subroutine append_pkg_config_flags(output, config)
+    subroutine append_pkg_config_flags(output, config, link_requirement)
         character(len=*), intent(in) :: output
         type(fpm_config_t), intent(inout) :: config
+        logical, intent(in) :: link_requirement
 
         integer :: i, n, start, finish
         character(len=256) :: token
@@ -2847,14 +2872,15 @@ contains
             finish = min(i - 1, start + len(token) - 1)
             token = ''
             token(:finish - start + 1) = output(start:finish)
-            call append_provider_token(trim(token), config)
+            call append_provider_token(trim(token), config, link_requirement)
         end do
     end subroutine append_pkg_config_flags
 
-    subroutine append_command_flags(output, config, skip_command)
+    subroutine append_command_flags(output, config, skip_command, &
+            link_requirement)
         character(len=*), intent(in) :: output
         type(fpm_config_t), intent(inout) :: config
-        logical, intent(in) :: skip_command
+        logical, intent(in) :: skip_command, link_requirement
 
         integer :: i, n, start, finish
         logical :: skipped
@@ -2878,14 +2904,15 @@ contains
             if (.not. skipped) then
                 skipped = .true.
             else
-                call append_provider_token(trim(token), config)
+                call append_provider_token(trim(token), config, link_requirement)
             end if
         end do
     end subroutine append_command_flags
 
-    subroutine append_provider_token(token, config)
+    subroutine append_provider_token(token, config, link_requirement)
         character(len=*), intent(in) :: token
         type(fpm_config_t), intent(inout) :: config
+        logical, intent(in) :: link_requirement
 
         if (len_trim(token) == 0) return
         if (len_trim(token) >= 3 .and. token(1:2) == '-l') then
@@ -2895,7 +2922,7 @@ contains
             ! uses one translated stream for both phases.  These options are
             ! valid in both contexts and preserve provider-specific paths,
             ! rpaths, pthread/OpenMP settings, and wrapper flags.
-            call append_config_flag(trim(token), config)
+            call append_config_flag(trim(token), config, link_requirement)
         end if
     end subroutine append_provider_token
 

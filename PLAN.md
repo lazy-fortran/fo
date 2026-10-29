@@ -7,6 +7,21 @@ Issues define observable success and this plan orders delivery. Apply
 smallest complete change, and preserve supported behaviour and independent
 failure detection. The workspace master plan, when present, owns delivery order.
 
+## Dependency provider linker flags (2026-10-29)
+
+- [V] A consumer of FortNum lost OpenBLAS's search path at the final link:
+  dependency library names propagated, but provider linker flags did not.
+  Provider link flags now propagate independently of compile-only settings.
+- [V] `test_transitive_blas_cli` fails with the unchanged driver and passes
+  with candidate SHA256
+  `d81776c3af35a2305ba5bf9303a665f1971142ab612a51131ef098c643134fbf`.
+  Its synthetic provider checks cold/warm application and test links through
+  regular/transitive/dev dependencies, plus compile-flag isolation.
+- [V] Five focused dependency/parser/OpenMP/platform-link tests pass without
+  retries, as does the real FortProb suite with no library-path override.
+  The resident parser/dependency gate passes both required tests; the complete
+  ordinary suite was not run for this repair.
+
 ## Emergency scanner selection (2026-10-28)
 
 - [V] Explicit fallback permission in CMake scanning ignored
