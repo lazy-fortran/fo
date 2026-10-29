@@ -21,7 +21,10 @@ program test_nproc_limits
         stop
     end if
     call make_tmpfile('nproc_limits', out)
-    call execute_command_line('FO_NPROC_CHILD=1 taskset -c 0 '//trim(self)// &
+    ! Pin to the first CPU this process may use: CPU 0 can lie outside the
+    ! cpuset of a batch job, and taskset rejects it there.
+    call execute_command_line('cpu=$(taskset -pc $$ | sed ''s/.*: *//; '// &
+        's/[-,].*//'') && FO_NPROC_CHILD=1 taskset -c "$cpu" '//trim(self)// &
         ' > '//trim(out), exitstat=status)
     if (status /= 0) error stop 'child failed'
     open (newunit=unit, file=trim(out), status='old', action='read')
