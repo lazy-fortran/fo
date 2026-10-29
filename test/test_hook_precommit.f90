@@ -566,7 +566,7 @@ program test_hook_precommit
     call hook()
     call assert_process_ok(result, 'clean change beside legacy formatting passes')
     call write_text(project//'/src/legacy.f90', 'module legacy_mod'//nl// &
-        'implicit none'//nl//'integer,parameter::answer=43'//nl// &
+        'implicit none'//nl//'      integer,parameter::answer=43'//nl// &
         'end module legacy_mod'//nl)
     call git([character(len=64) :: 'add', 'src/legacy.f90'])
     call hook()
@@ -591,9 +591,35 @@ program test_hook_precommit
     call assert_true(result%exit_code /= 0, 'misindented changed line blocks')
     call assert_contains(result%stdout, 'indent.f90:6: needs formatting', &
         'misindented line is reported')
+
+    ! A file whose procedures sit at column 0 after `contains` keeps that style.
+    project = join_path(scratch, 'flat-contains')
+    call write_text(project//'/src/flat.f90', flat_module('1', '    '))
+    call git([character(len=64) :: 'init', '-q'])
+    call git([character(len=64) :: 'add', 'src/flat.f90'])
+    call git([character(len=64) :: 'commit', '-qm', 'Synthetic column-0 procedures'])
+    call write_text(project//'/fpm.toml', 'name = "hook_flat"'//nl)
+    call write_text(project//'/src/flat.f90', flat_module('2', '    '))
+    call git([character(len=64) :: 'add', 'fpm.toml', 'src/flat.f90'])
+    call hook()
+    call assert_process_ok(result, 'change beside column-0 procedures passes')
+    call write_text(project//'/src/flat.f90', flat_module('2', '      '))
+    call git([character(len=64) :: 'add', 'src/flat.f90'])
+    call hook()
+    call assert_true(result%exit_code /= 0, 'misindented line beside column-0 procedures blocks')
+    call assert_contains(result%stdout, 'flat.f90:6: needs formatting', &
+        'misindented column-0 neighbour line is reported')
     call finish_assertions(retain_failed_scratch=.true.)
     call remove_tree(scratch)
 contains
+    function flat_module(step, indent) result(text)
+        character(len=*), intent(in) :: step, indent
+        character(len=:), allocatable :: text
+        text = 'module flat_mod'//nl//'    implicit none'//nl//'contains'//nl// &
+            'subroutine bump(x)'//nl//'    integer, intent(inout) :: x'//nl// &
+            indent//'x = x + '//step//nl//'end subroutine bump'//nl// &
+            'end module flat_mod'//nl
+    end function flat_module
     function two_space_module(step, indent) result(text)
         character(len=*), intent(in) :: step, indent
         character(len=:), allocatable :: text

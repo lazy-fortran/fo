@@ -17,6 +17,10 @@ module fo_fmt
 
     integer, parameter :: FMT_SELECT_ALL = 1, FMT_SELECT_FILES = 2, FMT_SELECT_CHANGED = 3
 
+    type :: fmt_line_t
+        character(len=:), allocatable :: s
+    end type fmt_line_t
+
 contains
 
     subroutine write_source_list(scan_root, list_file)
@@ -135,9 +139,9 @@ contains
         type(backend_t) :: b
         character(len=512) :: scan_root, config_file, fpath, tmpf, difflog
         character(len=:), allocatable :: packed, text, line
-        character(len=16) :: line_text
-        integer :: n_args, status, ierr, first, last, k, pos, eol
-        logical :: reporting
+        type(fmt_line_t), allocatable :: old_lines(:), new_lines(:)
+        integer :: n_args, status, ierr, first, last, pos, eol, n_old, n_new
+        logical :: in_hunk, flagged
 
         fpath = trim(path)
         if (.not. is_fortran_source(fpath)) return
@@ -190,7 +194,12 @@ contains
         end if
 
         ! Report the first formatter hunk that rewrites a changed line.
-        reporting = .false.
+        allocate (old_lines(64), new_lines(64))
+        in_hunk = .false.
+        flagged = .false.
+        first = 1
+        n_old = 0
+        n_new = 0
         pos = 1
         do while (pos <= len(text))
             eol = index(text(pos:), achar(10))
@@ -202,23 +211,121 @@ contains
                 pos = pos + eol
             end if
             if (index(line, '@@ ') == 1) then
-                if (reporting) exit
+                if (in_hunk) call fmt_check_hunk(path, changed, first, old_lines, &
+                    n_old, new_lines, n_new, output, flagged)
+                if (flagged) exit
                 call fmt_hunk_range(line, .true., first, last)
-                do k = max(first, 1), min(last, size(changed))
-                    if (.not. changed(k)) cycle
-                    write (line_text, '(i0)') k
-                    output = trim(output)//trim(path)//':'//trim(line_text)// &
-                        ': needs formatting'//achar(10)
-                    exitcode = 1
-                    reporting = .true.
-                    exit
-                end do
-            else if (reporting .and. len(line) > 0) then
-                if (line(1:1) == '-' .or. line(1:1) == '+') &
-                    output = trim(output)//'  '//line//achar(10)
+                n_old = 0
+                n_new = 0
+                in_hunk = .true.
+            else if (in_hunk .and. len(line) > 0) then
+                if (line(1:1) == '-') call push_line(old_lines, n_old, line(2:))
+                if (line(1:1) == '+') call push_line(new_lines, n_new, line(2:))
             end if
         end do
+        if (in_hunk .and. .not. flagged) call fmt_check_hunk(path, changed, first, &
+            old_lines, n_old, new_lines, n_new, output, flagged)
+        if (flagged) exitcode = 1
     end subroutine fmt_check_lines
+
+    subroutine fmt_check_hunk(path, changed, first, old_lines, n_old, new_lines, &
+            n_new, output, flagged)
+        !! A changed line passes when the formatter moves it only by the same
+        !! indentation shift as its nearest unchanged code line, so a file whose
+        !! house style differs from the formatter's (e.g. procedures at column 0
+        !! after `contains`) is judged against its neighbours, not the formatter.
+        character(len=*), intent(in) :: path
+        logical, intent(in) :: changed(:)
+        integer, intent(in) :: first, n_old, n_new
+        type(fmt_line_t), intent(in) :: old_lines(:), new_lines(:)
+        character(len=*), intent(inout) :: output
+        logical, intent(inout) :: flagged
+
+        character(len=16) :: line_text
+        integer :: i, j, k, shift, before, after
+
+        do i = 1, n_old
+            k = first + i - 1
+            if (k < 1 .or. k > size(changed)) cycle
+            if (.not. changed(k)) cycle
+            if (n_old == n_new) then
+                if (trim(adjustl(old_lines(i)%s)) == trim(adjustl(new_lines(i)%s))) then
+                    shift = line_shift(old_lines(i)%s, new_lines(i)%s)
+                    if (shift == 0) cycle
+                    before = 0
+                    do j = i - 1, 1, -1
+                        if (reference_line(j)) then
+                            before = line_shift(old_lines(j)%s, new_lines(j)%s)
+                            exit
+                        end if
+                    end do
+                    after = 0
+                    do j = i + 1, n_old
+                        if (reference_line(j)) then
+                            after = line_shift(old_lines(j)%s, new_lines(j)%s)
+                            exit
+                        end if
+                    end do
+                    if (shift == before .or. shift == after) cycle
+                end if
+                write (line_text, '(i0)') k
+                output = trim(output)//trim(path)//':'//trim(line_text)// &
+                    ': needs formatting'//achar(10)//'  -'//old_lines(i)%s// &
+                    achar(10)//'  +'//new_lines(i)%s//achar(10)
+            else
+                ! Lines were joined or split, so there is no neighbour to compare.
+                write (line_text, '(i0)') k
+                output = trim(output)//trim(path)//':'//trim(line_text)// &
+                    ': needs formatting'//achar(10)
+                do j = 1, n_old
+                    output = trim(output)//'  -'//old_lines(j)%s//achar(10)
+                end do
+                do j = 1, n_new
+                    output = trim(output)//'  +'//new_lines(j)%s//achar(10)
+                end do
+            end if
+            flagged = .true.
+            return
+        end do
+    contains
+        logical function reference_line(j)
+            integer, intent(in) :: j
+            integer :: lead, k_ref
+            k_ref = first + j - 1
+            reference_line = .false.
+            if (k_ref >= 1 .and. k_ref <= size(changed)) then
+                if (changed(k_ref)) return
+            end if
+            lead = verify(old_lines(j)%s, ' ')
+            if (lead == 0) return
+            reference_line = index('!#', old_lines(j)%s(lead:lead)) == 0
+        end function reference_line
+    end subroutine fmt_check_hunk
+
+    integer function line_shift(old_line, new_line) result(shift)
+        character(len=*), intent(in) :: old_line, new_line
+        shift = 0
+        if (len_trim(old_line) == 0 .or. len_trim(new_line) == 0) return
+        shift = (verify(new_line, ' ') - 1) - (verify(old_line, ' ') - 1)
+    end function line_shift
+
+    subroutine push_line(lines, n, text)
+        type(fmt_line_t), allocatable, intent(inout) :: lines(:)
+        integer, intent(inout) :: n
+        character(len=*), intent(in) :: text
+        type(fmt_line_t), allocatable :: bigger(:)
+        integer :: i
+
+        if (n == size(lines)) then
+            allocate (bigger(2*size(lines)))
+            do i = 1, n
+                call move_alloc(lines(i)%s, bigger(i)%s)
+            end do
+            call move_alloc(bigger, lines)
+        end if
+        n = n + 1
+        lines(n)%s = text
+    end subroutine push_line
 
     integer function file_indent_width(path) result(width)
         !! Smallest leading indentation of a code line, skipping comments,
