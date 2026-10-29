@@ -47,19 +47,21 @@ module fo_build_backend
 
 contains
 
-    subroutine cmake_configured_build_dir(project, build_dir, found)
+    subroutine cmake_configured_build_dir(project, build_dir, found, fortran)
         !! Absolute build directory of the CMake tree that `project` is already
         !! configured with, or empty when it is not configured. A populated
         !! cache naming `project` as its home is the project's own evidence of
         !! its native build authority, ahead of any fpm manifest beside it.
+        !! `fortran` tells whether that configuration enabled Fortran.
         character(len=*), intent(in) :: project
         character(len=:), allocatable, intent(out) :: build_dir
-        logical, intent(out), optional :: found
+        logical, intent(out), optional :: found, fortran
         character(len=:), allocatable :: cache, hint, candidate, project_path
         integer :: status, step, length
 
         build_dir = ''
         if (present(found)) found = .false.
+        if (present(fortran)) fortran = .false.
         project_path = fs_canonical_path(trim(project))
         call get_environment_variable('FO_CMAKE_BUILD_DIR', length=length, status=status)
         if (status /= 0) length = 0
@@ -79,6 +81,9 @@ contains
             if (.not. cache_home_is(cache, trim(project_path))) cycle
             build_dir = candidate
             if (present(found)) found = .true.
+            ! CMake caches a language's compiler once any directory enables it.
+            if (present(fortran)) fortran = &
+                index(cache, new_line('a')//'CMAKE_Fortran_COMPILER:') > 0
             return
         end do
     end subroutine cmake_configured_build_dir

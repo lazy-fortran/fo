@@ -158,7 +158,7 @@ contains
         character(len=4096) :: driver, logfile, resultfile, dependency_message
         character(len=64) :: driver_digest, key
         character(len=:), allocatable :: root, snapshot, tree, text, message, packed, child_env
-        character(len=:), allocatable :: reuse, populated, backend_name
+        character(len=:), allocatable :: reuse, populated, backend_name, common
         type(string_t), allocatable :: excluded(:), included(:)
         character(len=4096), allocatable :: files(:)
         character(len=16384) :: formatting
@@ -167,6 +167,7 @@ contains
         real :: seconds
         real(dp) :: started, elapsed, threshold
         logical :: found, snapshot_owned, hit, built, identity_ok, populated_found, has_base
+        logical :: fortran
         logical, allocatable :: added(:)
 
         code = 1
@@ -202,6 +203,29 @@ contains
             if (status /= 0) then
                 message = 'cannot snapshot the index (resolve conflicts first)'
                 exit validation
+            end if
+            ! A CMake project whose configured build enables no Fortran keeps
+            ! its .f90 files as data, such as a compiler's test inputs, and
+            ! its build is not one Fo can stage. A linked worktree without its
+            ! own build stands on the configuration of its main checkout.
+            call git_text(root, git_words('cat-file', '-e', ':fpm.toml'), text, status)
+            if (status /= 0) then
+                call cmake_configured_build_dir(root, populated, populated_found, fortran)
+                if (.not. populated_found) then
+                    call git_text(root, git_words('rev-parse', '--path-format=absolute', &
+                        '--git-common-dir'), common, status)
+                    if (status == 0 .and. len(common) > 5) then
+                        if (common(len(common) - 4:) == '/.git') call &
+                            cmake_configured_build_dir(path_dirname(common), populated, &
+                            populated_found, fortran)
+                    end if
+                end if
+                if (populated_found .and. .not. fortran) then
+                    message = 'configured CMake build enables no Fortran: '// &
+                        populated//'; nothing to check'
+                    code = 0
+                    exit validation
+                end if
             end if
             budget = config_seconds(root, 'fo.hookBudget', 10)
             ! A cold build in a fresh checkout routinely exceeds a minute; incremental
