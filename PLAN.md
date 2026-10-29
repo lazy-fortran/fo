@@ -22,6 +22,15 @@ failure detection. The workspace master plan, when present, owns delivery order.
   The resident parser/dependency gate passes both required tests; the complete
   ordinary suite was not run for this repair.
 
+## Test-local C and C++ helpers (2026-10-29)
+
+- [V] [FortPlot](https://github.com/lazy-fortran/fortplot) test_text_color
+  fails to link with driver d81776c3 because test-local C sources are omitted.
+- Compile helpers below each selected test program's directory, excluding
+  registered mains, and include their current objects in its link/cache keys.
+- The native CLI oracle checks C/C++ execution, sibling symbol isolation,
+  explicit roots, header/source edits, helper removal and production isolation.
+
 ## Emergency scanner selection (2026-10-28)
 
 - [V] Explicit fallback permission in CMake scanning ignored
