@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <time.h>
 
@@ -30,6 +31,7 @@ typedef void (*fs_action_fn)(FSEventStreamRef);
 #define APPLE_EVENT_LIMIT 2048
 struct apple_event { char *path; int kind; };
 struct apple_self { char *path; long long until; };
+struct apple_watched { char *path, *real; dev_t dev; ino_t ino; };
 struct change_watch {
     char *excluded_root;
     void *core, *services;
@@ -48,6 +50,8 @@ struct change_watch {
     CFArrayRef stream_paths;
     CFStringRef *stream_strings;
     size_t nstream_strings;
+    struct apple_watched *watched;
+    size_t nwatched;
     char **roots;
     size_t nroots, nevents;
     struct apple_event events[APPLE_EVENT_LIMIT];
@@ -165,11 +169,45 @@ static void apple_queue(struct change_watch *w, const char *path, int kind) {
     ++w->nevents;
 }
 
+/* FSEvents reports resolved paths (/var -> /private/var on macOS). Map them
+ * back to the declared spelling that roots and the build root are given in. */
+static const char *apple_declared_path(const struct change_watch *w,
+    const char *path, char *buffer, size_t capacity) {
+    size_t i;
+    for (i = 0; i < w->nwatched; ++i) {
+        size_t n;
+        if (!w->watched[i].real) continue;
+        n = strlen(w->watched[i].real);
+        if (strncmp(path, w->watched[i].real, n) ||
+            (path[n] != '/' && path[n] != '\0')) continue;
+        if ((size_t)snprintf(buffer, capacity, "%s%s", w->watched[i].path,
+                path + n) >= capacity) return path;
+        return buffer;
+    }
+    return path;
+}
+
+/* FSEvents may replay the creation history of a stream root made just before
+ * the stream started. The same directory still in place is no change; its
+ * replacement or removal still reports through RootChanged. */
+static int apple_unchanged_stream_root(const struct change_watch *w,
+    const char *path) {
+    struct stat st;
+    size_t i;
+    for (i = 0; i < w->nwatched; ++i) {
+        if (strcmp(path, w->watched[i].path)) continue;
+        return !stat(path, &st) && S_ISDIR(st.st_mode) &&
+            st.st_dev == w->watched[i].dev && st.st_ino == w->watched[i].ino;
+    }
+    return 0;
+}
+
 static void apple_callback(ConstFSEventStreamRef stream, void *info,
     size_t count, void *raw_paths, const FSEventStreamEventFlags flags[],
     const FSEventStreamEventId ids[]) {
     struct change_watch *w = info;
-    char **paths = raw_paths;
+    char **raw = raw_paths;
+    char declared[2 * PATH_MAX];
     size_t i;
     const FSEventStreamEventFlags lost =
         kFSEventStreamEventFlagMustScanSubDirs |
@@ -179,15 +217,19 @@ static void apple_callback(ConstFSEventStreamRef stream, void *info,
     (void)stream; (void)ids;
     for (i = 0; i < count; ++i) {
         int kind = 0;
+        const char *path = apple_declared_path(w, raw[i], declared,
+            sizeof(declared));
         if (flags[i] & lost) { apple_mark_dirty(w); continue; }
-        if (!apple_relevant(w, paths[i]) || apple_excluded(paths[i])) continue;
+        if (!apple_relevant(w, path) || apple_excluded(path)) continue;
         if ((flags[i] & kFSEventStreamEventFlagOwnEvent) &&
-            apple_self_written(w, paths[i])) continue;
+            apple_self_written(w, path)) continue;
         if (flags[i] & (kFSEventStreamEventFlagRootChanged |
                 kFSEventStreamEventFlagMount | kFSEventStreamEventFlagUnmount)) {
             apple_mark_dirty(w);
             continue;
         }
+        if ((flags[i] & kFSEventStreamEventFlagItemIsDir) &&
+            apple_unchanged_stream_root(w, path)) continue;
         if (flags[i] & kFSEventStreamEventFlagItemIsDir) {
             apple_mark_dirty(w);
             continue;
@@ -204,13 +246,25 @@ static void apple_callback(ConstFSEventStreamRef stream, void *info,
                 kFSEventStreamEventFlagItemXattrMod |
                 kFSEventStreamEventFlagItemChangeOwner |
                 kFSEventStreamEventFlagItemFinderInfoMod)) kind = 1;
-        if (kind) apple_queue(w, paths[i], kind);
+        if (kind) apple_queue(w, path, kind);
         else apple_mark_dirty(w);
     }
 }
 
+static void apple_drop_watched(struct change_watch *w) {
+    size_t i;
+    for (i = 0; i < w->nwatched; ++i) {
+        free(w->watched[i].path);
+        free(w->watched[i].real);
+    }
+    free(w->watched);
+    w->watched = NULL;
+    w->nwatched = 0;
+}
+
 static void apple_drop_stream(struct change_watch *w) {
     size_t i;
+    apple_drop_watched(w);
     if (w->stream) {
         w->stream_stop(w->stream);
         w->stream_invalidate(w->stream);
@@ -382,9 +436,31 @@ int fo_change_native_reconcile(void *handle) {
         }
         stream_roots[i] = stream_root;
     }
+    w->watched = calloc(w->nroots ? w->nroots : 1, sizeof(*w->watched));
+    if (!w->watched) {
+        apple_error(w, "allocate event roots", "declared roots", ENOMEM);
+        goto failed;
+    }
     {
         for (i = 0; i < w->nroots; ++i) {
+            struct apple_watched *watched;
+            struct stat st;
             if (!stream_roots[i]) continue;
+            watched = &w->watched[w->nwatched++];
+            watched->path = strdup(stream_roots[i]);
+            if (!watched->path) {
+                apple_error(w, "copy event root", stream_roots[i], ENOMEM);
+                goto failed;
+            }
+            watched->real = realpath(stream_roots[i], NULL);
+            if (watched->real && !strcmp(watched->real, stream_roots[i])) {
+                free(watched->real);
+                watched->real = NULL;
+            }
+            if (!stat(stream_roots[i], &st)) {
+                watched->dev = st.st_dev;
+                watched->ino = st.st_ino;
+            }
             strings[used] = w->string_create(NULL, stream_roots[i],
                 kCFStringEncodingUTF8);
             if (!strings[used]) {
@@ -435,6 +511,7 @@ int fo_change_native_reconcile(void *handle) {
     return 0;
 failed:
     if (w->stream || w->stream_paths) apple_drop_stream(w);
+    apple_drop_watched(w);
     if (paths) w->release(paths);
     for (i = 0; i < 2 * w->nroots; ++i) {
         if (strings && strings[i]) w->release(strings[i]);
@@ -470,8 +547,14 @@ int fo_change_native_poll(void *handle, int timeout, char *path, int capacity,
      * its settle deadline with the caller's budget instead of spinning on the
      * queue that will be discarded by reconciliation. */
     if (!w->nevents || w->dirty) {
-        wait_seconds = (CFTimeInterval)wait_ms / 1000.0;
-        (void)w->runloop_run(w->mode, wait_seconds, true);
+        /* A handled source need not queue a relevant event; keep pumping for
+         * the caller's budget instead of reporting an early empty timeout. */
+        long long deadline = now + wait_ms;
+        do {
+            wait_seconds = (CFTimeInterval)(deadline - now) / 1000.0;
+            (void)w->runloop_run(w->mode, wait_seconds, true);
+            now = apple_now_ms();
+        } while (!w->error && !w->nevents && !w->dirty && now < deadline);
     }
     if (w->error) return w->error;
     if (w->dirty) {
