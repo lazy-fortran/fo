@@ -150,7 +150,14 @@ contains
 
         call make_tmpfile('fo_fmt_check', tmpf)
         call fs_append_file(trim(fpath), trim(tmpf))
-        call format_project_file(config_file, trim(tmpf), status)
+        if (len_trim(config_file) == 0) then
+            ! Without a project setting a changed line follows the indentation
+            ! width of its own file; any other width rewrites every nested line.
+            call format_file_with_indent(trim(tmpf), status, &
+                file_indent_width(trim(fpath)))
+        else
+            call format_project_file(config_file, trim(tmpf), status)
+        end if
         if (status /= 0) then
             call delete_tmpfile(tmpf)
             output = trim(output)//trim(path)//': formatting failed'//achar(10)
@@ -212,6 +219,41 @@ contains
             end if
         end do
     end subroutine fmt_check_lines
+
+    integer function file_indent_width(path) result(width)
+        !! Smallest leading indentation of a code line, skipping comments,
+        !! directives and continuation lines; 4 when nothing is indented.
+        character(len=*), intent(in) :: path
+
+        character(len=:), allocatable :: text, line
+        integer :: ierr, pos, eol, lead, last
+        logical :: continued
+
+        width = 4
+        call read_text_file_alloc(path, text, ierr)
+        if (ierr /= 0) return
+        width = huge(width)
+        continued = .false.
+        pos = 1
+        do while (pos <= len(text))
+            eol = index(text(pos:), achar(10))
+            if (eol == 0) then
+                line = text(pos:)
+                pos = len(text) + 1
+            else
+                line = text(pos:pos + eol - 2)
+                pos = pos + eol
+            end if
+            last = len_trim(line)
+            if (last == 0) cycle
+            lead = verify(line, ' ') - 1
+            if (lead > 0 .and. .not. continued .and. &
+                index('!#&'//achar(9), line(lead + 1:lead + 1)) == 0) &
+                width = min(width, lead)
+            if (line(lead + 1:lead + 1) /= '!') continued = line(last:last) == '&'
+        end do
+        if (width > 4) width = 4
+    end function file_indent_width
 
     subroutine fmt_diff_lines(text, old_side, lines)
         !! Lines of one side of a zero-context unified diff that the diff touches.
