@@ -573,9 +573,35 @@ program test_hook_precommit
     call assert_true(result%exit_code /= 0, 'badly formatted changed line blocks')
     call assert_contains(result%stdout, 'legacy.f90:3: needs formatting', &
         'changed line is reported')
+
+    ! A changed line follows its file's own indentation width.
+    project = join_path(scratch, 'legacy-indent')
+    call write_text(project//'/src/indent.f90', two_space_module('1', '    '))
+    call git([character(len=64) :: 'init', '-q'])
+    call git([character(len=64) :: 'add', 'src/indent.f90'])
+    call git([character(len=64) :: 'commit', '-qm', 'Synthetic two-space source'])
+    call write_text(project//'/fpm.toml', 'name = "hook_indent"'//nl)
+    call write_text(project//'/src/indent.f90', two_space_module('2', '    '))
+    call git([character(len=64) :: 'add', 'fpm.toml', 'src/indent.f90'])
+    call hook()
+    call assert_process_ok(result, 'change in a two-space file passes')
+    call write_text(project//'/src/indent.f90', two_space_module('2', '  '))
+    call git([character(len=64) :: 'add', 'src/indent.f90'])
+    call hook()
+    call assert_true(result%exit_code /= 0, 'misindented changed line blocks')
+    call assert_contains(result%stdout, 'indent.f90:6: needs formatting', &
+        'misindented line is reported')
     call finish_assertions(retain_failed_scratch=.true.)
     call remove_tree(scratch)
 contains
+    function two_space_module(step, indent) result(text)
+        character(len=*), intent(in) :: step, indent
+        character(len=:), allocatable :: text
+        text = 'module indent_mod'//nl//'  implicit none'//nl//'contains'//nl// &
+            '  subroutine bump(x)'//nl//'    integer, intent(inout) :: x'//nl// &
+            indent//'x = x + '//step//nl//'  end subroutine bump'//nl// &
+            'end module indent_mod'//nl
+    end function two_space_module
     subroutine lane_args(action)
         character(len=*), intent(in) :: action
         args = string_list_t()
