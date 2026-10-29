@@ -10,7 +10,7 @@ module fo_scan_cache
     implicit none
     private
 
-    character(len=16), parameter :: CACHE_MAGIC = 'fo-scan-v7'
+    character(len=16), parameter :: CACHE_MAGIC = 'fo-scan-v8'
     !! FO_SCAN_CACHE_MAX_SIZE bounds scan/v1 (default 1G, 0 = no bound);
     !! saves trim it at most every TRIM_PERIOD seconds, and loads that hit
     !! refresh the file mtime at most every TOUCH_AGE seconds.
