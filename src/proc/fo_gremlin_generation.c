@@ -465,11 +465,31 @@ fail:
     }
 }
 
+struct input_directory {
+    dev_t device;
+    ino_t inode;
+    const struct input_directory *parent;
+};
+
 static int walk_directory_at(int root_fd, int dir_fd, const char *rel,
                               const char *dest, FILE *manifest,
                               int copy_files, int exclusion_policy,
-                              int sync_output, const char *excluded_directory) {
+                              int sync_output, const char *excluded_directory,
+                              const struct input_directory *parent) {
     struct name_list names;
+    struct input_directory current;
+    struct stat directory;
+    const struct input_directory *ancestor;
+    if (fstat(dir_fd, &directory) != 0) return -1;
+    current.device = directory.st_dev;
+    current.inode = directory.st_ino;
+    current.parent = parent;
+    for (ancestor = parent; ancestor != NULL; ancestor = ancestor->parent) {
+        if (ancestor->device == current.device && ancestor->inode == current.inode) {
+            errno = ELOOP;
+            return -1;
+        }
+    }
     size_t i;
     if (rel[0] != '\0' && write_path(manifest, 'D', 0, rel) != 0) return -1;
     if (copy_files && rel[0] != '\0') {
@@ -498,15 +518,26 @@ static int walk_directory_at(int root_fd, int dir_fd, const char *rel,
             continue;
         } else if (fstatat(dir_fd, name, &st, AT_SYMLINK_NOFOLLOW) != 0) {
             rc = -1;
-        } else if (S_ISDIR(st.st_mode)) {
+        } else if (exclusion_policy == 5 && S_ISLNK(st.st_mode) &&
+                   fstatat(dir_fd, name, &st, 0) != 0) {
+            /* Unused broken SDK aliases retain delegated CMake semantics. */
+            continue;
+        }
+        if (rc != 0) {
+            free_names(&names);
+            return rc;
+        }
+        if (S_ISDIR(st.st_mode)) {
             int child_fd = openat(dir_fd, name,
-                O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+                O_RDONLY | O_DIRECTORY | O_CLOEXEC |
+                (exclusion_policy == 5 ? 0 : O_NOFOLLOW));
             if (child_fd < 0) {
                 rc = -1;
             } else {
                 rc = walk_directory_at(root_fd, child_fd, child, dest,
                                        manifest, copy_files,
-                                       exclusion_policy, sync_output, excluded_directory);
+                                       exclusion_policy, sync_output, excluded_directory,
+                                       &current);
                 close(child_fd);
             }
         } else if (S_ISLNK(st.st_mode)) {
@@ -546,7 +577,8 @@ static int walk_directory_at(int root_fd, int dir_fd, const char *rel,
                 }
             }
         } else if (S_ISREG(st.st_mode)) {
-            int input = openat(dir_fd, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+            int input = openat(dir_fd, name, O_RDONLY | O_CLOEXEC |
+                (exclusion_policy == 5 ? 0 : O_NOFOLLOW));
             if (input < 0 || fstat(input, &st) != 0 || !S_ISREG(st.st_mode)) {
                 if (input >= 0) close(input);
                 errno = EINVAL;
@@ -590,7 +622,7 @@ static int walk_tree_excluding(const char *root, const char *dest, FILE *manifes
     int rc;
     if (root_fd < 0) return -1;
     rc = walk_directory_at(root_fd, root_fd, "", dest, manifest, copy_files,
-                           exclusion_policy, sync_output, excluded_directory);
+                           exclusion_policy, sync_output, excluded_directory, NULL);
     close(root_fd);
     return rc;
 }
@@ -619,9 +651,10 @@ static int list_input_tree(const char *root, const char *manifest,
     if (validate_tree_root(root) != 0) return errno == 0 ? 1 : errno;
     out = fopen(manifest, "w");
     if (out == NULL) return errno == 0 ? 1 : errno;
-    rc = walk_tree_excluding(root, "", out, 0, exclude_root_outputs == 3 ? 4 :
+    rc = walk_tree_excluding(root, "", out, 0, exclude_root_outputs == 4 ? 5 :
+                   (exclude_root_outputs == 3 ? 4 :
                    (exclude_root_outputs == 2 ? 3 :
-                   (exclude_root_outputs != 0 ? 2 : 0)), 1, excluded_directory);
+                   (exclude_root_outputs != 0 ? 2 : 0))), 1, excluded_directory);
     if (fclose(out) != 0 && rc == 0) rc = -1;
     return rc == 0 ? 0 : (errno == 0 ? 1 : errno);
 }
@@ -725,10 +758,10 @@ int fo_c_generation_copy_declared_file(const char *source, const char *dest,
     return 0;
 }
 
-/* Open one inventoried file through its physical root without following
- * directory or leaf symlinks. The inventory's root identity also guards ABA. */
+/* SDK include aliases resolve to content whose digest is checked on import.
+ * Other inputs retain no-follow confinement and captured root identity. */
 static int open_inventoried_input(const char *root, const char *relative,
-                                  long long device, long long inode,
+                                  long long device, long long inode, int sdk_headers,
                                   struct stat *before) {
     char copy[8192];
     char *part, *next;
@@ -761,7 +794,7 @@ static int open_inventoried_input(const char *root, const char *relative,
     }
     /* FPM path dependencies may declare a symlink as their root. Following
      * that one root link is safe here: the captured directory identity must
-     * still match the inventory, and all descendants remain no-follow. */
+     * still match the inventory; only declared SDK headers follow descendants. */
     root_fd = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     if (root_fd < 0) goto done;
     if (fstat(root_fd, &root_st) != 0 ||
@@ -776,14 +809,16 @@ static int open_inventoried_input(const char *root, const char *relative,
     while ((next = strchr(part, '/')) != NULL) {
         *next = '\0';
         input_fd = openat(dir_fd, part,
-                          O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+                          O_RDONLY | O_DIRECTORY | O_CLOEXEC |
+                          (sdk_headers ? 0 : O_NOFOLLOW));
         if (input_fd < 0) goto done;
         close(dir_fd);
         dir_fd = input_fd;
         input_fd = -1;
         part = next + 1;
     }
-    input_fd = openat(dir_fd, part, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    input_fd = openat(dir_fd, part, O_RDONLY | O_CLOEXEC |
+                      (sdk_headers ? 0 : O_NOFOLLOW));
     if (input_fd < 0) goto done;
     if (fstat(input_fd, before) != 0 || !S_ISREG(before->st_mode)) {
         errno = EINVAL;
@@ -803,9 +838,9 @@ done:
 /* Descriptor for hashing an inventoried file in place; release it with
  * fo_c_generation_close_fd. Returns the descriptor or a negative errno. */
 int fo_c_generation_open_input(const char *root, const char *relative,
-                               long long device, long long inode) {
+                               long long device, long long inode, int sdk_headers) {
     struct stat before;
-    int fd = open_inventoried_input(root, relative, device, inode, &before);
+    int fd = open_inventoried_input(root, relative, device, inode, sdk_headers, &before);
     return fd >= 0 ? fd : -(errno == 0 ? 1 : errno);
 }
 
