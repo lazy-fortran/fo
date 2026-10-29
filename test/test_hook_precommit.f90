@@ -592,14 +592,15 @@ program test_hook_precommit
     call assert_contains(result%stdout, 'indent.f90:6: needs formatting', &
         'misindented line is reported')
 
-    ! A file whose procedures sit at column 0 after `contains` keeps that style.
+    ! A file whose procedures sit at column 0 after `contains` keeps that style,
+    ! and a stray three-space line does not set its indentation width.
     project = join_path(scratch, 'flat-contains')
-    call write_text(project//'/src/flat.f90', flat_module('1', '    '))
+    call write_text(project//'/src/flat.f90', flat_module('1', '        '))
     call git([character(len=64) :: 'init', '-q'])
     call git([character(len=64) :: 'add', 'src/flat.f90'])
     call git([character(len=64) :: 'commit', '-qm', 'Synthetic column-0 procedures'])
     call write_text(project//'/fpm.toml', 'name = "hook_flat"'//nl)
-    call write_text(project//'/src/flat.f90', flat_module('2', '    '))
+    call write_text(project//'/src/flat.f90', flat_module('2', '        '))
     call git([character(len=64) :: 'add', 'fpm.toml', 'src/flat.f90'])
     call hook()
     call assert_process_ok(result, 'change beside column-0 procedures passes')
@@ -607,18 +608,24 @@ program test_hook_precommit
     call git([character(len=64) :: 'add', 'src/flat.f90'])
     call hook()
     call assert_true(result%exit_code /= 0, 'misindented line beside column-0 procedures blocks')
-    call assert_contains(result%stdout, 'flat.f90:6: needs formatting', &
+    call assert_contains(result%stdout, 'flat.f90:17: needs formatting', &
         'misindented column-0 neighbour line is reported')
     call finish_assertions(retain_failed_scratch=.true.)
     call remove_tree(scratch)
 contains
     function flat_module(step, indent) result(text)
+        ! Column-0 procedures, four-space steps and one stray three-space line.
         character(len=*), intent(in) :: step, indent
         character(len=:), allocatable :: text
-        text = 'module flat_mod'//nl//'    implicit none'//nl//'contains'//nl// &
+        integer :: i
+        text = 'module flat_mod'//nl//'    implicit none'//nl
+        do i = 1, 9
+            text = text//'    integer :: a'//achar(iachar('0') + i)//nl
+        end do
+        text = text//'   integer :: odd'//nl//'contains'//nl// &
             'subroutine bump(x)'//nl//'    integer, intent(inout) :: x'//nl// &
-            indent//'x = x + '//step//nl//'end subroutine bump'//nl// &
-            'end module flat_mod'//nl
+            '    if (x > 0) then'//nl//indent//'x = x + '//step//nl// &
+            '    end if'//nl//'end subroutine bump'//nl//'end module flat_mod'//nl
     end function flat_module
     function two_space_module(step, indent) result(text)
         character(len=*), intent(in) :: step, indent

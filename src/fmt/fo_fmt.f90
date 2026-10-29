@@ -140,8 +140,10 @@ contains
         character(len=512) :: scan_root, config_file, fpath, tmpf, difflog
         character(len=:), allocatable :: packed, text, line
         type(fmt_line_t), allocatable :: old_lines(:), new_lines(:)
-        integer :: n_args, status, ierr, first, last, pos, eol, n_old, n_new
-        logical :: in_hunk, flagged
+        integer, allocatable :: map(:)
+        character(len=16) :: line_text
+        integer :: n_args, status, ierr, pos, eol, n_old, n_new, k, offset
+        integer :: old_first, old_count, new_count
 
         fpath = trim(path)
         if (.not. is_fortran_source(fpath)) return
@@ -168,6 +170,10 @@ contains
             exitcode = 1
             return
         end if
+        call read_lines(trim(fpath), old_lines, n_old)
+        call read_lines(trim(tmpf), new_lines, n_new)
+        ! Whitespace-blind alignment: once the formatter reindents a region,
+        ! a plain diff can only match blank lines and misaligns everything.
         call make_tmpfile('fo_fmt_diff', difflog)
         n_args = 0
         packed = ''
@@ -177,6 +183,7 @@ contains
         call argv_push(packed, n_args, '--no-color')
         call argv_push(packed, n_args, '--no-ext-diff')
         call argv_push(packed, n_args, '--no-textconv')
+        call argv_push(packed, n_args, '--ignore-all-space')
         call argv_push(packed, n_args, '-U0')
         call argv_push(packed, n_args, '--')
         call argv_push(packed, n_args, trim(fpath))
@@ -186,20 +193,16 @@ contains
         call delete_tmpfile(tmpf)
         call read_text_file_alloc(trim(difflog), text, ierr)
         call delete_tmpfile(difflog)
-        if (status == 0) return
-        if (status /= 1 .or. ierr /= 0) then
+        if ((status /= 0 .and. status /= 1) .or. ierr /= 0) then
             output = trim(output)//trim(path)//': formatting comparison failed'//achar(10)
             exitcode = 1
             return
         end if
 
-        ! Report the first formatter hunk that rewrites a changed line.
-        allocate (old_lines(64), new_lines(64))
-        in_hunk = .false.
-        flagged = .false.
-        first = 1
-        n_old = 0
-        n_new = 0
+        allocate (map(n_old))
+        map = 0
+        k = 1
+        offset = 0
         pos = 1
         do while (pos <= len(text))
             eol = index(text(pos:), achar(10))
@@ -210,97 +213,132 @@ contains
                 line = text(pos:pos + eol - 2)
                 pos = pos + eol
             end if
-            if (index(line, '@@ ') == 1) then
-                if (in_hunk) call fmt_check_hunk(path, changed, first, old_lines, &
-                    n_old, new_lines, n_new, output, flagged)
-                if (flagged) exit
-                call fmt_hunk_range(line, .true., first, last)
-                n_old = 0
-                n_new = 0
-                in_hunk = .true.
-            else if (in_hunk .and. len(line) > 0) then
-                if (line(1:1) == '-') call push_line(old_lines, n_old, line(2:))
-                if (line(1:1) == '+') call push_line(new_lines, n_new, line(2:))
-            end if
+            if (index(line, '@@ ') /= 1) cycle
+            call fmt_hunk_counts(line, old_first, old_count, new_count)
+            if (old_count == 0) old_first = old_first + 1
+            do while (k < old_first .and. k <= n_old)
+                map(k) = k + offset
+                k = k + 1
+            end do
+            k = max(k, old_first + old_count)
+            offset = offset + new_count - old_count
         end do
-        if (in_hunk .and. .not. flagged) call fmt_check_hunk(path, changed, first, &
-            old_lines, n_old, new_lines, n_new, output, flagged)
-        if (flagged) exitcode = 1
-    end subroutine fmt_check_lines
+        do while (k <= n_old)
+            map(k) = k + offset
+            k = k + 1
+        end do
 
-    subroutine fmt_check_hunk(path, changed, first, old_lines, n_old, new_lines, &
-            n_new, output, flagged)
-        !! A changed line passes when the formatter moves it only by the same
-        !! indentation shift as its nearest unchanged code line, so a file whose
-        !! house style differs from the formatter's (e.g. procedures at column 0
-        !! after `contains`) is judged against its neighbours, not the formatter.
-        character(len=*), intent(in) :: path
-        logical, intent(in) :: changed(:)
-        integer, intent(in) :: first, n_old, n_new
-        type(fmt_line_t), intent(in) :: old_lines(:), new_lines(:)
-        character(len=*), intent(inout) :: output
-        logical, intent(inout) :: flagged
-
-        character(len=16) :: line_text
-        integer :: i, j, k, shift, before, after
-
-        do i = 1, n_old
-            k = first + i - 1
-            if (k < 1 .or. k > size(changed)) cycle
+        do k = 1, min(n_old, size(changed))
             if (.not. changed(k)) cycle
-            if (n_old == n_new) then
-                if (trim(adjustl(old_lines(i)%s)) == trim(adjustl(new_lines(i)%s))) then
-                    shift = line_shift(old_lines(i)%s, new_lines(i)%s)
-                    if (shift == 0) cycle
-                    before = 0
-                    do j = i - 1, 1, -1
-                        if (reference_line(j)) then
-                            before = line_shift(old_lines(j)%s, new_lines(j)%s)
-                            exit
-                        end if
-                    end do
-                    after = 0
-                    do j = i + 1, n_old
-                        if (reference_line(j)) then
-                            after = line_shift(old_lines(j)%s, new_lines(j)%s)
-                            exit
-                        end if
-                    end do
-                    if (shift == before .or. shift == after) cycle
-                end if
-                write (line_text, '(i0)') k
-                output = trim(output)//trim(path)//':'//trim(line_text)// &
-                    ': needs formatting'//achar(10)//'  -'//old_lines(i)%s// &
-                    achar(10)//'  +'//new_lines(i)%s//achar(10)
-            else
-                ! Lines were joined or split, so there is no neighbour to compare.
-                write (line_text, '(i0)') k
-                output = trim(output)//trim(path)//':'//trim(line_text)// &
-                    ': needs formatting'//achar(10)
-                do j = 1, n_old
-                    output = trim(output)//'  -'//old_lines(j)%s//achar(10)
-                end do
-                do j = 1, n_new
-                    output = trim(output)//'  +'//new_lines(j)%s//achar(10)
-                end do
-            end if
-            flagged = .true.
+            if (changed_line_ok(k)) cycle
+            write (line_text, '(i0)') k
+            output = trim(output)//trim(path)//':'//trim(line_text)// &
+                ': needs formatting'//achar(10)//'  -'//old_lines(k)%s//achar(10)
+            if (map(k) >= 1 .and. map(k) <= n_new) &
+                output = trim(output)//'  +'//new_lines(map(k))%s//achar(10)
+            exitcode = 1
             return
         end do
     contains
+        logical function changed_line_ok(k)
+            !! A changed line passes when the formatter moves it only by the
+            !! indentation shift of its nearest unchanged code line, so a file
+            !! whose house style the formatter does not reproduce (e.g.
+            !! procedures at column 0 after `contains`) is judged by its own.
+            integer, intent(in) :: k
+            integer :: shift, j
+
+            changed_line_ok = .false.
+            if (map(k) < 1 .or. map(k) > n_new) return
+            if (trim(adjustl(old_lines(k)%s)) /= trim(adjustl(new_lines(map(k))%s))) return
+            shift = line_shift(old_lines(k)%s, new_lines(map(k))%s)
+            changed_line_ok = shift == 0
+            if (changed_line_ok) return
+            do j = k - 1, 1, -1
+                if (reference_line(j)) then
+                    changed_line_ok = shift == line_shift(old_lines(j)%s, new_lines(map(j))%s)
+                    exit
+                end if
+            end do
+            if (changed_line_ok) return
+            do j = k + 1, n_old
+                if (reference_line(j)) then
+                    changed_line_ok = shift == line_shift(old_lines(j)%s, new_lines(map(j))%s)
+                    exit
+                end if
+            end do
+        end function changed_line_ok
+
         logical function reference_line(j)
             integer, intent(in) :: j
-            integer :: lead, k_ref
-            k_ref = first + j - 1
+            integer :: lead
+
             reference_line = .false.
-            if (k_ref >= 1 .and. k_ref <= size(changed)) then
-                if (changed(k_ref)) return
+            if (map(j) < 1 .or. map(j) > n_new) return
+            if (j <= size(changed)) then
+                if (changed(j)) return
             end if
             lead = verify(old_lines(j)%s, ' ')
             if (lead == 0) return
             reference_line = index('!#', old_lines(j)%s(lead:lead)) == 0
         end function reference_line
-    end subroutine fmt_check_hunk
+    end subroutine fmt_check_lines
+
+    subroutine fmt_hunk_counts(header, old_first, old_count, new_count)
+        !! Both sides of a "@@ -a[,b] +c[,d] @@" header.
+        character(len=*), intent(in) :: header
+        integer, intent(out) :: old_first, old_count, new_count
+        integer :: new_first
+
+        call side_counts('-', old_first, old_count)
+        call side_counts('+', new_first, new_count)
+    contains
+        subroutine side_counts(mark, first, count)
+            character(len=1), intent(in) :: mark
+            integer, intent(out) :: first, count
+            integer :: start, stop_at, comma, ios
+
+            first = 1
+            count = 1
+            start = index(header, ' '//mark)
+            if (start == 0) return
+            start = start + 2
+            stop_at = index(header(start:), ' ')
+            if (stop_at == 0) return
+            stop_at = start + stop_at - 2
+            comma = index(header(start:stop_at), ',')
+            if (comma == 0) then
+                read (header(start:stop_at), *, iostat=ios) first
+            else
+                read (header(start:start + comma - 2), *, iostat=ios) first
+                read (header(start + comma:stop_at), *, iostat=ios) count
+            end if
+        end subroutine side_counts
+    end subroutine fmt_hunk_counts
+
+    subroutine read_lines(path, lines, n)
+        character(len=*), intent(in) :: path
+        type(fmt_line_t), allocatable, intent(out) :: lines(:)
+        integer, intent(out) :: n
+        character(len=:), allocatable :: text
+        integer :: ierr, pos, eol
+
+        allocate (lines(64))
+        n = 0
+        call read_text_file_alloc(path, text, ierr)
+        if (ierr /= 0) return
+        pos = 1
+        do while (pos <= len(text))
+            eol = index(text(pos:), achar(10))
+            if (eol == 0) then
+                call push_line(lines, n, text(pos:))
+                pos = len(text) + 1
+            else
+                call push_line(lines, n, text(pos:pos + eol - 2))
+                pos = pos + eol
+            end if
+        end do
+    end subroutine read_lines
 
     integer function line_shift(old_line, new_line) result(shift)
         character(len=*), intent(in) :: old_line, new_line
@@ -328,18 +366,21 @@ contains
     end subroutine push_line
 
     integer function file_indent_width(path) result(width)
-        !! Smallest leading indentation of a code line, skipping comments,
-        !! directives and continuation lines; 4 when nothing is indented.
+        !! Smallest leading indentation (1 to 4) of code lines, skipping
+        !! comments, directives and continuation lines, that at least a tenth
+        !! as many lines use as the most common one, so a few odd lines do not
+        !! set it; 4 when nothing is indented.
         character(len=*), intent(in) :: path
 
         character(len=:), allocatable :: text, line
         integer :: ierr, pos, eol, lead, last
+        integer :: uses(4)
         logical :: continued
 
         width = 4
         call read_text_file_alloc(path, text, ierr)
         if (ierr /= 0) return
-        width = huge(width)
+        uses = 0
         continued = .false.
         pos = 1
         do while (pos <= len(text))
@@ -355,11 +396,13 @@ contains
             if (last == 0) cycle
             lead = verify(line, ' ') - 1
             if (lead > 0 .and. .not. continued .and. &
-                index('!#&'//achar(9), line(lead + 1:lead + 1)) == 0) &
-                width = min(width, lead)
+                index('!#&'//achar(9), line(lead + 1:lead + 1)) == 0) then
+                if (lead <= 4) uses(lead) = uses(lead) + 1
+            end if
             if (line(lead + 1:lead + 1) /= '!') continued = line(last:last) == '&'
         end do
-        if (width > 4) width = 4
+        if (maxval(uses) == 0) return
+        width = findloc(10*uses >= maxval(uses), .true., dim=1)
     end function file_indent_width
 
     subroutine fmt_diff_lines(text, old_side, lines)
