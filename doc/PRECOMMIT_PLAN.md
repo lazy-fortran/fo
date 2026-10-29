@@ -65,6 +65,14 @@ staged build outputs remain private. The CMake hook invokes the project's own
 CMake build rules, including compile launchers. Native fpm hook builds enable
 Fo's relocatable object cache across successive staged views.
 
+A CMake project without `fpm.toml` whose configured build enables no Fortran
+(its cache records no `CMAKE_Fortran_COMPILER`) keeps its Fortran files as data,
+for example a compiler's test inputs. The hook then reports that and checks
+nothing, because such a build may need generated files the index does not hold.
+A linked worktree without its own configured build uses that of its main
+checkout. A commit that first enables Fortran is checked once the project is
+reconfigured.
+
 Projects can apply their native fast-test label policy with Git configuration.
 For example, a project whose fast CTest target excludes reference comparisons
 can use:

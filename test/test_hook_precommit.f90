@@ -517,6 +517,37 @@ program test_hook_precommit
     call assert_process_ok(result, 'staged configure ignores a removed compiler')
     call assert_contains(result%stdout, '"fast_passed":1', 'removed-compiler case ran')
 
+    ! A CMake project that enables no Fortran keeps .f90 files as data, here
+    ! a compiler test input. Its configure needs a generated, ignored file, so
+    ! the index alone cannot be built; the configured build decides instead.
+    project = join_path(scratch, 'cmake-data')
+    call write_text(project//'/CMakeLists.txt', 'cmake_minimum_required(VERSION 3.20)'//nl// &
+        'if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/version")'//nl// &
+        '  message(FATAL_ERROR "generated version file is missing")'//nl// &
+        'endif()'//nl//'project(hook_data NONE)'//nl)
+    call write_text(project//'/.gitignore', 'version'//nl//'build/'//nl)
+    call write_text(project//'/version', '1.0.0'//nl)
+    call write_text(project//'/tests/invalid.f90', 'program invalid'//nl// &
+        '    x = '//nl//'end program invalid'//nl)
+    call git([character(len=64) :: 'init', '-q'])
+    call git([character(len=64) :: 'add', 'CMakeLists.txt', '.gitignore', 'tests/invalid.f90'])
+    call git([character(len=64) :: 'commit', '-qm', 'Synthetic non-Fortran CMake project'])
+    call configure_cmake(project)
+    call write_text(project//'/tests/second.f90', 'program second'//nl// &
+        '    y = '//nl//'end program second'//nl)
+    call git([character(len=64) :: 'add', 'tests/second.f90'])
+    call hook()
+    call assert_process_ok(result, 'Fortran data in a non-Fortran CMake project')
+    call assert_contains(result%stdout, 'enables no Fortran', 'non-Fortran build named')
+    call git([character(len=64) :: 'worktree', 'add', '-q', '../cmake-data-worktree'])
+    project = join_path(scratch, 'cmake-data-worktree')
+    call write_text(project//'/tests/third.f90', 'program third'//nl// &
+        '    z = '//nl//'end program third'//nl)
+    call git([character(len=64) :: 'add', 'tests/third.f90'])
+    call hook()
+    call assert_process_ok(result, 'linked worktree uses its main checkout configuration')
+    call assert_contains(result%stdout, 'enables no Fortran', 'worktree names main build')
+
     ! Without configuration the hard cap admits a cold build longer than a
     ! minute, as in a fresh worktree; it bounds runaway builds only.
     project = join_path(scratch, 'default-cap')
