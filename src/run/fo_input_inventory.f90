@@ -289,7 +289,17 @@ contains
             else if (index(path, trim(canonical_root)//'/') == 1) then
                 relative = path(len_trim(canonical_root) + 2:)
             else
-                cycle
+                ! The File API keeps the configured spelling, which can reach the
+                ! root through a symlinked ancestor such as Darwin's /var.
+                slash = len(path)
+                do
+                    slash = index(path(:slash - 1), '/', back=.true.)
+                    if (slash <= 1) exit
+                    call fs_realpath(path(:slash - 1), parent, ok)
+                    if (ok .and. trim(parent) == trim(canonical_root)) exit
+                end do
+                if (slash <= 1) cycle
+                relative = path(slash + 1:)
             end if
             if (.not. safe_relative_path(relative)) then
                 ierr = 1
