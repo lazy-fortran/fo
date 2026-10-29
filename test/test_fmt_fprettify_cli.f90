@@ -13,11 +13,13 @@ program test_fmt_fprettify_cli
     character(:), allocatable :: driver, scratch, project, source, after
     type(process_result_t) :: result
     type(string_list_t) :: command
-    integer :: status
+    integer :: status, cmdstat
 
+    ! Without cmdstat, gfortran stops the program when the shell exits 127.
+    status = 0
     call execute_command_line('fprettify --version > /dev/null 2>&1', &
-        exitstat=status)
-    if (status /= 0) then
+        exitstat=status, cmdstat=cmdstat)
+    if (status /= 0 .or. cmdstat /= 0) then
         print '(a)', 'SKIP: fprettify is not installed'
         stop
     end if
