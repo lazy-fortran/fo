@@ -515,11 +515,38 @@ int fo_gremlin_session_bind_task(const char *dir, int pid, const char *start) {
     return atomic_write_file(dir, "task.owner", text, (size_t)n);
 }
 
+#if defined(__APPLE__) || defined(__linux__)
+/* Ignore an inherited record unless it describes this exact guardian/owner pair. */
+static pid_t gremlin_task_parent(void) {
+    pid_t parent = getppid(), actual_owner;
+    const char *record = getenv("_FO_LIFELINE_TASK_PARENT");
+    long guardian, owner;
+    unsigned long long guardian_birth, owner_birth;
+    uint64_t actual_birth;
+    int alive;
+    char trailing;
+    if (record == NULL || sscanf(record, "%ld:%llu:%ld:%llu%c", &guardian,
+        &guardian_birth, &owner, &owner_birth, &trailing) != 4 ||
+        guardian != (long)parent || owner <= 1 || owner > INT_MAX ||
+        guardian_birth == 0 || owner_birth == 0) return parent;
+    if (fo_sys_process_info(parent, &actual_owner, NULL, NULL, &actual_birth,
+                            &alive) != 0 || !alive ||
+        actual_birth != (uint64_t)guardian_birth || actual_owner != (pid_t)owner)
+        return parent;
+    if (fo_sys_process_info((pid_t)owner, NULL, NULL, NULL, &actual_birth,
+                            &alive) != 0 || !alive ||
+        actual_birth != (uint64_t)owner_birth || getppid() != parent) return getppid();
+    return (pid_t)owner;
+}
+#endif
+
 /* Identity (pid and start stamp) of this process, or of its parent. */
 int fo_gremlin_client_identity(int parent, int *pid, char *start, int cap) {
 #if defined(_WIN32) && !defined(__CYGWIN__)
     if (parent) return ENOTSUP;
     *pid = (int)GetCurrentProcessId();
+#elif defined(__APPLE__) || defined(__linux__)
+    *pid = parent ? (int)gremlin_task_parent() : (int)getpid();
 #else
     *pid = parent ? (int)getppid() : (int)getpid();
 #endif
