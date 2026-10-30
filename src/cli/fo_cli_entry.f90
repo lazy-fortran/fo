@@ -892,6 +892,7 @@ contains
             end if
             if (exitcode /= 0) then
                 call report_build_result(build_log)
+                if (exitcode == 124) call process_exit(124)
                 call process_exit(1)
             end if
             call report_array_temporary_warnings(build_log)
