@@ -881,6 +881,8 @@ contains
                 call project_load(b, trim(all_flags), model, model_error, model_message)
                 if (model_error /= 0) then
                     write (error_unit, '(a)') 'fo: '//model_message
+                    if (model_error == 124 .or. model_error == 126) &
+                        call process_exit(model_error)
                     call process_exit(1)
                 end if
                 call build_case_indices(model, cases)

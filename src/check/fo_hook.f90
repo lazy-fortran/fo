@@ -370,6 +370,8 @@ contains
                     reasons, status, message)
             end if
             if (status /= 0) then
+                if (status == 124) message = &
+                    'staged build exceeded hard cap during CMake configure'
                 ! The hook allows no network fetch, so say how to populate them.
                 if (trim(message) == 'cannot acquire dependencies') then
                     inquire(file=root//'/CMakeLists.txt', exist=found)
