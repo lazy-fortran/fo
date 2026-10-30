@@ -2697,6 +2697,77 @@ static int reap_registered_scope_children(const struct async_process *item) {
 #endif
 }
 
+#ifdef __linux__
+static int pid_compare(const void *left, const void *right) {
+    pid_t a = *(const pid_t *)left, b = *(const pid_t *)right;
+    return (a > b) - (a < b);
+}
+
+/* Each task has its own children list; scan all of ours to avoid inspecting
+   every host process on each idle tick without missing worker-owned children. */
+static int own_child_pids(pid_t **pids_out, size_t *count_out) {
+    DIR *tasks;
+    struct dirent *entry;
+    pid_t *pids = NULL;
+    size_t used = 0, capacity = 0;
+    int error = 0;
+
+    *pids_out = NULL;
+    *count_out = 0;
+    tasks = opendir("/proc/self/task");
+    if (tasks == NULL) return errno;
+    for (;;) {
+        char path[PATH_MAX];
+        FILE *file;
+        long child;
+
+        errno = 0;
+        entry = readdir(tasks);
+        if (entry == NULL) { error = errno; break; }
+        if (entry->d_name[0] < '0' || entry->d_name[0] > '9') continue;
+        snprintf(path, sizeof(path), "/proc/self/task/%s/children",
+                 entry->d_name);
+        file = fopen(path, "r");
+        if (file == NULL) {
+            /* A listed task can exit before its list is opened. */
+            if (errno == ENOENT || errno == ESRCH) continue;
+            error = errno;
+            break;
+        }
+        while (fscanf(file, "%ld", &child) == 1) {
+            if (child <= 0 || child > INT_MAX) continue;
+            if (used == capacity) {
+                size_t next = capacity == 0 ? 32 : capacity * 2;
+                if (next < capacity || next > SIZE_MAX / sizeof(*pids)) {
+                    error = ENOMEM;
+                    break;
+                }
+                pid_t *grown = realloc(pids, next * sizeof(*pids));
+                if (grown == NULL) { error = ENOMEM; break; }
+                pids = grown;
+                capacity = next;
+            }
+            pids[used++] = (pid_t)child;
+        }
+        if (ferror(file) && error == 0) error = EIO;
+        if (fclose(file) != 0 && error == 0) error = errno;
+        if (error != 0) break;
+    }
+    if (closedir(tasks) != 0 && error == 0) error = errno;
+    if (error != 0) { free(pids); return error; }
+    if (used > 1) {
+        qsort(pids, used, sizeof(*pids), pid_compare);
+        size_t kept = 0;
+        for (size_t i = 1; i < used; i++)
+            if (pids[i] != pids[kept]) pids[++kept] = pids[i];
+        used = kept + 1;
+    }
+    *pids_out = pids;
+    *count_out = used;
+    return 0;
+}
+#endif
+
 /* The Gremlin owner is a Linux subreaper. A nested Fo process may exit before
    reaping a short-lived child; the adopted zombie then has no live launcher or
    async handle. Reap only direct, already-dead children outside this process's
@@ -2706,7 +2777,7 @@ static int reap_adopted_scope_zombies(void) {
     pid_t *pids = NULL;
     size_t count = 0;
     int error;
-    error = owned_list_processes(&pids, &count);
+    error = own_child_pids(&pids, &count);
     if (error != 0) return error;
     for (size_t i = 0; i < count; i++) {
         pid_t parent = 0, got;
@@ -2714,7 +2785,9 @@ static int reap_adopted_scope_zombies(void) {
         if (find_async_process(pids[i]) != NULL) continue;
         error = fo_sys_process_info(pids[i], &parent, NULL, NULL,
                                       NULL, &alive);
-        if (error != 0) { error = 0; continue; }
+        /* Only a child gone since the inventory is a benign race. */
+        if (error == ENOENT || error == ESRCH) { error = 0; continue; }
+        if (error != 0) break;
         if (parent != getpid() || alive) continue;
         do { got = waitpid(pids[i], NULL, WNOHANG); }
         while (got < 0 && errno == EINTR);

@@ -1,6 +1,6 @@
 program test_gremlin_task_lane
-    !! Task-owned lanes (#142): a lane started with `--owner task` (MCP
-    !! `"lifetime":"task"`) stops when its creating client ends, the CLI's
+    !! Task-owned lanes (#142): a lane started with `--owner task` (the
+    !! MCP default) stops when its creating client ends, the CLI's
     !! parent process or the MCP connection; persistent lanes are unaffected
     !! and status reports the lifetime. This program doubles as the CLI's
     !! parent process when its first argument is --task-parent.
@@ -137,8 +137,9 @@ contains
         !! MCP: the lane follows the connection of the server that created it.
         type(mcp_session_t) :: server
         type(json_value_t) :: response
-        character(:), allocatable :: task_id, persistent_id
-        integer :: task_pid, persistent_pid, code
+        character(:), allocatable :: task_id, default_id, persistent_id
+        integer :: task_pid, default_pid, persistent_pid, code
+        logical :: default_stopped
 
         call mcp_session_start(server, driver, project, cache, state, &
             scratch//'/mcp.stderr')
@@ -146,18 +147,31 @@ contains
             '{"protocolVersion":"2025-11-25","capabilities":{}}', response)
         call mcp_session_notify(server, 'notifications/initialized')
         call mcp_start(server, 'mcp-task', ',"lifetime":"task"', task_id)
-        call mcp_start(server, 'mcp-persistent', '', persistent_id)
+        call mcp_start(server, 'mcp-default', '', default_id)
+        call mcp_start(server, 'mcp-persistent', ',"lifetime":"persistent"', &
+            persistent_id)
         call mcp_status(server, 'mcp-task', 'task', 'MCP status reports the task lifetime')
+        call mcp_status(server, 'mcp-default', 'task', &
+            'MCP status reports task ownership when lifetime is omitted')
         call mcp_status(server, 'mcp-persistent', 'persistent', &
             'MCP status reports the persistent lifetime')
         task_pid = gremlin_owner_pid(task_id)
+        default_pid = gremlin_owner_pid(default_id)
         persistent_pid = gremlin_owner_pid(persistent_id)
         call gremlin_wait_ms(1500)
         call assert_true(gremlin_process_running(task_pid), &
             'MCP task lane keeps running while its connection lives')
+        call assert_true(gremlin_process_running(default_pid), &
+            'MCP default lane keeps running while its connection lives')
         call mcp_session_shutdown(server, code)
         call assert_true(gremlin_wait_exit(task_pid, 20000), &
             'MCP task lane owner exits after the connection ends')
+        default_stopped = gremlin_wait_exit(default_pid, 20000)
+        call assert_true(default_stopped, &
+            'MCP default lane owner exits after the connection ends')
+        if (.not. default_stopped) &
+            call gremlin_stop_lane(driver, project, cache, state, 'mcp-default', &
+            default_id)
         call assert_true(gremlin_process_running(persistent_pid), &
             'MCP persistent lane survives the connection')
         call gremlin_stop_lane(driver, project, cache, state, 'mcp-persistent', &
