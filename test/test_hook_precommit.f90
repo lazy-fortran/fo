@@ -749,15 +749,21 @@ contains
             'cmake_minimum_required(VERSION 3.20)'//nl// &
             'project(hook_preparation LANGUAGES Fortran)'//nl// &
             'enable_testing()'//nl//'add_library(answer answer.f90)'//nl// &
-            'add_test(NAME a_failure COMMAND "${CMAKE_COMMAND}" -E false)'//nl// &
+            'add_test(NAME a_failure COMMAND "${CMAKE_COMMAND}" -P '// &
+            '"${CMAKE_CURRENT_SOURCE_DIR}/failure.cmake")'//nl// &
             'set_tests_properties(a_failure PROPERTIES LABELS regression)'//nl// &
             'add_test(NAME b_wait COMMAND "${CMAKE_COMMAND}" -E sleep 3)'//nl// &
             'add_test(NAME c_wait COMMAND "${CMAKE_COMMAND}" -E sleep 3)'//nl// &
             'add_test(NAME z_slow COMMAND "${CMAKE_COMMAND}" -E false)'//nl// &
             'set_tests_properties(z_slow PROPERTIES LABELS slow)'//nl)
         call write_text(project//'/answer.f90', original)
+        ! Bounded verification must defer this failure; preparation must observe it.
+        call write_text(project//'/failure.cmake', &
+            'execute_process(COMMAND "${CMAKE_COMMAND}" -E sleep 5)'//nl// &
+            'message(FATAL_ERROR "Synthetic delayed failure")'//nl)
         call git([character(len=64) :: 'init', '-q'])
-        call git([character(len=64) :: 'add', 'CMakeLists.txt', 'answer.f90'])
+        call git([character(len=64) :: 'add', 'CMakeLists.txt', 'answer.f90', &
+            'failure.cmake'])
         call git([character(len=64) :: 'config', 'fo.hookBudget', '4'])
         call git([character(len=64) :: 'config', 'fo.hookBuildCap', '30'])
         call git([character(len=64) :: 'config', 'fo.hookExcludeLabels', 'regression'])
@@ -806,8 +812,14 @@ contains
         call bounded_hook()
         call assert_true(result%exit_code /= 0, 'newly included failure revokes prepared evidence')
         call assert_contains(result%stdout, '"cache_hit":false', 'changed policy misses receipt')
-        call assert_contains(result%stdout, 'fast test failed: a_failure', &
-            'policy-excluded failure was never blessed')
+        call assert_contains(result%stdout, 'staged verification incomplete', &
+            'bounded verification cannot bless an unfinished failure')
+        call assert_contains(result%stdout, '"deferred":["z_slow","a_failure",', &
+            'newly included failure remains deferred')
+        call assert_contains(result%stdout, '"fast_passed":0', &
+            'deferred failure was never blessed')
+        call assert_not_contains(result%stdout, 'fast test failed: a_failure', &
+            'bounded verification does not claim an unfinished failure')
         call hook(prepare=.true.)
         call assert_true(result%exit_code /= 0, 'failed preparation blocks')
         call assert_contains(result%stdout, 'fast test failed: a_failure', &
