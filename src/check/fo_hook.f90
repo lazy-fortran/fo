@@ -4,14 +4,14 @@ module fo_hook
     use fo_build_backend, only: backend_t, detect_backend, BACKEND_NONE, BACKEND_CMAKE, &
         cmake_configured_build_dir, cmake_configure
     use fo_project_model, only: project_model_t, model_request_t, model_selection_t
-    use fo_project_load, only: project_affected, configure_error_excerpt
+    use fo_project_load, only: project_affected, project_resolve, configure_error_excerpt
     use fo_gremlin_context, only: case_identity_capture
     use fo_gremlin_generation, only: generation_t
     use fo_gremlin_request, only: gremlin_json_text_valid
     use fo_exec_service, only: exec_job_t, exec_start, exec_poll, EXEC_UNCANCELLED
     use fo_cmake_generation, only: cmake_stage_git, cmake_populated_dependency_args
     use fo_hook_evidence, only: hook_input_key, hook_receipt_read, &
-        hook_receipt_write, hook_slow_case
+        hook_receipt_write, hook_slow_case, hook_prepared_key
     use fo_test_results, only: test_result_entry_t, parse_test_results
     use fo_fmt, only: fmt_sources, FMT_SELECT_FILES, fmt_check_lines, fmt_diff_lines
     use fo_process, only: process_run_argv_logged, argv_push, process_self_executable, &
@@ -39,15 +39,17 @@ module fo_hook
 contains
     subroutine hook_cli()
         character(len=4096) :: argument, owned_view
-        logical :: json, bounded
+        logical :: json, bounded, prepare, view_given
         integer :: i, code
 
         json = .false.
         bounded = .false.
+        prepare = .false.
+        view_given = .false.
         owned_view = ''
         call get_command_argument(2, argument)
         if (trim(argument) /= 'pre-commit') then
-            write(error_unit, '(a)') 'usage: fo hook pre-commit [--json] [--bounded]'
+            write(error_unit, '(a)') 'usage: fo hook pre-commit [--json] [--bounded | --prepare]'
             call process_exit(2)
         end if
         do i = 3, command_argument_count()
@@ -57,8 +59,11 @@ contains
                 json = .true.
             case ('--bounded')
                 bounded = .true.
+            case ('--prepare')
+                prepare = .true.
             case default
                 if (index(argument, '--view=') == 1) then
+                    view_given = .true.
                     owned_view = argument(8:)
                     cycle
                 end if
@@ -66,10 +71,14 @@ contains
                 call process_exit(2)
             end select
         end do
+        if (prepare .and. (bounded .or. view_given)) then
+            write(error_unit, '(a)') 'fo hook: --prepare cannot be combined with --bounded or --view'
+            call process_exit(2)
+        end if
         if (bounded) then
             call bounded_check(json, code)
         else
-            call staged_check(json, code, trim(owned_view))
+            call staged_check(json, code, trim(owned_view), prepare)
         end if
         call process_exit(code)
     end subroutine hook_cli
@@ -90,7 +99,7 @@ contains
         code = 1
         owned = .false.
         allocate(empty(0))
-        message = 'staged verification incomplete; prepare with: fo hook pre-commit'
+        message = 'staged verification incomplete; prepare with: fo hook pre-commit --prepare'
         call make_tmpfile('fo-bounded-hook', log)
         call process_self_executable(driver, found)
         validation: block
@@ -155,8 +164,8 @@ contains
         call delete_tmpfile(trim(log))
     end subroutine bounded_check
 
-    subroutine staged_check(json, code, owned_view)
-        logical, intent(in) :: json
+    subroutine staged_check(json, code, owned_view, prepare)
+        logical, intent(in) :: json, prepare
         integer, intent(out) :: code
         character(len=*), intent(in) :: owned_view
         type(backend_t) :: backend
@@ -167,14 +176,14 @@ contains
         type(test_result_entry_t), allocatable :: results(:)
         type(string_t), allocatable :: changed(:), reasons(:), deferred(:), warnings(:)
         character(len=4096) :: driver, logfile, resultfile, dependency_message
-        character(len=64) :: driver_digest, key
+        character(len=64) :: driver_digest, key, prepared_key
         character(len=:), allocatable :: root, snapshot, tree, text, message, packed, child_env
         character(len=:), allocatable :: reuse, populated, backend_name
         type(string_t), allocatable :: excluded(:), included(:)
         character(len=4096), allocatable :: files(:)
         character(len=16384) :: formatting
         integer :: status, n, i, j, fast, passed, nfiles, timeout_kind, cap, budget
-        integer :: cleanup, attempts, nresults, r
+        integer :: cleanup, attempts, nresults, r, test_cap
         real :: seconds
         real(dp) :: started, elapsed, threshold
         logical :: found, snapshot_owned, hit, built, identity_ok, populated_found, has_base
@@ -354,8 +363,12 @@ contains
             call config_labels(root, 'fo.hookIncludeLabels', included)
             if (size(excluded) > 0) request%exclude_labels = excluded
             if (size(included) > 0) request%include_labels = included
-            call project_affected(backend, '', request, changed, model, selection, &
-                reasons, status, message)
+            if (prepare) then
+                call project_resolve(backend, '', request, model, selection, status, message)
+            else
+                call project_affected(backend, '', request, changed, model, selection, &
+                    reasons, status, message)
+            end if
             if (status /= 0) then
                 ! The hook allows no network fetch, so say how to populate them.
                 if (trim(message) == 'cannot acquire dependencies') then
@@ -377,7 +390,10 @@ contains
             if (status == 0) call case_identity_capture(backend, driver_digest, '', &
                 generation, identity_ok, configured=.true.)
             if (identity_ok) key = hook_input_key(generation)
-            hit = hook_receipt_read(trim(key))
+            prepared_key = hook_prepared_key(trim(key), model, request)
+            if (identity_ok .and. model%complete) then
+                hit = hook_receipt_read(trim(key)) .or. hook_receipt_read(trim(prepared_key))
+            end if
             do i = 1, size(selection%cases)
                 j = selection%cases(i)
                 if (hook_slow_case(model%cases(j)) .or. &
@@ -418,7 +434,7 @@ contains
                 if (hook_slow_case(model%cases(j))) cycle
                 if (model%cases(j)%default_excluded) cycle
                 elapsed = wall_time_seconds() - started
-                if (elapsed >= real(budget, dp)) then
+                if (.not. prepare .and. elapsed >= real(budget, dp)) then
                     call push(deferred, model%cases(j)%name)
                     cycle
                 end if
@@ -431,8 +447,10 @@ contains
                 call argv_push(packed, n, '0')
                 call argv_push(packed, n, '--')
                 call argv_push(packed, n, model%cases(j)%name)
+                test_cap = cap
+                if (.not. prepare) test_cap = max(1, int(real(budget, dp) - elapsed))
                 call process_run_argv_logged(snapshot, packed, n, resultfile, .false., &
-                    max(1, int(real(budget, dp) - elapsed)), status, heartbeat_s=0, &
+                    test_cap, status, heartbeat_s=0, &
                     timeout_kind=timeout_kind, wall_seconds=seconds, &
                     env_extra=child_env//';FO_TEST_REPORT_NAMES=1', cpu_budget_s=86400)
                 call parse_test_results(trim(resultfile), results, nresults, r)
@@ -470,16 +488,23 @@ contains
                 passed = passed + 1
             end do
             if (len(message) > 0) exit validation
+            if (prepare) then
+                if (len_trim(prepared_key) /= 64 .or. .not. model%complete .or. passed /= fast) then
+                    message = 'fast test preparation incomplete; no receipt written'
+                    exit validation
+                end if
+                call hook_receipt_write(trim(prepared_key))
+            end if
             if (len(owned_view) > 0) then
                 if (.not. identity_ok .or. .not. model%complete .or. passed /= fast) then
                     message = 'staged verification incomplete; prepare with: '// &
-                        'fo hook pre-commit'
+                        'fo hook pre-commit --prepare'
                     exit validation
                 end if
             end if
             ! Only a complete fast tier is a reusable receipt. An affected
             ! subset is useful evidence, but cannot stand for every fast test.
-            if (model%complete .and. passed == count_model_fast(model)) &
+            if (.not. prepare .and. model%complete .and. passed == count_model_fast(model)) &
                 call hook_receipt_write(trim(key))
             code = 0
         end block validation

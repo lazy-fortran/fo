@@ -470,7 +470,7 @@ contains
 
             select case (command)
             case ('hook')
-                write(output_unit, '(a)') 'usage: fo hook pre-commit [--json] [--bounded]'
+                write(output_unit, '(a)') 'usage: fo hook pre-commit [--json] [--bounded | --prepare]'
             case ('install')
                 call print_install_usage()
             case ('test')

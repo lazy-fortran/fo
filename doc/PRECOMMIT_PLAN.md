@@ -21,7 +21,7 @@ input inventory and shared store. No new scheduler or test registry:
 3. On a miss, the staged build is mandatory. The bounded commit command shares
    one approximately ten-second wall budget across configuration, compilation,
    tests, cancellation and cleanup. A failure or missing verification blocks
-   the commit and directs explicit preparation with `fo hook pre-commit`.
+   the commit and directs explicit preparation with `fo hook pre-commit --prepare`.
 4. Run fast affected cases in model order within the remaining normal budget,
    using the same conservative impact model as `fo test --only-changed`.
    Unknown impact widens selection. A failing completed test blocks. Slow,
@@ -36,20 +36,30 @@ input inventory and shared store. No new scheduler or test registry:
    with normal `fo build` before explicit hook preparation;
    arbitrary project configure scripts retain responsibility for their own network contract.
 
-The existing shared store holds a small atomic receipt only after the build and
+The existing shared store holds a small atomic full-tier receipt only after the build and
 **every** fast model case passed. Gremlin publishes the same receipt at green
 quiescence only after checking every fast case's current closure digest against
 its PASS index; a scoped lane is insufficient by itself. A hook's affected subset
 cannot create a full-tier receipt. This deliberately conservative reuse may miss
 when CMake inputs cannot be relocated; correctness takes precedence over a hit.
+Explicit preparation stores a distinct receipt in the same store, keyed by the
+same input identity and the complete policy-selected fast case names. Ordinary
+and bounded hook checks can reuse this receipt; changing label policy to select different fast
+cases invalidates it. Excluded tests are never recorded as passed.
 The snapshot itself and native model loading still cost time on a receipt hit;
 millisecond latency is a target to measure, not a promised constant.
 
-The explicit manual preparation command retains a 10-second test budget, a
-900-second mandatory build cap and a 1-second fast-test warning threshold. The
+The ordinary manual command retains a 10-second shared test budget, a
+900-second mandatory build cap and a 1-second fast-test warning threshold.
+`fo hook pre-commit --prepare [--json]` selects all fast cases allowed by the
+current label policy, including cases outside the affected subset. It gives
+each case the time limit configured by `fo.hookBuildCap` instead of sharing the short test budget.
+Slow and default-excluded cases remain deferred. A failed, timed out or
+incomplete fast case fails preparation without writing a receipt. Preparation
+cannot be combined with `--bounded` or the internal `--view` option. The
 bounded commit command cancels owned work after eight seconds, reserving about
 two seconds for process drainage and snapshot cleanup. Raising manual budgets
-does not extend the commit budget. Configure manual preparation per repository:
+does not extend the commit budget. Configure the limits per repository:
 
 ```sh
 git config fo.hookBudget 10
