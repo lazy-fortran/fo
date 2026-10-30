@@ -50,6 +50,7 @@ module fo_project_load
     public :: project_model_units, project_affected_cases
     public :: project_list_text, project_list_json
     public :: project_layering, project_layering_text, project_layering_json
+    public :: configure_error_excerpt
 
 contains
 
@@ -99,10 +100,8 @@ contains
             ierr = 1
             message = 'CMake configure failed'
             call read_text_file_alloc(trim(log_file), text, status)
-            if (status == 0) then
-                if (len(text) > 2000) text = '...'//text(len(text) - 1999:)
-                message = message//new_line('a')//trim(text)
-            end if
+            if (status == 0) message = message//new_line('a')// &
+                trim(configure_error_excerpt(text))
             call delete_tmpfile(trim(log_file))
             return
         end if
@@ -110,6 +109,46 @@ contains
         call cmake_model_load(b%cmake, model, ierr, message)
         if (ierr /= 0) message = 'CMake project model unavailable: '//message
     end subroutine project_load
+
+    function configure_error_excerpt(text) result(excerpt)
+        !! CMake reports an error where it occurs and keeps configuring, so the
+        !! end of a long log rarely holds the cause: keep every error block.
+        character(len=*), intent(in) :: text
+        character(len=:), allocatable :: excerpt
+        integer, parameter :: limit = 8000
+        integer :: start, finish, next
+        logical :: in_error
+
+        excerpt = ''
+        in_error = .false.
+        start = 1
+        do while (start <= len(text))
+            next = index(text(start:), new_line('a'))
+            if (next == 0) then
+                finish = len(text)
+                next = len(text) + 1
+            else
+                finish = start + next - 2
+                next = start + next
+            end if
+            if (index(text(start:finish), 'CMake Error') == 1) then
+                in_error = .true.
+            else if (in_error .and. finish >= start) then
+                ! A block continues with indented text and its call stack.
+                in_error = text(start:start) == ' ' .or. &
+                    index(text(start:finish), 'Call Stack') == 1
+            end if
+            if (in_error .and. len(excerpt) <= limit) &
+                excerpt = excerpt//text(start:finish)//new_line('a')
+            start = next
+        end do
+        if (len(excerpt) == 0) then
+            excerpt = text
+            if (len(excerpt) > 2000) excerpt = '...'//excerpt(len(excerpt) - 1999:)
+        else if (len(excerpt) > limit) then
+            excerpt = excerpt(:limit)//'...'
+        end if
+    end function configure_error_excerpt
 
     subroutine project_load_configured(b, model, ierr, message, input_digest, &
             scanned)

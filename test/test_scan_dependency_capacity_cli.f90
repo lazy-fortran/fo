@@ -46,7 +46,9 @@ program test_scan_dependency_capacity_cli
     call list_add(native, 'test_payload')
     call list_add(native, '--profile')
     call list_add(native, 'release')
-    call run_process(native, scratch, observed)
+    ! Cold builds of 129 modules can outlast the harness's 120 s default on a
+    ! loaded host; the suite's wall cap still bounds a hang.
+    call run_process(native, scratch, observed, timeout_ms=480000)
     call assert_process_ok(observed, 'native FPM builds and checks all 128 dependencies')
     call assert_true(index(observed%stdout, 'payload verified') > 0, &
         'native compiler establishes the independent payload oracle')
@@ -77,7 +79,8 @@ contains
     subroutine check(success, label)
         logical, intent(in) :: success
         character(len=*), intent(in) :: label
-        call run_fo(driver, args, scratch, join_path(scratch, 'cache'), observed, env)
+        call run_fo(driver, args, scratch, join_path(scratch, 'cache'), observed, env, &
+            timeout_ms=480000)
         call assert_true((observed%exit_code == 0) .eqv. success, label)
         call parse_json_report(observed, report, label//' produces structured evidence')
         call assert_true((json_number_value(json_member(report, 'exit_code')) == 0) &
