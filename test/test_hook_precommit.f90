@@ -7,6 +7,8 @@ program test_hook_precommit
     use fo_test_gremlin_oracle, only: gremlin_json, gremlin_field, gremlin_stop_lane
     use fo_test_json, only: json_value_t
     use fo_test_cli, only: resolve_driver, run_fo, run_external
+    use fo_project_model, only: project_model_t, model_request_t, model_init, model_finalize
+    use fo_hook_evidence, only: hook_prepared_key
     use, intrinsic :: iso_fortran_env, only: int64
     implicit none
     character(len=*), parameter :: nl = new_line('a')
@@ -18,6 +20,7 @@ program test_hook_precommit
     character(len=:), allocatable :: tag
     logical :: downloaded
 
+    call prepared_identity()
     call resolve_driver(driver)
     call make_scratch('fo-hook', scratch)
     ! The unbounded hook runs fast tests until fo.hookBudget, counted from its
@@ -121,6 +124,7 @@ program test_hook_precommit
     call assert_contains(result%stdout, '"fast_passed":0', 'slow test never passed implicitly')
 
     call markerless_git_dependency()
+    call preparation_fixture()
 
     ! CTest's external command gives an independent deterministic budget oracle.
     project = join_path(scratch, 'cmake')
@@ -715,6 +719,121 @@ program test_hook_precommit
     call finish_assertions(retain_failed_scratch=.true.)
     call remove_tree(scratch)
 contains
+    subroutine prepared_identity()
+        type(project_model_t) :: model
+        type(model_request_t) :: request
+        character(len=:), allocatable :: message
+        character(len=64) :: key
+        integer :: status
+
+        call model_init(model, 'native', repeat('a', 64))
+        model%complete = .true.
+        call model_finalize(model, status, message)
+        call assert_true(status == 0, 'finalize prepared-identity model')
+        key = hook_prepared_key(repeat('b', 64), model, request)
+        call assert_true(len_trim(key) == 64, 'complete empty policy has an identity')
+        key = hook_prepared_key('', model, request)
+        call assert_equal_string(trim(key), '', 'missing base input cannot prepare an identity')
+        model%complete = .false.
+        key = hook_prepared_key(repeat('b', 64), model, request)
+        call assert_equal_string(trim(key), '', 'incomplete model cannot prepare an identity')
+    end subroutine prepared_identity
+
+    subroutine preparation_fixture()
+        character(len=:), allocatable :: saved_project
+        integer :: i
+
+        saved_project = project
+        project = join_path(scratch, 'preparation')
+        call write_text(project//'/CMakeLists.txt', &
+            'cmake_minimum_required(VERSION 3.20)'//nl// &
+            'project(hook_preparation LANGUAGES Fortran)'//nl// &
+            'enable_testing()'//nl//'add_library(answer answer.f90)'//nl// &
+            'add_test(NAME a_failure COMMAND "${CMAKE_COMMAND}" -E false)'//nl// &
+            'set_tests_properties(a_failure PROPERTIES LABELS regression)'//nl// &
+            'add_test(NAME b_wait COMMAND "${CMAKE_COMMAND}" -E sleep 3)'//nl// &
+            'add_test(NAME c_wait COMMAND "${CMAKE_COMMAND}" -E sleep 3)'//nl// &
+            'add_test(NAME z_slow COMMAND "${CMAKE_COMMAND}" -E false)'//nl// &
+            'set_tests_properties(z_slow PROPERTIES LABELS slow)'//nl)
+        call write_text(project//'/answer.f90', original)
+        call git([character(len=64) :: 'init', '-q'])
+        call git([character(len=64) :: 'add', 'CMakeLists.txt', 'answer.f90'])
+        call git([character(len=64) :: 'config', 'fo.hookBudget', '4'])
+        call git([character(len=64) :: 'config', 'fo.hookBuildCap', '30'])
+        call git([character(len=64) :: 'config', 'fo.hookExcludeLabels', 'regression'])
+        do i = 1, 3
+            args = string_list_t()
+            call list_add(args, 'hook')
+            call list_add(args, 'pre-commit')
+            call list_add(args, '--prepare')
+            if (i == 1) then
+                call list_add(args, '--bounded')
+            else if (i == 2) then
+                call list_add(args, '--view='//scratch//'/invalid-prepare-view')
+            else
+                call list_add(args, '--view=')
+            end if
+            call run_fo(driver, args, project, scratch//'/cache', result)
+            call assert_true(result%exit_code == 2, 'reject incompatible preparation modes')
+            call assert_contains(result%stderr, '--prepare cannot be combined', &
+                'preparation conflict is explicit')
+        end do
+        call hook()
+        call assert_process_ok(result, 'ordinary hook still defers beyond the shared budget')
+        call assert_contains(result%stdout, '"cache_hit":false', 'budget miss has no evidence')
+        call assert_not_contains(result%stdout, '"fast_passed":2', &
+            'the shared budget cannot complete both fast cases')
+        call assert_not_contains(result%stdout, '"deferred_count":0', &
+            'aggregate fast tests exceed the ordinary budget')
+        call hook(prepare=.true.)
+        call assert_process_ok(result, 'preparation finishes all policy-selected fast tests')
+        call assert_contains(result%stdout, '"fast_passed":2', 'both fast cases completed')
+        call assert_contains(result%stdout, '"deferred":["z_slow"]', &
+            'preparation keeps slow cases deferred')
+        call assert_contains(result%stdout, '"cache_hit":false', 'preparation creates fresh evidence')
+        call bounded_hook()
+        call assert_process_ok(result, 'bounded hook reuses policy-specific preparation')
+        call assert_contains(result%stdout, '"cache_hit":true', 'prepared policy receipt hit')
+        call git([character(len=64) :: 'config', 'fo.hookIncludeLabels', 'regression'])
+        call bounded_hook()
+        call assert_process_ok(result, 'an empty fast policy needs only its staged build')
+        call assert_contains(result%stdout, '"cache_hit":false', 'include policy change invalidates proof')
+        call git([character(len=64) :: 'config', '--unset', 'fo.hookIncludeLabels'])
+        call bounded_hook()
+        call assert_process_ok(result, 'restored policy reuses its prepared evidence')
+        call assert_contains(result%stdout, '"cache_hit":true', 'full selected policy identity restored')
+        call git([character(len=64) :: 'config', 'fo.hookExcludeLabels', 'unmatched'])
+        call bounded_hook()
+        call assert_true(result%exit_code /= 0, 'newly included failure revokes prepared evidence')
+        call assert_contains(result%stdout, '"cache_hit":false', 'changed policy misses receipt')
+        call assert_contains(result%stdout, 'fast test failed: a_failure', &
+            'policy-excluded failure was never blessed')
+        call hook(prepare=.true.)
+        call assert_true(result%exit_code /= 0, 'failed preparation blocks')
+        call assert_contains(result%stdout, 'fast test failed: a_failure', &
+            'preparation reports the failing case')
+        call bounded_hook()
+        call assert_true(result%exit_code /= 0, 'failed preparation cannot seed a receipt')
+        call assert_contains(result%stdout, '"cache_hit":false', 'failed preparation stays cold')
+        call git([character(len=64) :: 'config', 'fo.hookExcludeLabels', 'regression'])
+        call write_text(project//'/answer.f90', original//'! Changed preparation input'//nl)
+        call git([character(len=64) :: 'add', 'answer.f90'])
+        call git([character(len=64) :: 'config', 'fo.hookBuildCap', '2'])
+        call hook(prepare=.true.)
+        call assert_true(result%exit_code /= 0, 'timed out preparation blocks')
+        call assert_contains(result%stdout, 'preparation incomplete', 'test cap is truthful')
+        call assert_contains(result%stdout, '"cache_hit":false', 'changed source invalidates proof')
+        call git([character(len=64) :: 'config', 'fo.hookBuildCap', '30'])
+        call hook(prepare=.true.)
+        call assert_process_ok(result, 'preparation after timeout completes')
+        call assert_contains(result%stdout, '"cache_hit":false', 'timeout wrote no receipt')
+        call assert_contains(result%stdout, '"fast_passed":2', 'source edit receives complete proof')
+        call bounded_hook()
+        call assert_process_ok(result, 'newly prepared source can be committed')
+        call assert_contains(result%stdout, '"cache_hit":true', 'new source receipt reused')
+        project = saved_project
+    end subroutine preparation_fixture
+
     function flat_module(step, indent) result(text)
         ! Column-0 procedures, four-space steps and one stray three-space line.
         character(len=*), intent(in) :: step, indent
@@ -884,13 +1003,17 @@ contains
         call list_add(environment, 'GIT_CONFIG_GLOBAL='//scratch//'/hook-gitconfig')
         call run_external('git', args, project, result, environment, timeout_ms=90000)
     end subroutine git_hook
-    subroutine hook(extra)
+    subroutine hook(extra, prepare)
         type(string_list_t), intent(in), optional :: extra
+        logical, intent(in), optional :: prepare
         type(string_list_t) :: environment
         args = string_list_t()
         call list_add(args, 'hook')
         call list_add(args, 'pre-commit')
         call list_add(args, '--json')
+        if (present(prepare)) then
+            if (prepare) call list_add(args, '--prepare')
+        end if
         if (present(extra)) environment = extra
         call list_add(environment, 'GIT_CONFIG_GLOBAL='//scratch//'/hook-gitconfig')
         call run_fo(driver, args, project, scratch//'/cache', result, &
