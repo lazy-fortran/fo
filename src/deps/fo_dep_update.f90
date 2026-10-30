@@ -449,15 +449,23 @@ contains
         character(len=512) :: source, ref
         character(len=4096) :: origin, selected, changes
         integer :: status
+        logical :: have_source
 
         valid = .false.
         commit = ''
         call local_git_text(destination, &
             [character(len=64) :: 'config', '--get', 'remote.origin.url'], &
             origin, status)
-        if (status /= 0) return
-        call git_source(dep, package_dir, source)
-        if (trim(origin) /= trim(dep%git) .and. trim(origin) /= trim(source)) return
+        if (status == 1) then
+            call fetched_checkout_matches(dep, destination, have_source)
+            if (.not. have_source) return
+        else if (status == 0) then
+            call git_source(dep, package_dir, source)
+            if (trim(origin) /= trim(dep%git) .and. &
+                trim(origin) /= trim(source)) return
+        else
+            return
+        end if
         ref = 'refs/remotes/origin/HEAD'
         if (len_trim(dep%branch) > 0) ref = 'refs/remotes/origin/'//trim(dep%branch)
         if (len_trim(dep%tag) > 0) ref = 'refs/tags/'//trim(dep%tag)
@@ -484,6 +492,50 @@ contains
         valid = status == 0
     end subroutine validate_git_checkout
 
+    subroutine fetched_checkout_matches(dep, destination, valid)
+        type(fpm_dep_t), intent(in) :: dep
+        character(len=*), intent(in) :: destination
+        logical, intent(out) :: valid
+
+        character(len=4096) :: fetched, expected, source
+        character(len=:), allocatable :: prefix
+        integer :: status, split, nl
+
+        valid = .false.
+        if (.not. allocated(dep%rev)) return
+        if (len_trim(dep%rev) /= 40 .and. len_trim(dep%rev) /= 64) return
+        if (verify(trim(dep%rev), '0123456789abcdefABCDEF') /= 0) return
+        ! fpm fetches a pinned object directly, without creating an origin remote.
+        call read_text_file(trim(destination)//'/.git/FETCH_HEAD', fetched)
+        nl = index(fetched, new_line('a'))
+        if (nl /= len_trim(fetched) .or. nl == 0) return
+        fetched = fetched(:nl - 1)
+        prefix = trim(dep%rev)//achar(9)//achar(9)//"'"//trim(dep%rev)//"' of "
+        split = len(prefix)
+        if (fetched(:split) /= prefix(:split)) return
+        source = fetched(split + 1:)
+        if (trim(source) == fetch_display_url(trim(dep%git))) then
+            valid = .true.
+            return
+        end if
+        ! Git expands configured mirror URLs locally; --get-url never fetches.
+        call local_git_text(destination, [character(len=1024) :: 'ls-remote', &
+            '--get-url', '--', trim(dep%git)], expected, status)
+        if (status /= 0) return
+        valid = trim(source) == fetch_display_url(trim(expected))
+    end subroutine fetched_checkout_matches
+
+    function fetch_display_url(url) result(display)
+        character(len=*), intent(in) :: url
+        character(len=:), allocatable :: display
+        integer :: n
+
+        display = url
+        n = len_trim(display)
+        if (n < 4) return
+        if (display(n - 3:n) == '.git') display = display(:n - 4)
+    end function fetch_display_url
+
     subroutine local_git_text(destination, words, output, status)
         character(len=*), intent(in) :: destination, words(:)
         character(len=*), intent(out) :: output
@@ -497,8 +549,8 @@ contains
         call argv_push(args, n_args, 'git')
         call argv_push(args, n_args, '-C')
         call argv_push(args, n_args, destination)
-        call argv_push(args, n_args, '--git-dir='//trim(destination)//'/.git')
-        call argv_push(args, n_args, '--work-tree='//destination)
+        call argv_push(args, n_args, '--git-dir=.git')
+        call argv_push(args, n_args, '--work-tree=.')
         do i = 1, size(words)
             call argv_push(args, n_args, trim(words(i)))
         end do
