@@ -43,8 +43,8 @@ its PASS index; a scoped lane is insufficient by itself. A hook's affected subse
 cannot create a full-tier receipt. This deliberately conservative reuse may miss
 when CMake inputs cannot be relocated; correctness takes precedence over a hit.
 Explicit preparation stores a distinct receipt in the same store, keyed by the
-same input identity and the complete policy-selected fast case names. Both hook
-modes can reuse this receipt; changing label policy to select different fast
+same input identity and the complete policy-selected fast case names. Ordinary
+and bounded hook checks can reuse this receipt; changing label policy to select different fast
 cases invalidates it. Excluded tests are never recorded as passed.
 The snapshot itself and native model loading still cost time on a receipt hit;
 millisecond latency is a target to measure, not a promised constant.
@@ -53,7 +53,7 @@ The ordinary manual command retains a 10-second shared test budget, a
 900-second mandatory build cap and a 1-second fast-test warning threshold.
 `fo hook pre-commit --prepare [--json]` selects all fast cases allowed by the
 current label policy, including cases outside the affected subset. It gives
-each case the configured build cap instead of sharing the short test budget.
+each case the time limit configured by `fo.hookBuildCap` instead of sharing the short test budget.
 Slow and default-excluded cases remain deferred. A failed, timed out or
 incomplete fast case fails preparation without writing a receipt. Preparation
 cannot be combined with `--bounded` or the internal `--view` option. The
