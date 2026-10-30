@@ -19,6 +19,7 @@ program test_gremlin_task_lane
     use fo_test_mcp_session, only: mcp_session_request, mcp_session_notify
     use fo_test_mcp_session, only: mcp_session_shutdown
     use fo_test_json, only: json_value_t, json_parse, json_member, json_element
+    use fo_process, only: argv_push, process_run_argv_logged
     implicit none
 
     character(:), allocatable :: driver, scratch, project, cache, state, self, marker
@@ -32,7 +33,8 @@ program test_gremlin_task_lane
 
     mode = ''
     if (command_argument_count() >= 6) call get_command_argument(1, mode)
-    if (trim(mode) == '--task-parent') call run_as_parent()
+    if (trim(mode) == '--task-parent' .or. trim(mode) == '--sync-task-parent') &
+        call run_as_parent()
 
     call gremlin_setup(driver, scratch, project, cache, state)
     call write_text(project//'/fpm.toml', 'name = "task_lane"'//new_line('a'))
@@ -73,10 +75,45 @@ program test_gremlin_task_lane
     call gremlin_stop_lane(driver, project, cache, state, 'cli-persistent', &
         persistent_session)
 
+    call synchronous_cli()
     call mcp_connection()
     call finish_assertions(retain_failed_scratch=.true.)
 
 contains
+
+    subroutine synchronous_cli()
+        type(string_list_t) :: sync_args
+        character(:), allocatable :: sessions
+        integer :: sync_parent, task_pid, persistent_pid, split, code
+        logical :: ready
+
+        marker = scratch//'/sync-sessions.txt'
+        call list_add(sync_args, '--sync-task-parent')
+        call list_add(sync_args, driver)
+        call list_add(sync_args, project)
+        call list_add(sync_args, cache)
+        call list_add(sync_args, state)
+        call list_add(sync_args, marker)
+        call gremlin_spawn(self, project, sync_args, scratch//'/sync-parent.out', &
+            scratch//'/sync-parent.err', sync_parent)
+        call gremlin_wait_file(marker, 60000, ready)
+        call assert_true(ready, 'synchronous parent starts its lanes')
+        if (.not. ready) call finish_assertions(retain_failed_scratch=.true.)
+        sessions = read_text(marker)
+        split = index(sessions, new_line('a'))
+        task_pid = gremlin_owner_pid(sessions(:split - 1))
+        persistent_pid = gremlin_owner_pid(sessions(split + 1:len(sessions) - 1))
+        call gremlin_wait_ms(1500)
+        call assert_true(gremlin_process_running(task_pid), &
+            'synchronous CLI task lane follows its live caller')
+        call gremlin_stop_child(sync_parent, code)
+        call assert_true(gremlin_wait_exit(task_pid, 20000), &
+            'synchronous CLI task lane exits when its caller ends')
+        call assert_true(gremlin_process_running(persistent_pid), &
+            'synchronous CLI persistent lane survives its caller')
+        call gremlin_stop_lane(driver, project, cache, state, 'cli-persistent', &
+            sessions(split + 1:len(sessions) - 1))
+    end subroutine synchronous_cli
 
     subroutine run_as_parent()
         !! The CLI's parent: start both lanes, publish their sessions, wait.
@@ -105,14 +142,30 @@ contains
         type(process_result_t) :: started
         type(json_value_t) :: reply
         logical :: valid
-        character(:), allocatable :: message
+        character(:), allocatable :: message, packed, log_file
+        integer :: i, count
 
         call gremlin_start_args(start, trim(v(2)), lane, 'test_task')
         if (task) then
             call list_add(start, '--owner')
             call list_add(start, 'task')
         end if
-        call gremlin_run(trim(v(1)), trim(v(2)), trim(v(3)), trim(v(4)), start, started)
+        if (trim(mode) == '--sync-task-parent') then
+            packed = ''
+            count = 0
+            call argv_push(packed, count, trim(v(1)))
+            do i = 1, size(start%items)
+                call argv_push(packed, count, start%items(i)%value)
+            end do
+            log_file = trim(v(2))//'/'//lane//'.log'
+            call process_run_argv_logged(trim(v(2)), packed, count, log_file, &
+                .false., 60, started%exit_code, env_extra= &
+                'FO_CACHE_DIR='//trim(v(3))//';FO_GREMLIN_STATE_DIR='//trim(v(4))// &
+                ';FO_DISABLE_SELF_REFRESH=1;FO_SELF_REFRESH=0;FO_JOBS=1')
+            started%stdout = read_text(log_file)
+        else
+            call gremlin_run(trim(v(1)), trim(v(2)), trim(v(3)), trim(v(4)), start, started)
+        end if
         call json_parse(started%stdout, reply, valid, message)
         session = gremlin_field(reply, 'session_id')
         if (started%exit_code /= 0 .or. len(session) == 0) stop 4

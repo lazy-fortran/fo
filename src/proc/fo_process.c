@@ -21,6 +21,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/socket.h>
 #ifdef __linux__
 #include <stddef.h>
 #include <linux/audit.h>
@@ -45,7 +46,7 @@
 
 #include "../util/fo_sys.h"
 
-#ifdef __linux__
+#if defined(__linux__) || defined(__APPLE__)
 #define FO_MONITOR_FD 9
 #define FO_MONITOR_ARG "\037fo-process-monitor-v1"
 #endif
@@ -657,8 +658,8 @@ static void record_timeout(struct run_budget *budget, int kind,
    cannot finish, fail closed on that nested handle's group. */
 static int kill_isolated_group(pid_t pid);
 
-static void kill_group_and_reap(pid_t pid, int *status, int isolated_group) {
-    int reaped = 0;
+static int kill_group_and_reap(pid_t pid, int *status, int isolated_group) {
+    int reaped = 0, cleanup_error = 0;
     pid_t waited;
     pid_t target = isolated_group ? -pid : pid;
 
@@ -674,21 +675,23 @@ static void kill_group_and_reap(pid_t pid, int *status, int isolated_group) {
     if (!isolated_group) {
         waited = waitpid(pid, status, WNOHANG);
         reaped = waited == pid;
-        if (reaped) return;
+        if (reaped) return 0;
     }
     if (!isolated_group && getpgrp() == getpid() && getsid(0) != getpid())
         (void)kill(-getpgrp(), SIGKILL);
-    if (isolated_group) (void)kill_isolated_group(pid);
+    if (isolated_group) cleanup_error = kill_isolated_group(pid);
     else kill(target, SIGKILL);
     if (!reaped) {
         while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {
         }
     }
+    return cleanup_error;
 }
 
 static int read_exact(int fd, void *buffer, size_t size);
+int fo_c_self_executable(char *out, int capacity);
 
-#ifdef __linux__
+#if defined(__linux__) || defined(__APPLE__)
 static int start_command_monitor(const char *cwd, char *const argv[],
                                  const char *log_file, int append,
                                  int capture_monitor,
@@ -697,6 +700,9 @@ static int start_command_monitor(const char *cwd, char *const argv[],
                                  pid_t *monitor_pid,
                                  pid_t *target_pid, int *report_fd) {
     posix_spawn_file_actions_t actions;
+    posix_spawnattr_t attrs;
+    char mode[64];
+    int attrs_ready = 0;
     char **monitor_argv;
     int pipefd[2], stream_fd[3] = {-1, -1, -1};
     int error, ready, actions_ready = 0;
@@ -725,9 +731,24 @@ static int start_command_monitor(const char *cwd, char *const argv[],
     monitor_argv[1] = FO_MONITOR_ARG;
     monitor_argv[2] = (char *)(cwd != NULL ? cwd : "");
     monitor_argv[3] = (char *)(log_file != NULL ? log_file : "");
-    monitor_argv[4] = capture_monitor ? "C" : (append ? "1" : "0");
+    if (capture_monitor == 2) {
+        snprintf(mode, sizeof(mode), "L%d:%ld", append != 0, (long)getpid());
+        monitor_argv[4] = mode;
+    } else monitor_argv[4] = capture_monitor ? "C" : (append ? "1" : "0");
     for (size_t i = 0; i < count; i++) monitor_argv[i + 5] = argv[i];
-    if (pipe2(pipefd, O_CLOEXEC) != 0) {
+#ifdef __linux__
+    error = socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, pipefd);
+#else
+    error = socketpair(AF_UNIX, SOCK_STREAM, 0, pipefd);
+    if (error == 0 && (fcntl(pipefd[0], F_SETFD, FD_CLOEXEC) != 0 ||
+                       fcntl(pipefd[1], F_SETFD, FD_CLOEXEC) != 0)) {
+        int saved = errno;
+        close(pipefd[0]); close(pipefd[1]);
+        errno = saved;
+        error = -1;
+    }
+#endif
+    if (error != 0) {
         error = errno;
         free(monitor_argv);
         for (size_t i = 0; i < 3; i++) if (stream_fd[i] >= 0) close(stream_fd[i]);
@@ -764,9 +785,18 @@ static int start_command_monitor(const char *cwd, char *const argv[],
         error = posix_spawn_file_actions_addclose(&actions, pipefd[0]);
     if (error == 0)
         error = posix_spawn_file_actions_addclose(&actions, pipefd[1]);
+    if (error == 0 && capture_monitor == 2) {
+        error = posix_spawnattr_init(&attrs);
+        if (error == 0) attrs_ready = 1;
+        if (error == 0)
+            error = posix_spawnattr_setflags(&attrs, POSIX_SPAWN_SETPGROUP);
+        if (error == 0) error = posix_spawnattr_setpgroup(&attrs, 0);
+    }
     if (error == 0)
-        error = posix_spawn(monitor_pid, monitor_executable, &actions, NULL,
+        error = posix_spawn(monitor_pid, monitor_executable, &actions,
+                            attrs_ready ? &attrs : NULL,
                             monitor_argv, child_env ? child_env : environ);
+    if (attrs_ready) posix_spawnattr_destroy(&attrs);
     if (actions_ready) posix_spawn_file_actions_destroy(&actions);
     free(monitor_argv);
     for (size_t i = 0; i < 3; i++) if (stream_fd[i] >= 0) close(stream_fd[i]);
@@ -1073,6 +1103,52 @@ static int kill_isolated_group(pid_t pid) {
 #endif
 }
 
+#if defined(__APPLE__) || defined(__linux__)
+/* The command gets its existing TERM grace before its guardian is escalated.
+   Keep both exact leaders anchored until their own groups have drained. */
+static int stop_lifeline_monitor(pid_t monitor, pid_t target, uint64_t target_start,
+                                 int *status) {
+    struct timespec now, deadline;
+    int error = 0, done = 0;
+    (void)kill(monitor, SIGTERM);
+    clock_gettime(CLOCK_MONOTONIC, &deadline);
+    add_seconds(&deadline, 6);
+    for (;;) {
+        siginfo_t info = {0};
+        int waited = waitid(P_PID, (id_t)monitor, &info, WEXITED | WNOHANG | WNOWAIT);
+        if (waited == 0 && info.si_pid == monitor) { done = 1; break; }
+        if (waited < 0 && errno != EINTR) { error = errno; break; }
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        if (timespec_at_or_after(&now, &deadline)) break;
+        sleep_ms(10);
+    }
+    if (!done) {
+        if (target_start == 0 ||
+            signal_owned_tree(target, target_start, 0, 0, NULL, SIGKILL) < 0)
+            error = EIO;
+        clock_gettime(CLOCK_MONOTONIC, &deadline);
+        add_seconds(&deadline, 1);
+        for (;;) {
+            int remaining = signal_owned_tree(target, target_start, 0, 0, NULL, 0);
+            if (remaining == 0) break;
+            if (remaining < 0) { error = errno; break; }
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            if (timespec_at_or_after(&now, &deadline)) { error = ETIMEDOUT; break; }
+            sleep_ms(10);
+        }
+    }
+    int drainage = kill_isolated_group(monitor);
+    if (!error) error = drainage;
+    while (waitpid(monitor, status, 0) < 0) {
+        if (errno == EINTR) continue;
+        if (!error) error = errno;
+        break;
+    }
+    if (!error && WIFEXITED(*status) && WEXITSTATUS(*status) == 126) error = EIO;
+    return error;
+}
+#endif
+
 static int run_argv(const char *cwd, char *const argv[], const char *log_file,
                     int append, int jobs, int timeout_s, int heartbeat_s,
                     const char *env_extra, struct run_budget *budget) {
@@ -1080,7 +1156,8 @@ static int run_argv(const char *cwd, char *const argv[], const char *log_file,
     int status;
     int pid_fd = -1;
     int spawn_error;
-    int isolated_group = 1;
+    int isolated_group = 1, lifeline_monitor = 0;
+    uint64_t target_start = 0;
     int report_fd = -1;
     int attrs_ready = 0;
     pid_t accounted_pid = 0;
@@ -1129,8 +1206,20 @@ static int run_argv(const char *cwd, char *const argv[], const char *log_file,
         spawn_error = posix_spawnattr_setpgroup(&attrs, 0);
     }
     if (spawn_error == 0) {
+#if defined(__APPLE__) || defined(__linux__)
+        char executable[PATH_MAX];
+        if (fo_c_self_executable(executable, sizeof(executable)) != 0)
+            spawn_error = ENOENT;
+        else spawn_error = start_command_monitor(cwd, argv, log_file, append, 2,
+            child_env, executable, -1, -1, -1, &pid, &accounted_pid, &report_fd);
+        if (spawn_error == 0) {
+            lifeline_monitor = 1;
+            target_start = fo_sys_process_start(accounted_pid);
+        }
+#else
         spawn_error = posix_spawnp(&pid, argv[0], &actions, &attrs, argv,
                                    child_env ? child_env : environ);
+#endif
     }
     /* A nested async job has a stricter inherited filter: its synchronous
        children stay in that job's group so its handle can cancel the tree. */
@@ -1237,19 +1326,33 @@ static int run_argv(const char *cwd, char *const argv[], const char *log_file,
             clock_gettime(CLOCK_MONOTONIC, &now);
             if (timespec_at_or_after(&now, &deadline)) {
                 record_timeout(budget, 2, child_cpu_ms(accounted_pid), &start, &now);
-                kill_group_and_reap(pid, &status, isolated_group);
+                int cleanup_error = 0;
+#if defined(__APPLE__) || defined(__linux__)
+                if (lifeline_monitor)
+                    cleanup_error = stop_lifeline_monitor(pid, accounted_pid,
+                                                          target_start, &status);
+                else
+#endif
+                    kill_group_and_reap(pid, &status, isolated_group);
                 if (pid_fd >= 0) close(pid_fd);
                 if (report_fd >= 0) close(report_fd);
-                return 124;
+                return cleanup_error == 0 ? 124 : 126;
             }
             if (cpu_s > 0 && timespec_at_or_after(&now, &cpu_check)) {
                 long long used = child_cpu_ms(accounted_pid);
                 if (used < 0 || used >= (long long)cpu_s * 1000LL) {
                     record_timeout(budget, used < 0 ? 3 : 1, used, &start, &now);
-                    kill_group_and_reap(pid, &status, isolated_group);
+                    int cleanup_error = 0;
+#if defined(__APPLE__) || defined(__linux__)
+                    if (lifeline_monitor)
+                        cleanup_error = stop_lifeline_monitor(pid, accounted_pid,
+                                                              target_start, &status);
+                    else
+#endif
+                        kill_group_and_reap(pid, &status, isolated_group);
                     if (pid_fd >= 0) close(pid_fd);
                     if (report_fd >= 0) close(report_fd);
-                    return 124;
+                    return cleanup_error == 0 ? 124 : 126;
                 }
                 cpu_check = now;
                 add_milliseconds(&cpu_check, CPU_POLL_MS);
@@ -3341,7 +3444,7 @@ void fo_c_write_stderr(const char *buf, int n) {
     }
 }
 
-#ifdef __linux__
+#if defined(__linux__) || defined(__APPLE__)
 static volatile sig_atomic_t monitor_stop = 0;
 
 static void monitor_term(int signal_number) {
@@ -3349,6 +3452,7 @@ static void monitor_term(int signal_number) {
     monitor_stop = 1;
 }
 
+#ifdef __linux__
 /* The monitor is a fresh exec and the only subreaper for this command.
    Double-forked orphans become its direct children, so no other command's
    descendants can be mistaken for this one's. */
@@ -3435,6 +3539,8 @@ static int monitor_kill_children(int preserve_registered_sessions) {
     return 0;
 }
 
+#endif
+
 static int monitor_run(int argc, char **argv) {
     posix_spawn_file_actions_t actions;
     posix_spawnattr_t attrs;
@@ -3444,10 +3550,22 @@ static int monitor_run(int argc, char **argv) {
     sigset_t default_signals;
     pid_t target = 0;
     int error, status = 1, code = 1, target_signal = 0, attrs_ready = 0;
-    int target_done = 0, capture_monitor;
+    int target_done = 0, capture_monitor, lifeline;
+    pid_t owner = 0;
     long long cpu_ms = -1;
+    char **target_env = NULL;
 
-    if (argc < 6 || prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0) return 126;
+    if (argc < 6) return 126;
+    lifeline = argv[4][0] == 'L';
+    if (lifeline) {
+        owner = (pid_t)strtol(argv[4] + 3, NULL, 10);
+        if (owner <= 1) return 126;
+    }
+#ifdef __linux__
+    if (!lifeline && prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0) return 126;
+#else
+    if (!lifeline) return 126;
+#endif
     capture_monitor = strcmp(argv[4], "C") == 0;
     action.sa_handler = monitor_term;
     sigemptyset(&action.sa_mask);
@@ -3465,12 +3583,15 @@ static int monitor_run(int argc, char **argv) {
         error = posix_spawnattr_setsigdefault(&attrs, &default_signals);
     }
     if (error == 0)
-        error = posix_spawnattr_setflags(&attrs, POSIX_SPAWN_SETSIGDEF);
+        error = posix_spawnattr_setflags(&attrs, POSIX_SPAWN_SETSIGDEF |
+                                        (lifeline ? POSIX_SPAWN_SETPGROUP : 0));
+    if (error == 0 && lifeline) error = posix_spawnattr_setpgroup(&attrs, 0);
     if (has_text(argv[2]))
         if (error == 0) error = posix_spawn_file_actions_addchdir_np(&actions, argv[2]);
     if (error == 0 && has_text(argv[3])) {
         int flags = O_WRONLY | O_CREAT |
-                    (argv[4][0] == '1' ? O_APPEND : O_TRUNC);
+                    ((lifeline ? argv[4][1] : argv[4][0]) == '1' ?
+                     O_APPEND : O_TRUNC);
         error = posix_spawn_file_actions_addopen(
             &actions, STDOUT_FILENO, argv[3], flags, 0666);
         if (error == 0)
@@ -3479,9 +3600,27 @@ static int monitor_run(int argc, char **argv) {
     }
     if (error == 0)
         error = posix_spawn_file_actions_addclose(&actions, FO_MONITOR_FD);
+    if (error == 0 && lifeline) {
+        char identity[192];
+        char *overrides[] = {identity, NULL};
+        uint64_t guardian_start = fo_sys_process_start(getpid());
+        uint64_t owner_start = fo_sys_process_start(owner);
+        if (getppid() != owner || guardian_start == 0 || owner_start == 0)
+            error = ESRCH;
+        else {
+            /* A nested task-owned CLI must follow the caller, not this guardian. */
+            snprintf(identity, sizeof(identity),
+                "_FO_LIFELINE_TASK_PARENT=%ld:%llu:%ld:%llu", (long)getpid(),
+                (unsigned long long)guardian_start, (long)owner,
+                (unsigned long long)owner_start);
+            target_env = env_with_vector(overrides);
+            if (target_env == NULL) error = errno;
+        }
+    }
     if (error == 0)
         error = posix_spawnp(&target, argv[5], &actions, &attrs,
-                             argv + 5, environ);
+                             argv + 5, target_env ? target_env : environ);
+    free_env_vector(target_env);
     posix_spawn_file_actions_destroy(&actions);
     if (attrs_ready) posix_spawnattr_destroy(&attrs);
     if (error != 0) target = -(pid_t)error;
@@ -3492,8 +3631,28 @@ static int monitor_run(int argc, char **argv) {
         return error == ENOENT ? 127 : 126;
     }
     for (;;) {
+#ifdef __linux__
         pid_t waited;
+#endif
         if (monitor_stop) break;
+        if (lifeline) {
+            siginfo_t info = {0};
+            struct pollfd life = {.fd = FO_MONITOR_FD, .events = POLLIN};
+            error = waitid(P_PID, (id_t)target, &info, WEXITED | WNOHANG | WNOWAIT);
+            if (error == 0 && info.si_pid == target) {
+                target_done = 1;
+                break;
+            }
+            if (error < 0 && errno != EINTR) break;
+            error = poll(&life, 1, 20);
+            /* The socket closes on owner death. The direct-parent relation
+               also covers a writer briefly inherited by a concurrent spawn. */
+            if (getppid() != owner ||
+                (error > 0 && (life.revents & (POLLHUP | POLLERR | POLLNVAL))))
+                break;
+            continue;
+        }
+#ifdef __linux__
         /* Reap every orphan adopted by this subreaper while it waits, so
            exited descendants never linger as zombies that still answer
            kill(pid, 0). The target's status is kept when it is reaped. */
@@ -3514,10 +3673,37 @@ static int monitor_run(int argc, char **argv) {
         }
         if (waited < 0 && errno != EINTR) break;
         sleep_ms(10);
+#endif
     }
-    if (monitor_kill_children(capture_monitor && target_done &&
-                              !monitor_stop && WIFEXITED(status) &&
-                              WEXITSTATUS(status) == 0) != 0) code = 126;
+    if (lifeline) {
+        if (target_done) {
+            cpu_ms = child_cpu_ms(target);
+            error = kill_isolated_group(target);
+            while (wait4(target, &status, 0, &usage) < 0) {
+                if (errno == EINTR) continue;
+                error = errno;
+                break;
+            }
+            if (cpu_ms < 0) cpu_ms = (long long)usage.ru_utime.tv_sec * 1000LL +
+                                     usage.ru_utime.tv_usec / 1000LL;
+            if (WIFEXITED(status)) code = WEXITSTATUS(status);
+            else if (WIFSIGNALED(status)) {
+                target_signal = WTERMSIG(status);
+                code = 128 + target_signal;
+            }
+            if (error != 0) code = 126;
+        } else {
+            int cleanup_error = kill_group_and_reap(target, &status, 1);
+            code = cleanup_error == 0 ? 125 : 126;
+        }
+    }
+#ifdef __linux__
+    else if (monitor_kill_children(capture_monitor && target_done &&
+                                  !monitor_stop && WIFEXITED(status) &&
+                                  WEXITSTATUS(status) == 0) != 0) code = 126;
+#else
+    (void)capture_monitor;
+#endif
     (void)write_exact(FO_MONITOR_FD, &cpu_ms, sizeof(cpu_ms));
     close(FO_MONITOR_FD);
     if (target_signal > 0 && code != 126) {
@@ -3530,6 +3716,9 @@ static int monitor_run(int argc, char **argv) {
     return code;
 }
 
+#endif
+
+#ifdef __linux__
 int fo_c_process_containment_required(void) {
     pid_t probe_pid;
     pid_t waited;
@@ -3578,6 +3767,9 @@ int fo_c_start_capture_monitor(const char *monitor_executable, const char *cwd,
     return (int)monitor_pid;
 }
 
+#endif
+
+#if defined(__linux__) || defined(__APPLE__)
 __attribute__((constructor))
 static void fo_process_monitor_entry(int argc, char **argv, char **envp) {
     (void)envp;
