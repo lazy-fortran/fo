@@ -18,6 +18,7 @@
 
 #if defined(_WIN32) && !defined(__CYGWIN__)
 #include "fx_win_store.h"
+extern int fx_c_rename(const char *source, const char *destination);
 #endif
 
 #ifndef PATH_MAX
@@ -706,17 +707,30 @@ int fo_c_copy_exec(const char *src, const char *dst) {
     while ((n = fread(buf, 1, sizeof(buf), in)) > 0) {
         if (fwrite(buf, 1, n, out) != n) { fclose(in); fclose(out); return -1; }
     }
-    fclose(in);
-    fclose(out);
+    int failed = ferror(in);
+    if (fclose(in) != 0) failed = 1;
+    if (fclose(out) != 0) failed = 1;
+    if (failed) return -1;
     if (chmod(dst, 0755) != 0) return -1;
     return 0;
+}
+
+/* Backups must retain restricted permissions when rollback restores them. */
+int fo_c_copy_mode(const char *src, const char *dst) {
+    struct stat st;
+    if (stat(src, &st) != 0) return -1;
+    return chmod(dst, st.st_mode & 07777);
 }
 
 /* Rename src to dst (atomic within a filesystem). Replaces mv -f. */
 int fo_c_rename_path(const char *src, const char *dst) {
     if (!fo_has(src) || !fo_has(dst)) return -1;
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    return fx_c_rename(src, dst);
+#else
     if (rename(src, dst) != 0) return -1;
     return 0;
+#endif
 }
 
 /* Append the bytes of src onto dst (mirrors cat src >> dst). */

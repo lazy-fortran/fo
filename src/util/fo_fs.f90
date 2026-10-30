@@ -11,7 +11,7 @@ module fo_fs
     public :: fs_delete_suffix, fs_append_file, fs_write_text
     public :: fs_collect_files, fs_collect_mod_dirs
     public :: fs_mkdir_excl, fs_sleep_ms, fs_pid_alive
-    public :: fs_copy_exec, fs_rename, fs_stat, fs_identity
+    public :: fs_copy_exec, fs_copy_mode, fs_rename, fs_stat, fs_identity
     public :: fs_tree_fingerprint, fs_touch_if_older, fs_dir_trim_lru
     public :: fs_realpath, fs_find_executable, fs_canonical_path
     public :: fs_collect_git_checkouts
@@ -70,6 +70,12 @@ module fo_fs
             import :: c_char, c_int
             character(kind=c_char), intent(in) :: src(*), dst(*)
         end function fo_c_copy_exec
+
+        integer(c_int) function fo_c_copy_mode(src, dst) &
+                bind(C, name='fo_c_copy_mode')
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: src(*), dst(*)
+        end function fo_c_copy_mode
 
         integer(c_int) function fo_c_rename_path(src, dst) &
                 bind(C, name='fo_c_rename_path')
@@ -418,6 +424,12 @@ contains
         character(len=*), intent(in) :: src, dst
         rc = int(fo_c_copy_exec(trim(src)//c_null_char, trim(dst)//c_null_char))
     end function fs_copy_exec
+
+    integer function fs_copy_mode(src, dst) result(rc)
+        character(len=*), intent(in) :: src, dst
+
+        rc = int(fo_c_copy_mode(trim(src)//c_null_char, trim(dst)//c_null_char))
+    end function fs_copy_mode
 
     integer function fs_rename(src, dst) result(rc)
         !! Atomic rename src to dst. 0 on success.

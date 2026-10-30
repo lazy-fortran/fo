@@ -2,6 +2,7 @@ program test_install_native_cli
     use fo_test_harness, only: string_list_t, process_result_t, list_add
     use fo_test_harness, only: make_scratch, make_directory, join_path, write_text
     use fo_test_harness, only: read_text
+    use fo_test_harness, only: current_directory, assert_process_ok, remove_path
     use fo_test_harness, only: file_exists, remove_tree, assert_true
     use fo_test_harness, only: assert_equal_integer, assert_equal_string
     use fo_test_harness, only: finish_assertions, assert_contains
@@ -138,9 +139,129 @@ program test_install_native_cli
     call assert_contains(result%stderr, 'fo: full log: ', &
         'install failure points at the retained build log')
 
+    call check_atomic_reinstall()
     call remove_tree(scratch)
     call finish_assertions()
 contains
+
+    subroutine check_atomic_reinstall()
+        character(:), allocatable :: root, app, store, destination, first, second
+        character(:), allocatable :: shim, marker, cwd, preload, mode
+        type(string_list_t) :: command, env, install_args, no_args
+        type(process_result_t) :: observed
+        logical :: darwin
+
+        call run_external('/usr/bin/uname', no_args, scratch, observed)
+        call assert_process_ok(observed, 'identify install publication platform')
+        darwin = observed%stdout == 'Darwin'//nl
+        if (.not. darwin .and. observed%stdout /= 'Linux'//nl) then
+            write (*, '(a)') &
+                'SKIP: install rename interposition requires Darwin or Linux'
+            return
+        end if
+        root = join_path(scratch, 'atomic')
+        app = join_path(root, 'project')
+        store = join_path(root, 'cache')
+        destination = join_path(root, 'prefix')
+        first = join_path(destination, 'bin/first')
+        second = join_path(destination, 'bin/second')
+        shim = join_path(root, 'observer.so')
+        marker = join_path(root, 'publication.marker')
+        call make_directory(root)
+        call current_directory(cwd)
+        if (darwin) then
+            call list_add(command, '-dynamiclib')
+            preload = 'DYLD_INSERT_LIBRARIES='
+        else
+            call list_add(command, '-shared')
+            call list_add(command, '-fPIC')
+            preload = 'LD_PRELOAD='
+        end if
+        call list_add(command, '-Wall')
+        call list_add(command, '-Werror')
+        call list_add(command, &
+            join_path(cwd, 'test-fixtures/c/install_publication_observer.c'))
+        if (.not. darwin) call list_add(command, '-ldl')
+        call list_add(command, '-o')
+        call list_add(command, shim)
+        call run_external('/usr/bin/cc', command, root, observed)
+        call assert_process_ok(observed, 'compile install publication observer')
+        if (observed%exit_code /= 0) return
+
+        call write_text(join_path(app, 'fpm.toml'), 'name = "atomic_install"'//nl)
+        call write_atomic_apps(app, 'old')
+        call list_add(install_args, 'install')
+        call list_add(install_args, '--prefix')
+        call list_add(install_args, destination)
+        call run_fo(driver, install_args, app, store, observed, environment, 120000)
+        call assert_process_ok(observed, 'initial atomic fixture install succeeds')
+        env = environment
+        call list_add(env, preload//shim)
+        call list_add(env, 'FO_TEST_INSTALL_TARGET='//first)
+        call list_add(env, 'FO_TEST_INSTALL_MARKER='//marker)
+        call write_atomic_apps(app, 'new')
+        call run_fo(driver, install_args, app, store, observed, env, 120000)
+        call assert_process_ok(observed, 'atomic reinstall succeeds')
+        call assert_equal_string(read_text(marker), 'present'//nl, &
+            'installed pathname exists at the incoming publication boundary')
+        call assert_atomic_outputs(first, second, app, 'new')
+
+        command = string_list_t()
+        call list_add(command, '700')
+        call list_add(command, first)
+        call run_external('/bin/chmod', command, root, observed)
+        call assert_process_ok(observed, 'restrict old executable permissions')
+        call list_add(env, 'FO_TEST_INSTALL_FAILURE_TARGET='//second)
+        call remove_path(marker)
+        call write_atomic_apps(app, 'failed')
+        call run_fo(driver, install_args, app, store, observed, env, 120000)
+        call assert_true(observed%exit_code /= 0, &
+            'injected publication failure fails install')
+        call assert_contains(observed%stderr, 'could not publish executable second', &
+            'second publication fails after the first executable was replaced')
+        call assert_equal_string(read_text(marker), 'present'//nl, &
+            'first executable reaches publication before the injected failure')
+        call assert_atomic_outputs(first, second, app, 'new')
+        command = string_list_t()
+        if (darwin) then
+            call list_add(command, '-f')
+            call list_add(command, '%Lp')
+        else
+            call list_add(command, '-c')
+            call list_add(command, '%a')
+        end if
+        call list_add(command, first)
+        call run_external('/usr/bin/stat', command, root, observed)
+        call assert_process_ok(observed, 'read restored executable permissions')
+        mode = observed%stdout
+        call assert_equal_string(mode, '700'//nl, &
+            'rollback preserves the old executable permissions')
+    end subroutine check_atomic_reinstall
+
+    subroutine write_atomic_apps(app, version)
+        character(len=*), intent(in) :: app, version
+
+        call write_text(join_path(app, 'app/first.f90'), &
+            'program first'//nl//'print "(a)", "first '//version//'"'//nl// &
+            'end program first'//nl)
+        call write_text(join_path(app, 'app/second.f90'), &
+            'program second'//nl//'print "(a)", "second '//version//'"'//nl// &
+            'end program second'//nl)
+    end subroutine write_atomic_apps
+
+    subroutine assert_atomic_outputs(first, second, app, version)
+        character(len=*), intent(in) :: first, second, app, version
+        type(process_result_t) :: ran
+
+        call run_external(first, string_list_t(), app, ran)
+        call assert_process_ok(ran, 'first installed executable runs')
+        call assert_equal_string(ran%stdout, 'first '//version//nl, &
+            'first installed executable retains the expected output')
+        call run_external(second, string_list_t(), app, ran)
+        call assert_process_ok(ran, 'second installed executable runs')
+        call assert_equal_string(ran%stdout, 'second '//version//nl, &
+            'second installed executable retains the expected output')
+    end subroutine assert_atomic_outputs
 
     function compiler_directory() result(directory)
         character(:), allocatable :: directory, path

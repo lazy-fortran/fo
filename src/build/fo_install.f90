@@ -6,7 +6,7 @@ module fo_install
     use fo_scan, only: scan_unit_t
     use fo_gfortran_build, only: gfortran_app_source_name, scan_project_app_units
     use fo_fs, only: fs_copy_exec, fs_make_dir, fs_mkdir_excl, fs_remove_file, &
-        fs_collect_files, fs_remove_tree, fs_rename
+        fs_collect_files, fs_remove_tree, fs_rename, fs_copy_mode
     use fo_process, only: process_getpid
     use fo_util, only: make_tmpfile, delete_tmpfile
     use fo_diagnostics, only: diagnostic_t, diagnostic_from_log
@@ -152,8 +152,11 @@ contains
             target = trim(prefix)//'/bin/'//trim(names(i))
             inquire (file=trim(target), exist=exists)
             if (exists) then
-                if (fs_rename(trim(target), trim(stage)//'/previous/'// &
-                        trim(names(i))) /= 0) then
+                ierr = fs_copy_exec(trim(target), trim(stage)//'/previous/'// &
+                    trim(names(i)))
+                if (ierr == 0) ierr = fs_copy_mode(trim(target), &
+                    trim(stage)//'/previous/'//trim(names(i)))
+                if (ierr /= 0) then
                     call rollback_install(stage, prefix, names, had_previous, &
                         published, i - 1, rollback_ok)
                     message = 'fo install: could not preserve existing executable '// &
