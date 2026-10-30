@@ -20,7 +20,7 @@ module fo_gfortran_build
         native_record_profile
     use fo_gremlin_execution_view, only: execution_view_copy_app_outputs
     use fo_test_budget, only: test_timeout_seconds, test_budget_seconds, &
-        test_wall_cap_seconds, timeout_detail, test_policy, test_strict_flaky
+        test_wall_cap_seconds, timeout_detail_into, test_policy, test_strict_flaky
     use fo_test_cases, only: CASE_SEP, case_listing_t, case_list, &
         case_matches, case_run_setup, case_filter_add, NO_PROTOCOL_REASON
     use fx_action_cache, only: cache_set_file_hash_hook
@@ -4171,6 +4171,14 @@ contains
         !! waiting is already the default for every child (fo_c_configure_openmp).
         character(len=:), allocatable :: extra
 
+        call team_openmp_env_into(extra)
+    end function team_openmp_env
+
+    subroutine team_openmp_env_into(extra)
+        ! Threads call this form: gfortran keeps a deferred-length function
+        ! result's length in a static caller temporary (GCC PR 113797).
+        character(len=:), allocatable, intent(out) :: extra
+
         character(len=32) :: value
         integer :: status
 
@@ -4180,7 +4188,7 @@ contains
         if (status == 0) return
         write (value, '(i0)') team_omp_threads
         extra = ';OMP_NUM_THREADS='//trim(value)
-    end function team_openmp_env
+    end subroutine team_openmp_env_into
 
     subroutine run_test_binary(execution_cwd, bin_path, arg_lines, log_file, &
             config, slow, exitcode, cpu_seconds, case_env, slow_period, &
@@ -4200,7 +4208,7 @@ contains
         character(len=*), intent(in), optional :: case_env, label
         integer, intent(in), optional :: slow_period, slow_after
 
-        character(len=:), allocatable :: packed, extra_env
+        character(len=:), allocatable :: packed, extra_env, team_env, detail
         character(len=512) :: test_tmp
         integer :: n_args, budget, wall_cap, kind, u, ios, period
         real :: cpu_s, wall_s
@@ -4224,16 +4232,17 @@ contains
         ! passes and kept as evidence when it fails.
         call make_tmpfile('fo-test-tmp', test_tmp)
         call fs_make_dir(trim(test_tmp))
+        call team_openmp_env_into(team_env)
         if (period > 0 .and. present(label)) then
             call process_run_argv_logged(execution_cwd, packed, n_args, log_file, &
                 .true., wall_cap, exitcode, env_extra='TMPDIR='//trim(test_tmp)// &
-                team_openmp_env()//extra_env, cpu_budget_s=budget, &
+                team_env//extra_env, cpu_budget_s=budget, &
                 timeout_kind=kind, cpu_seconds=cpu_s, wall_seconds=wall_s, &
                 slow_period_s=period, slow_label=label)
         else
             call process_run_argv_logged(execution_cwd, packed, n_args, log_file, &
                 .true., wall_cap, exitcode, env_extra='TMPDIR='//trim(test_tmp)// &
-                team_openmp_env()//extra_env, &
+                team_env//extra_env, &
                 cpu_budget_s=budget, timeout_kind=kind, cpu_seconds=cpu_s, &
                 wall_seconds=wall_s)
         end if
@@ -4243,8 +4252,8 @@ contains
         open (newunit=u, file=trim(log_file), position='append', &
             status='unknown', action='write', iostat=ios)
         if (ios /= 0) return
-        write (u, '(a)') 'fo: test killed: '// &
-            timeout_detail(kind, budget, wall_cap, cpu_s, wall_s)
+        call timeout_detail_into(kind, budget, wall_cap, cpu_s, wall_s, detail)
+        write (u, '(a)') 'fo: test killed: '//detail
         close (u)
     end subroutine run_test_binary
 
@@ -5285,15 +5294,31 @@ contains
         !! a different compiler (e.g. flang to dodge a gfortran codegen bug)
         !! without editing the project.
         character(len=:), allocatable :: cmd
-        cmd = trim(selected_compiler_command())
+
+        call fc_command_into(cmd)
     end function fc_command
+
+    recursive subroutine fc_command_into(cmd)
+        ! Threads call this form: gfortran keeps a deferred-length function
+        ! result's length in a static caller temporary (GCC PR 113797).
+        character(len=:), allocatable, intent(out) :: cmd
+        cmd = trim(selected_compiler_command())
+    end subroutine fc_command_into
 
     function fc_executable_command() result(cmd)
         character(len=:), allocatable :: cmd
 
-        cmd = fc_command()
-        if (len_trim(detected_fc_path) > 0) cmd = trim(detected_fc_path)
+        call fc_executable_command_into(cmd)
     end function fc_executable_command
+
+    subroutine fc_executable_command_into(cmd)
+        ! Threads call this form: gfortran keeps a deferred-length function
+        ! result's length in a static caller temporary (GCC PR 113797).
+        character(len=:), allocatable, intent(out) :: cmd
+
+        call fc_command_into(cmd)
+        if (len_trim(detected_fc_path) > 0) cmd = trim(detected_fc_path)
+    end subroutine fc_executable_command_into
 
     subroutine resolve_fc_executable(command)
         character(len=*), intent(in) :: command
@@ -5308,11 +5333,13 @@ contains
     subroutine append_fc_command(packed, n_args)
         character(len=:), allocatable, intent(inout) :: packed
         integer, intent(inout) :: n_args
+        character(len=:), allocatable :: command
 
         if (detected_fc_is_executable) then
             call argv_push(packed, n_args, trim(detected_fc_path))
         else
-            call argv_push_split(packed, n_args, fc_executable_command())
+            call fc_executable_command_into(command)
+            call argv_push_split(packed, n_args, command)
         end if
     end subroutine append_fc_command
 
@@ -5321,8 +5348,10 @@ contains
         !! flang rejects gfortran-only flags and spells the module-output dir
         !! differently.
         type(compiler_dialect_t) :: dialect
+        character(len=:), allocatable :: command
 
-        dialect = compiler_dialect(fc_command())
+        call fc_command_into(command)
+        dialect = compiler_dialect(command)
         fc_is_flang = dialect%is_flang()
     end function fc_is_flang
 
@@ -5333,26 +5362,40 @@ contains
         !! merge_flags, not here.
         character(len=:), allocatable :: flags
 
+        call fc_policy_flags_into(flags)
+    end function fc_policy_flags
+
+    recursive subroutine fc_policy_flags_into(flags)
+        ! Threads call this form: gfortran keeps a deferred-length function
+        ! result's length in a static caller temporary (GCC PR 113797).
+        character(len=:), allocatable, intent(out) :: flags
+
         type(compiler_dialect_t) :: dialect
         character(len=512) :: diet_flag, split_flags
+        character(len=:), allocatable :: command, flag
 
-        dialect = compiler_dialect(fc_command())
-        flags = dialect%base_flags()
+        call fc_command_into(command)
+        dialect = compiler_dialect(command)
+        call dialect%base_flags_into(flags)
         ! Debug-info diet: the default build emits no DWARF, so 500 test
         ! binaries stop each carrying their own copy of it. A caller that asked
         ! for debug info (`--debug`, `--asan`, `-g`) keeps it.
-        diet_flag = dialect%debug_info_diet_flag(build_request_flags)
+        call dialect%debug_info_diet_flag_into(build_request_flags, flag)
+        diet_flag = ''
+        if (allocated(flag)) diet_flag = flag
         if (len_trim(diet_flag) > 0) flags = trim(flags)//' '//trim(diet_flag)
         ! Section splitting pairs with `--gc-sections` in fc_link_policy_flags.
         ! A sanitizer build skips both: its instrumentation lives in
         ! constructor tables that section garbage collection can collect.
-        split_flags = dialect%sections_split_flags(build_request_flags)
+        call dialect%sections_split_flags_into(build_request_flags, flag)
+        split_flags = ''
+        if (allocated(flag)) split_flags = flag
         if (len_trim(split_flags) > 0) then
-            if (compiler_supports_section_splitting(fc_command(), &
+            if (compiler_supports_section_splitting(command, &
                 trim(split_flags))) flags = trim(flags)//' '//trim(split_flags)
         end if
-        call append_pipe_flag(fc_command(), flags)
-    end function fc_policy_flags
+        call append_pipe_flag(command, flags)
+    end subroutine fc_policy_flags_into
 
     function fc_link_policy_flags() result(flags)
         !! Link-side half of the section-split policy; it reads the same module
@@ -5360,29 +5403,52 @@ contains
         !! whether garbage collection is on.
         character(len=:), allocatable :: flags
 
-        type(compiler_dialect_t) :: dialect
+        call fc_link_policy_flags_into(flags)
+    end function fc_link_policy_flags
 
-        dialect = compiler_dialect(fc_command())
-        flags = dialect%gc_sections_link_flag(build_request_flags)
+    subroutine fc_link_policy_flags_into(flags)
+        ! Threads call this form: gfortran keeps a deferred-length function
+        ! result's length in a static caller temporary (GCC PR 113797).
+        character(len=:), allocatable, intent(out) :: flags
+
+        type(compiler_dialect_t) :: dialect
+        character(len=:), allocatable :: command, split
+
+        call fc_command_into(command)
+        dialect = compiler_dialect(command)
+        call dialect%gc_sections_link_flag_into(build_request_flags, flags)
+        if (.not. allocated(flags)) flags = ''
         if (len_trim(flags) > 0) then
-            if (.not. compiler_supports_section_splitting(fc_command(), &
-                dialect%sections_split_flags(build_request_flags))) then
+            call dialect%sections_split_flags_into(build_request_flags, split)
+            if (.not. allocated(split)) split = ''
+            if (.not. compiler_supports_section_splitting(command, split)) then
                 flags = ''
             else if (is_macos()) then
                 flags = '-Wl,-dead_strip'
             end if
         end if
-    end function fc_link_policy_flags
+    end subroutine fc_link_policy_flags_into
 
     recursive function fc_base_flags() result(flags)
         character(len=:), allocatable :: flags
+
+        call fc_base_flags_into(flags)
+    end function fc_base_flags
+
+    recursive subroutine fc_base_flags_into(flags)
+        ! Threads call this form: gfortran keeps a deferred-length function
+        ! result's length in a static caller temporary (GCC PR 113797).
+        character(len=:), allocatable, intent(out) :: flags
         type(compiler_dialect_t) :: dialect
-        dialect = compiler_dialect(fc_command())
-        flags = fc_policy_flags()
+        character(len=:), allocatable :: command, free_form
+        call fc_command_into(command)
+        dialect = compiler_dialect(command)
+        call fc_policy_flags_into(flags)
         ! Source form is a package choice. In particular, "default" must let
         ! the compiler choose by extension instead of retaining -Mfree/-free.
-        call remove_manifest_flag(flags, dialect%translate_flag('-ffree-form'))
-    end function fc_base_flags
+        call dialect%translate_flag_into('-ffree-form', free_form)
+        call remove_manifest_flag(flags, free_form)
+    end subroutine fc_base_flags_into
 
     recursive function request_key_flags(flags) result(key_flags)
         character(len=*), intent(in) :: flags
@@ -5467,12 +5533,13 @@ contains
 
         character(len=256) :: line
         character(len=512) :: tmpfile, command
-        character(len=:), allocatable :: packed
+        character(len=:), allocatable :: packed, selected
         integer :: u, iostat, n_args, exitcode
         logical :: memo_hit
         character(len=HASH_LEN) :: tool_keys(3), tool_key
 
-        command = fc_command()
+        call fc_command_into(selected)
+        command = selected
         call resolve_fc_executable(command)
         tool_keys(1) = compiler_tool_key(command)
         tool_keys(2) = compiler_tool_key('gcc')
@@ -5541,7 +5608,7 @@ contains
             integer, intent(out) :: exitcode
             logical, intent(in), optional :: exact_flags
             character(len=*), intent(in), optional :: compiler
-            character(len=:), allocatable :: packed
+            character(len=:), allocatable :: packed, base_flags
             integer :: n_args, n_removed
 
             ! Build an argv vector and spawn via the async-signal-safe argv runner
@@ -5561,9 +5628,13 @@ contains
             end if
             call argv_push(packed, n_args, '-c')
             if (present(exact_flags)) then
-                if (.not. exact_flags) call argv_push_split(packed, n_args, fc_base_flags())
+                if (.not. exact_flags) then
+                    call fc_base_flags_into(base_flags)
+                    call argv_push_split(packed, n_args, base_flags)
+                end if
             else
-                call argv_push_split(packed, n_args, fc_base_flags())
+                call fc_base_flags_into(base_flags)
+                call argv_push_split(packed, n_args, base_flags)
             end if
             call argv_push_split_nl(packed, n_args, includes_flag)
             call argv_push(packed, n_args, '-o')
@@ -5619,6 +5690,7 @@ contains
             integer(int64) :: bytes
             integer :: unit, ios
             logical :: exists
+            character(len=:), allocatable :: command
 
             if (exitcode /= 0) return
             inquire (file=trim(objfile), exist=exists, size=bytes, iostat=ios)
@@ -5633,7 +5705,8 @@ contains
                 status='unknown', action='write', iostat=ios)
             if (ios /= 0) return
             write (unit, '(a)') 'fo: compiler produced no nonempty object: '//trim(objfile)
-            write (unit, '(a)') 'fo: compiler: '//fc_executable_command()
+            call fc_executable_command_into(command)
+            write (unit, '(a)') 'fo: compiler: '//command
             write (unit, '(a)') 'fo: source: '//trim(source)
             close (unit)
         end subroutine validate_compiler_object
@@ -5776,14 +5849,15 @@ contains
             character(len=HASH_LEN) :: action_id, prog_key
             character(len=512) :: key_parts(8), lld_log, compiler
             character(len=1024) :: stage_dir, staged_output, restore_bin
-            character(len=:), allocatable :: flags_str
+            character(len=:), allocatable :: flags_str, command, lib_flags, display
             integer :: store_ierr, reserve_rc, copy_rc, rename_rc
             logical :: valid_image
 
             flags_str = ''
             if (present(flags)) flags_str = trim(flags)
             exitcode = 1
-            call select_linker(fc_command(), use_lld)
+            call fc_command_into(command)
+            call select_linker(command, use_lld)
             if (present(exact_flags)) then
                 if (exact_flags) use_lld = .false.
             end if
@@ -5796,11 +5870,12 @@ contains
                 if (present(exact_flags)) then
                     if (exact_flags) key_parts(1) = 'fo-declared-link-2'
                 end if
-                key_parts(2) = trim(fc_command())
+                key_parts(2) = trim(command)
                 key_parts(3) = 'default'
                 if (use_lld) key_parts(3) = 'lld-with-default-fallback'
                 key_parts(4) = flags_str
-                key_parts(5) = trim(link_lib_flags(project_dir, link_libs, n_link_libs))
+                call link_lib_flags_into(project_dir, link_libs, n_link_libs, lib_flags)
+                key_parts(5) = trim(lib_flags)
                 key_parts(6) = trim(base_digest)
                 key_parts(7) = trim(prog_key)
                 ! The parallel test loop resolved this before starting workers.
@@ -5872,7 +5947,8 @@ contains
                 n_dep_objs, link_libs, n_link_libs, staged_output, flags_str, use_lld, &
                 packed, n_args, exact_flags=exact_flags)
             if (debug_status == 0 .and. len_trim(debug_links) > 0) then
-                write (error_unit, '(a)') 'fo link: '//argv_display(packed)
+                call argv_display_into(packed, display)
+                write (error_unit, '(a)') 'fo link: '//display
             end if
             if (use_lld) then
                 call make_tmpfile('fo_lld_link', lld_log)
@@ -5885,8 +5961,10 @@ contains
                 call make_link_argv(project_dir, prog_obj, lib_objs, n_lib_objs, dep_objs, &
                     n_dep_objs, link_libs, n_link_libs, staged_output, flags_str, .false., &
                     packed, n_args, exact_flags=exact_flags)
-                if (use_lld .and. debug_status == 0 .and. len_trim(debug_links) > 0) &
-                    write (error_unit, '(a)') 'fo link fallback: '//argv_display(packed)
+                if (use_lld .and. debug_status == 0 .and. len_trim(debug_links) > 0) then
+                    call argv_display_into(packed, display)
+                    write (error_unit, '(a)') 'fo link fallback: '//display
+                end if
                 call process_run_argv_logged('', packed, n_args, log_file, .true., &
                     build_timeout_seconds(), exitcode)
             end if
@@ -5971,6 +6049,7 @@ contains
 
             integer :: i
             character(len=512) :: policy_flag
+            character(len=:), allocatable :: lib_flags, link_policy
             logical :: declared_link
 
             n_args = 0
@@ -5998,8 +6077,8 @@ contains
                     end if
                 end do
             else
-                call argv_push_split_nl(packed, n_args, &
-                    link_lib_flags(project_dir, link_libs, n_link_libs))
+                call link_lib_flags_into(project_dir, link_libs, n_link_libs, lib_flags)
+                call argv_push_split_nl(packed, n_args, lib_flags)
             end if
             ! flang's driver does not add Homebrew's libomp to the link search, so
             ! -fopenmp links fail with "library 'omp' not found". Add it (harmless
@@ -6011,9 +6090,13 @@ contains
             if (len_trim(flags) > 0) call argv_push_split(packed, n_args, flags)
             policy_flag = ''
             if (present(exact_flags)) then
-                if (.not. exact_flags) policy_flag = fc_link_policy_flags()
+                if (.not. exact_flags) then
+                    call fc_link_policy_flags_into(link_policy)
+                    policy_flag = link_policy
+                end if
             else
-                policy_flag = fc_link_policy_flags()
+                call fc_link_policy_flags_into(link_policy)
+                policy_flag = link_policy
             end if
             if (len_trim(policy_flag) > 0) call argv_push_split(packed, n_args, policy_flag)
             if (present(install_name)) then
@@ -6030,6 +6113,15 @@ contains
             !! for human-readable debug output only.
             character(len=*), intent(in) :: packed
             character(len=:), allocatable :: text
+
+            call argv_display_into(packed, text)
+        end function argv_display
+
+        subroutine argv_display_into(packed, text)
+            ! Threads call this form: gfortran keeps a deferred-length function
+            ! result's length in a static caller temporary (GCC PR 113797).
+            character(len=*), intent(in) :: packed
+            character(len=:), allocatable, intent(out) :: text
             integer :: i
 
             text = packed
@@ -6037,7 +6129,7 @@ contains
                 if (text(i:i) == char(0)) text(i:i) = ' '
             end do
             text = trim(text)
-        end function argv_display
+        end subroutine argv_display_into
 
         function link_lib_flags(project_dir, link_libs, n_link_libs) result(flags)
             !! Resolve each `link` lib to a concrete archive on a search path and
@@ -6051,6 +6143,17 @@ contains
             character(len=128), intent(in) :: link_libs(*)
             integer, intent(in) :: n_link_libs
             character(len=:), allocatable :: flags
+
+            call link_lib_flags_into(project_dir, link_libs, n_link_libs, flags)
+        end function link_lib_flags
+
+        subroutine link_lib_flags_into(project_dir, link_libs, n_link_libs, flags)
+            ! Threads call this form: gfortran keeps a deferred-length function
+            ! result's length in a static caller temporary (GCC PR 113797).
+            character(len=*), intent(in) :: project_dir
+            character(len=128), intent(in) :: link_libs(*)
+            integer, intent(in) :: n_link_libs
+            character(len=:), allocatable, intent(out) :: flags
 
             character(len=512) :: dirs(2*MAX_DEP_DIRS)
             character(len=1024) :: token
@@ -6067,7 +6170,7 @@ contains
                 ! they must NOT be shell-quoted.
                 flags = flags//new_line('a')//trim(token)
             end do
-        end function link_lib_flags
+        end subroutine link_lib_flags_into
 
         subroutine file_basename(path, name)
             character(len=*), intent(in) :: path

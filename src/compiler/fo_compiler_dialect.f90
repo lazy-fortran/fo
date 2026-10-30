@@ -13,16 +13,24 @@ module fo_compiler_dialect
         character(len=512) :: command = ''
     contains
         procedure, public :: base_flags => dialect_base_flags
+        procedure, public :: base_flags_into => dialect_base_flags_into
         procedure, public :: debug_info_diet_flag => dialect_debug_info_diet_flag
+        procedure, public :: debug_info_diet_flag_into => &
+            dialect_debug_info_diet_flag_into
         procedure, public :: debug_info_flag => dialect_debug_info_flag
         procedure, public :: pic_flag => dialect_pic_flag
         procedure, public :: sections_split_flags => dialect_sections_split_flags
+        procedure, public :: sections_split_flags_into => &
+            dialect_sections_split_flags_into
         procedure, public :: requests_sanitizer => dialect_requests_sanitizer
         procedure, public :: gc_sections_link_flag => dialect_gc_sections_link_flag
+        procedure, public :: gc_sections_link_flag_into => &
+            dialect_gc_sections_link_flag_into
         procedure, public :: requests_debug_info => dialect_requests_debug_info
         procedure, public :: module_flags => dialect_module_flags
         procedure, public :: profile_flags => dialect_profile_flags
         procedure, public :: translate_flag => dialect_translate_flag
+        procedure, public :: translate_flag_into => dialect_translate_flag_into
         procedure, public :: openmp_flag => dialect_openmp_flag
         procedure, public :: supports_fuse_ld => dialect_supports_fuse_ld
         procedure, public :: is_flang => dialect_is_flang
@@ -127,6 +135,16 @@ contains
         character(len=*), intent(in) :: request_flags
         character(len=:), allocatable :: flag
 
+        call self%debug_info_diet_flag_into(request_flags, flag)
+    end function dialect_debug_info_diet_flag
+
+    pure subroutine dialect_debug_info_diet_flag_into(self, request_flags, flag)
+        ! Threads call this form: gfortran keeps a deferred-length function
+        ! result's length in a static caller temporary (GCC PR 113797).
+        class(compiler_dialect_t), intent(in) :: self
+        character(len=*), intent(in) :: request_flags
+        character(len=:), allocatable, intent(out) :: flag
+
         if (self%requests_debug_info(request_flags)) return
         select case (self%kind)
         case (COMPILER_GFORTRAN, COMPILER_FLANG)
@@ -134,7 +152,7 @@ contains
         case default
             flag = ''
         end select
-    end function dialect_debug_info_diet_flag
+    end subroutine dialect_debug_info_diet_flag_into
 
     pure function dialect_sections_split_flags(self, request_flags) result(flags)
         !! One section per function and per global, so the link step can drop
@@ -150,6 +168,16 @@ contains
         character(len=*), intent(in) :: request_flags
         character(len=:), allocatable :: flags
 
+        call self%sections_split_flags_into(request_flags, flags)
+    end function dialect_sections_split_flags
+
+    pure subroutine dialect_sections_split_flags_into(self, request_flags, flags)
+        ! Threads call this form: gfortran keeps a deferred-length function
+        ! result's length in a static caller temporary (GCC PR 113797).
+        class(compiler_dialect_t), intent(in) :: self
+        character(len=*), intent(in) :: request_flags
+        character(len=:), allocatable, intent(out) :: flags
+
         if (self%requests_sanitizer(request_flags)) return
         select case (self%kind)
         case (COMPILER_GFORTRAN, COMPILER_FLANG)
@@ -157,7 +185,7 @@ contains
         case default
             flags = ''
         end select
-    end function dialect_sections_split_flags
+    end subroutine dialect_sections_split_flags_into
 
     pure logical function dialect_requests_sanitizer(self, request_flags)
         !! True when the request asked for a sanitizer, by `-fsanitize=...`
@@ -175,14 +203,27 @@ contains
         character(len=*), intent(in) :: request_flags
         character(len=:), allocatable :: flag
 
-        if (len_trim(self%sections_split_flags(request_flags)) == 0) return
+        call self%gc_sections_link_flag_into(request_flags, flag)
+    end function dialect_gc_sections_link_flag
+
+    pure subroutine dialect_gc_sections_link_flag_into(self, request_flags, flag)
+        ! Threads call this form: gfortran keeps a deferred-length function
+        ! result's length in a static caller temporary (GCC PR 113797).
+        class(compiler_dialect_t), intent(in) :: self
+        character(len=*), intent(in) :: request_flags
+        character(len=:), allocatable, intent(out) :: flag
+        character(len=:), allocatable :: split
+
+        call self%sections_split_flags_into(request_flags, split)
+        if (.not. allocated(split)) return
+        if (len_trim(split) == 0) return
         select case (self%kind)
         case (COMPILER_GFORTRAN, COMPILER_FLANG)
             flag = '-Wl,--gc-sections'
         case default
             flag = ''
         end select
-    end function dialect_gc_sections_link_flag
+    end subroutine dialect_gc_sections_link_flag_into
 
     pure logical function dialect_requests_debug_info(self, request_flags)
         !! True when the caller already asked for debug info, either with a
@@ -211,6 +252,15 @@ contains
         class(compiler_dialect_t), intent(in) :: self
         character(len=:), allocatable :: flags
 
+        call self%base_flags_into(flags)
+    end function dialect_base_flags
+
+    subroutine dialect_base_flags_into(self, flags)
+        ! Threads call this form: gfortran keeps a deferred-length function
+        ! result's length in a static caller temporary (GCC PR 113797).
+        class(compiler_dialect_t), intent(in) :: self
+        character(len=:), allocatable, intent(out) :: flags
+
         select case (self%kind)
         case (COMPILER_GFORTRAN)
             flags = '-ffree-line-length-none -fimplicit-none -cpp -pipe'
@@ -223,7 +273,7 @@ contains
         case default
             flags = ''
         end select
-    end function dialect_base_flags
+    end subroutine dialect_base_flags_into
 
     function dialect_module_flags(self, directory) result(flags)
         class(compiler_dialect_t), intent(in) :: self
@@ -306,6 +356,16 @@ contains
         character(len=*), intent(in) :: flag
         character(len=:), allocatable :: mapped
 
+        call self%translate_flag_into(flag, mapped)
+    end function dialect_translate_flag
+
+    subroutine dialect_translate_flag_into(self, flag, mapped)
+        ! Threads call this form: gfortran keeps a deferred-length function
+        ! result's length in a static caller temporary (GCC PR 113797).
+        class(compiler_dialect_t), intent(in) :: self
+        character(len=*), intent(in) :: flag
+        character(len=:), allocatable, intent(out) :: mapped
+
         mapped = trim(flag)
         select case (self%kind)
         case (COMPILER_NVFORTRAN)
@@ -336,7 +396,7 @@ contains
         case (COMPILER_FLANG)
             if (trim(flag) == '-Werror=implicit-interface') mapped = ''
         end select
-    end function dialect_translate_flag
+    end subroutine dialect_translate_flag_into
 
     function dialect_openmp_flag(self) result(flag)
         class(compiler_dialect_t), intent(in) :: self

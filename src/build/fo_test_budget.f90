@@ -17,7 +17,7 @@ module fo_test_budget
     public :: test_timeout_seconds, slow_test_timeout_seconds
     public :: test_budget_seconds, test_wall_cap_seconds
     public :: ctest_default_timeout_seconds
-    public :: timeout_detail
+    public :: timeout_detail, timeout_detail_into
     public :: test_policy, test_strict_flaky, test_retries_override
     public :: test_set_retry_options
 
@@ -187,6 +187,17 @@ contains
         integer, intent(in) :: kind, budget, wall_cap
         real, intent(in) :: cpu_seconds, wall_seconds
         character(len=:), allocatable :: text
+
+        call timeout_detail_into(kind, budget, wall_cap, cpu_seconds, wall_seconds, text)
+    end function timeout_detail
+
+    subroutine timeout_detail_into(kind, budget, wall_cap, cpu_seconds, wall_seconds, &
+            text)
+        ! Threads call this form: gfortran keeps a deferred-length function
+        ! result's length in a static caller temporary (GCC PR 113797).
+        integer, intent(in) :: kind, budget, wall_cap
+        real, intent(in) :: cpu_seconds, wall_seconds
+        character(len=:), allocatable, intent(out) :: text
         character(len=256) :: buf
 
         select case (kind)
@@ -210,7 +221,7 @@ contains
             write (buf, '(a,i0,a)') 'hard timeout of ', wall_cap, ' s exceeded'
         end select
         text = trim(buf)
-    end function timeout_detail
+    end subroutine timeout_detail_into
 
     subroutine environment_seconds(name, seconds)
         !! Replace seconds by a positive integer environment value, if set.
