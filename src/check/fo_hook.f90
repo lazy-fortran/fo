@@ -8,6 +8,7 @@ module fo_hook
     use fo_gremlin_context, only: case_identity_capture
     use fo_gremlin_generation, only: generation_t
     use fo_gremlin_request, only: gremlin_json_text_valid
+    use fo_exec_service, only: exec_job_t, exec_start, exec_poll, EXEC_UNCANCELLED
     use fo_cmake_generation, only: cmake_stage_git, cmake_populated_dependency_args
     use fo_hook_evidence, only: hook_input_key, hook_receipt_read, &
         hook_receipt_write, hook_slow_case
@@ -79,8 +80,9 @@ contains
         character(len=4096) :: driver, log
         character(len=:), allocatable :: root, snapshot, packed, text, message
         type(string_t), allocatable :: empty(:)
-        integer :: status, n, attempt, cleanup, kind
-        logical :: found, owned
+        integer :: status, n, attempt, cleanup
+        logical :: found, owned, done
+        type(exec_job_t) :: job
 
         ! Reserve two seconds of the approximate ten-second commit budget
         ! for owned-process drainage and snapshot cleanup after cancellation.
@@ -112,15 +114,24 @@ contains
             call argv_push(packed, n, '--view='//snapshot)
             if (json) call argv_push(packed, n, '--json')
             if (wall_time_seconds() >= commit_deadline) exit validation
-            call process_run_argv_logged(root, packed, n, log, .false., &
-                max(1, int(commit_deadline - wall_time_seconds())), status, &
-                heartbeat_s=0, cpu_budget_s=86400, timeout_kind=kind)
-            if (status == 125) then
+            ! An owned session cancels the whole tree at the deadline; a
+            ! process group would leave nested fo commands running in the
+            ! view removed below.
+            call exec_start(job, root, packed, n, trim(log), status, &
+                timeout_seconds=max(1, int(commit_deadline - wall_time_seconds())))
+            if (status /= 0) exit validation
+            do
+                call exec_poll(job, done, cleanup)
+                if (done) exit
+                call fs_sleep_ms(20)
+            end do
+            status = job%exitcode
+            if (status == EXEC_UNCANCELLED) then
                 owned = .false.
                 message = message//'; process drainage failed; retained '//snapshot
                 exit validation
             end if
-            if (kind == TIMEOUT_WALL .or. status == 124) exit validation
+            if (job%timed_out) exit validation
             call read_text_file_alloc(trim(log), text, cleanup)
             if (cleanup /= 0 .or. len_trim(text) == 0) exit validation
             if (json) then

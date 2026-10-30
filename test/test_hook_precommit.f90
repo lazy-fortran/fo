@@ -3,7 +3,7 @@ program test_hook_precommit
         make_scratch, make_directory, join_path, write_text, read_text, remove_tree, &
         assert_contains, assert_equal_string, assert_true, assert_process_ok, &
         finish_assertions, copy_mtime, set_mode, make_symlink
-    use fo_fs, only: fs_find_executable
+    use fo_fs, only: fs_find_executable, fs_sleep_ms
     use fo_test_gremlin_oracle, only: gremlin_json, gremlin_field, gremlin_stop_lane
     use fo_test_json, only: json_value_t
     use fo_test_cli, only: resolve_driver, run_fo, run_external
@@ -641,6 +641,31 @@ program test_hook_precommit
     call assert_true(result%exit_code /= 0, 'misindented line beside column-0 procedures blocks')
     call assert_contains(result%stdout, 'flat.f90:17: needs formatting', &
         'misindented column-0 neighbour line is reported')
+
+    ! A bounded hook past its deadline must stop the nested fo test too; an
+    ! orphan would keep running in the removed view and recreate it.
+    project = join_path(scratch, 'cancel/cmake')
+    call write_text(project//'/CMakeLists.txt', 'cmake_minimum_required(VERSION 3.20)'//nl// &
+        'project(hook_cancel LANGUAGES Fortran)'//nl//'enable_testing()'//nl// &
+        'add_library(answer answer.f90)'//nl// &
+        'add_test(NAME wait COMMAND "${CMAKE_COMMAND}" -E sleep 12)'//nl)
+    call write_text(project//'/answer.f90', original)
+    call git([character(len=64) :: 'init', '-q'])
+    call git([character(len=64) :: 'add', 'CMakeLists.txt', 'answer.f90'])
+    call git([character(len=64) :: 'config', 'fo.hookBudget', '30'])
+    call bounded_hook()
+    call assert_contains(result%stdout, 'staged verification incomplete', &
+        'bounded hook stops at its deadline')
+    call fs_sleep_ms(14000)
+    args = string_list_t()
+    call list_add(args, join_path(scratch, 'cancel'))
+    call list_add(args, '-maxdepth')
+    call list_add(args, '1')
+    call list_add(args, '-name')
+    call list_add(args, '.fo-hook-*')
+    call run_external('find', args, scratch, result)
+    call assert_process_ok(result, 'list staged views after cancellation')
+    call assert_equal_string(result%stdout, '', 'cancelled bounded hook leaves no staged view')
     call finish_assertions(retain_failed_scratch=.true.)
     call remove_tree(scratch)
 contains
