@@ -236,13 +236,13 @@ contains
 
         character(len=512) :: stage, log_file, ref, backup
         character(len=512) :: dependencies_dir, identity_dir, identity_path
-        character(len=512) :: source, local_source
+        character(len=512) :: source
         character(len=4096) :: output
         character(len=4096) :: selector, previous
         character(len=:), allocatable :: args
         integer(c_long_long) :: mtime, bytes
-        integer :: n_args, exitcode, rename_rc, colon, slash, at_sign, nl
-        logical :: present, have_manifest, have_marker
+        integer :: n_args, exitcode, rename_rc, nl
+        logical :: present, have_manifest, have_marker, valid
 
         ierr = 0
         dependencies_dir = trim(destination(:index(trim(destination), '/', &
@@ -258,6 +258,26 @@ contains
                 if (have_marker) then
                     call read_text_file(trim(identity_path), previous)
                     if (git_identity_matches(selector, previous)) return
+                else
+                    call validate_git_checkout(dep, package_dir, destination, &
+                        output, valid)
+                    if (.not. valid) then
+                        write (error_unit, '(a)') 'fo: existing Git dependency '// &
+                            trim(dep%name)//' does not match its declared origin, '// &
+                            'revision or clean tracked contents; run fo update'
+                        ierr = 1
+                        return
+                    end if
+                    call fs_make_dir(trim(identity_dir))
+                    call fs_write_text(trim(identity_path), &
+                        trim(selector)//new_line('a')//trim(output))
+                    call read_text_file(trim(identity_path), previous)
+                    if (.not. git_identity_matches(selector, previous)) then
+                        write (error_unit, '(a)') 'fo: cannot record Git identity for '// &
+                            trim(dep%name)
+                        ierr = 1
+                    end if
+                    return
                 end if
             else
                 write (error_unit, '(a)') &
@@ -276,28 +296,7 @@ contains
         call argv_push(args, n_args, 'clone')
         call argv_push(args, n_args, '--no-checkout')
         call argv_push(args, n_args, '--')
-        source = trim(dep%git)
-        if (index(trim(source), 'file://') == 1) then
-            local_source = source(8:)
-            if (len_trim(local_source) > 0) then
-                if (local_source(1:1) /= '/') then
-                    call join_path(package_dir, trim(local_source), source)
-                else
-                    source = trim(local_source)
-                end if
-            end if
-        else if (index(trim(source), '://') == 0) then
-            colon = index(trim(source), ':')
-            slash = index(trim(source), '/')
-            at_sign = index(trim(source), '@')
-            if (at_sign > 0 .and. colon > 0 .and. &
-                (slash == 0 .or. colon < slash)) then
-                ! Preserve SCP-style remote URLs such as git@host:repo.
-            else if (source(1:1) /= '/') then
-                call join_path(package_dir, trim(source), local_source)
-                source = trim(local_source)
-            end if
-        end if
+        call git_source(dep, package_dir, source)
         call argv_push(args, n_args, trim(source))
         call argv_push(args, n_args, trim(stage))
         call process_run_argv_logged('', args, n_args, trim(log_file), .false., &
@@ -409,6 +408,108 @@ contains
         end if
         if (present) call fs_remove_tree(trim(backup))
     end subroutine acquire_git_checkout_locked
+
+    subroutine git_source(dep, package_dir, source)
+        type(fpm_dep_t), intent(in) :: dep
+        character(len=*), intent(in) :: package_dir
+        character(len=*), intent(out) :: source
+        character(len=512) :: local_source
+        integer :: colon, slash, at_sign
+
+        source = trim(dep%git)
+        if (index(trim(source), 'file://') == 1) then
+            local_source = source(8:)
+            if (len_trim(local_source) > 0) then
+                if (local_source(1:1) /= '/') then
+                    call join_path(package_dir, trim(local_source), source)
+                else
+                    source = trim(local_source)
+                end if
+            end if
+        else if (index(trim(source), '://') == 0) then
+            colon = index(trim(source), ':')
+            slash = index(trim(source), '/')
+            at_sign = index(trim(source), '@')
+            if (at_sign > 0 .and. colon > 0 .and. &
+                (slash == 0 .or. colon < slash)) then
+                ! Preserve SCP-style remote URLs such as git@host:repo.
+            else if (source(1:1) /= '/') then
+                call join_path(package_dir, trim(source), local_source)
+                source = trim(local_source)
+            end if
+        end if
+    end subroutine git_source
+
+    subroutine validate_git_checkout(dep, package_dir, destination, commit, valid)
+        type(fpm_dep_t), intent(in) :: dep
+        character(len=*), intent(in) :: package_dir, destination
+        character(len=*), intent(out) :: commit
+        logical, intent(out) :: valid
+
+        character(len=512) :: source, ref
+        character(len=4096) :: origin, selected, changes
+        integer :: status
+
+        valid = .false.
+        commit = ''
+        call local_git_text(destination, &
+            [character(len=64) :: 'config', '--get', 'remote.origin.url'], &
+            origin, status)
+        if (status /= 0) return
+        call git_source(dep, package_dir, source)
+        if (trim(origin) /= trim(dep%git) .and. trim(origin) /= trim(source)) return
+        ref = 'refs/remotes/origin/HEAD'
+        if (len_trim(dep%branch) > 0) ref = 'refs/remotes/origin/'//trim(dep%branch)
+        if (len_trim(dep%tag) > 0) ref = 'refs/tags/'//trim(dep%tag)
+        if (allocated(dep%rev)) then
+            if (len_trim(dep%rev) > 0) ref = trim(dep%rev)
+        end if
+        call local_git_text(destination, [character(len=1024) :: 'rev-parse', &
+            '--verify', '--end-of-options', trim(ref)//'^{commit}'], selected, status)
+        if (status /= 0 .and. len_trim(dep%branch) > 0) then
+            if (trim(ref) == 'refs/remotes/origin/'//trim(dep%branch)) then
+                call local_git_text(destination, [character(len=1024) :: &
+                    'rev-parse', '--verify', '--end-of-options', &
+                    'refs/heads/'//trim(dep%branch)//'^{commit}'], selected, status)
+            end if
+        end if
+        if (status /= 0) return
+        call local_git_text(destination, [character(len=64) :: 'rev-parse', &
+            '--verify', 'HEAD^{commit}'], commit, status)
+        if (status /= 0) return
+        if (trim(commit) /= trim(selected)) return
+        ! Compare both index and worktree with HEAD before recording provenance.
+        call local_git_text(destination, [character(len=64) :: 'diff', &
+            '--quiet', 'HEAD', '--'], changes, status)
+        valid = status == 0
+    end subroutine validate_git_checkout
+
+    subroutine local_git_text(destination, words, output, status)
+        character(len=*), intent(in) :: destination, words(:)
+        character(len=*), intent(out) :: output
+        integer, intent(out) :: status
+
+        character(len=:), allocatable :: args
+        character(len=512) :: log_file
+        integer :: n_args, i, nl
+
+        n_args = 0
+        call argv_push(args, n_args, 'git')
+        call argv_push(args, n_args, '-C')
+        call argv_push(args, n_args, destination)
+        call argv_push(args, n_args, '--git-dir='//trim(destination)//'/.git')
+        call argv_push(args, n_args, '--work-tree='//destination)
+        do i = 1, size(words)
+            call argv_push(args, n_args, trim(words(i)))
+        end do
+        call make_tmpfile('fo-git-check', log_file)
+        call process_run_argv_logged('', args, n_args, trim(log_file), .false., &
+            30, status)
+        call read_text_file(trim(log_file), output)
+        call delete_tmpfile(trim(log_file))
+        nl = index(output, new_line('a'))
+        if (nl > 0) output = output(:nl - 1)
+    end subroutine local_git_text
 
     subroutine git_selector(dep, package_key, selector)
         type(fpm_dep_t), intent(in) :: dep
