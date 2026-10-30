@@ -1,7 +1,8 @@
 program test_native_contained_capture
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_int64_t, c_null_char, &
         c_funptr
-    use, intrinsic :: iso_fortran_env, only: input_unit, error_unit, output_unit
+    use, intrinsic :: iso_fortran_env, only: input_unit, error_unit, output_unit, real64
+    use fo_util, only: wall_time_seconds
     use fo_fs, only: fs_sleep_ms, fs_is_windows, fs_path_is_absolute, fs_realpath
     use fo_process, only: argv_push, process_getcwd, process_getpid, &
         process_poll_pid, process_start_argv_logged, process_set_async_scope, &
@@ -272,7 +273,8 @@ contains
         integer :: async_exit, async_attempt, async_cancel_error
         integer :: async_target_pid, async_descendant_pid
         integer :: async_count
-        integer :: cli_owner_pid, cli_status, cli_attempt, separator
+        integer :: cli_owner_pid, cli_status, separator
+        real(real64) :: wait_deadline
         integer(c_int64_t) :: cli_owner_start
         character(len=32) :: pid_text
         character(:), allocatable :: driver, session_id, json_error
@@ -442,13 +444,16 @@ contains
         call list_add(args, '--session')
         call list_add(args, session_id)
         ! Wait for inventory discovery so an empty-inventory owner failure
-        ! cannot race a successful stop request and escape this oracle.
-        do cli_attempt = 1, 100
+        ! cannot race a successful stop request and escape this oracle. The
+        ! condition is the reported state; the deadline only guards a hang.
+        wait_deadline = wall_time_seconds() + 60.0_real64
+        do
             call run_process(args, trim(root), result, timeout_ms=10000)
             if (result%runner_failed .or. result%exit_code /= 0) exit
             call json_parse(result%stdout, cli_json, json_valid, json_error)
             if (.not. json_valid) exit
             if (json_string_value(json_member(cli_json, 'state')) == 'idle') exit
+            if (wall_time_seconds() >= wait_deadline) exit
             call fs_sleep_ms(20)
         end do
         call write_text(trim(root)//'/public-status.stdout', result%stdout)
@@ -480,11 +485,13 @@ contains
         call assert_true(.not. result%runner_failed .and. result%reaped .and. &
             result%exit_code == 0, 'public stop requests resident owner teardown')
         cli_stopped = .false.
-        do cli_attempt = 1, 100
+        wait_deadline = wall_time_seconds() + 60.0_real64
+        do
             cli_owner_live = cli_owner_pid > 0 .and. cli_owner_start > 0_c_int64_t
             if (cli_owner_live) cli_owner_live = &
                 mcp_process_identity_running(cli_owner_pid, cli_owner_start)
             if (.not. cli_owner_live) exit
+            if (wall_time_seconds() >= wait_deadline) exit
             call fs_sleep_ms(20)
         end do
         args = string_list_t()

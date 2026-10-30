@@ -1,7 +1,7 @@
 program test_hook_precommit
     use fo_test_harness, only: string_list_t, process_result_t, list_add, &
         make_scratch, make_directory, join_path, write_text, read_text, remove_tree, &
-        assert_contains, assert_equal_string, assert_true, assert_process_ok, &
+        assert_contains, assert_not_contains, assert_equal_string, assert_true, assert_process_ok, &
         finish_assertions, copy_mtime, set_mode, make_symlink
     use fo_fs, only: fs_find_executable, fs_sleep_ms
     use fo_test_gremlin_oracle, only: gremlin_json, gremlin_field, gremlin_stop_lane
@@ -144,22 +144,36 @@ program test_hook_precommit
     call assert_contains(result%stdout, '"cache_hit":true', 'bounded CMake receipt hit')
     call git([character(len=64) :: 'write-tree'])
     tree = trim(result%stdout)
+    ! Proof keys are computed by the staged check both hook modes share. The
+    ! unbounded hook verifies each cold key, so a loaded machine cannot turn
+    ! the eight-second commit deadline into a false failure.
     call git([character(len=64) :: 'symbolic-ref', 'HEAD', 'refs/heads/alternate'])
-    call bounded_hook()
+    call hook()
     call assert_process_ok(result, 'verify changed unborn Git ref')
     call assert_contains(result%stdout, '"cache_hit":false', 'unborn ref invalidates proof')
-    call git([character(len=64) :: 'commit', '-qm', 'Create synthetic CMake provenance'])
+    ! The bounded hook keys proof by the current ref: it reuses the evidence
+    ! just prepared for it, and never that of another ref. Only an unborn
+    ! HEAD stores a complete receipt, so this is checked before the commit.
     call bounded_hook()
+    call assert_process_ok(result, 'bounded CMake reuses evidence of the new ref')
+    call assert_contains(result%stdout, '"cache_hit":true', 'bounded hit after ref preparation')
+    call git([character(len=64) :: 'symbolic-ref', 'HEAD', 'refs/heads/unprepared'])
+    call bounded_hook()
+    call assert_not_contains(result%stdout, '"cache_hit":true', &
+        'bounded hook cannot reuse proof across a ref change')
+    call git([character(len=64) :: 'symbolic-ref', 'HEAD', 'refs/heads/alternate'])
+    call git([character(len=64) :: 'commit', '-qm', 'Create synthetic CMake provenance'])
+    call hook()
     call assert_process_ok(result, 'verify newly committed Git provenance')
     call assert_contains(result%stdout, '"cache_hit":false', 'new HEAD invalidates proof')
     call git([character(len=64) :: 'commit', '--allow-empty', '-qm', 'Advance synthetic HEAD'])
     call git([character(len=64) :: 'write-tree'])
     call assert_equal_string(trim(result%stdout), tree, 'HEAD edit preserves staged tree')
-    call bounded_hook()
+    call hook()
     call assert_process_ok(result, 'verify changed HEAD at same staged tree')
     call assert_contains(result%stdout, '"cache_hit":false', 'changed HEAD cannot reuse proof')
     call git([character(len=64) :: 'tag', 'prepared-context'])
-    call bounded_hook()
+    call hook()
     call assert_process_ok(result, 'verify changed tag at same staged tree')
     call assert_contains(result%stdout, '"cache_hit":false', 'tag change invalidates proof')
     call write_text(project//'/answer.f90', original//'! Staged hook input'//nl)
@@ -206,12 +220,12 @@ program test_hook_precommit
 
     environment = string_list_t()
     call list_add(environment, 'FO_CMAKE_ARGS=-DHOOK_CONTEXT_FLAG=1')
-    call bounded_hook(environment)
+    call hook(environment)
     call assert_process_ok(result, 'verify changed effective CMake arguments')
     call assert_contains(result%stdout, '"cache_hit":false', 'CMake arguments invalidate proof')
     environment = string_list_t()
     call list_add(environment, 'FFLAGS=-O1')
-    call bounded_hook(environment)
+    call hook(environment)
     call assert_process_ok(result, 'verify changed compiler environment')
     call assert_contains(result%stdout, '"cache_hit":false', 'compiler environment invalidates proof')
 
@@ -272,7 +286,9 @@ program test_hook_precommit
     call assert_contains(result%stdout, '"local_gate_green":true', 'online context has verified PASS')
     call gremlin_stop_lane(driver, project, scratch//'/cache', scratch//'/state', &
         'hook-proof', session)
-    call bounded_hook()
+    ! A cold configure, build and fast test must finish here, which the bounded
+    ! commit deadline cannot guarantee on a loaded machine.
+    call hook()
     call assert_true(result%exit_code /= 0, 'offline configure cannot reuse online PASS')
     call assert_contains(result%stdout, '"cache_hit":false', 'different effective context misses')
     call assert_contains(result%stdout, 'fast test failed: context_probe', &
