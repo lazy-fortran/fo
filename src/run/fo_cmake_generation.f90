@@ -1580,8 +1580,12 @@ contains
                             end if
                             if (.not. captured) then
                                 ierr = 1
+                                ! Name the path as CMake reported it; a symlinked
+                                ! prefix (Homebrew's share/cmake) hides it otherwise.
                                 message = 'unsupported uncaptured external CMake input: '// &
-                                    trim(normalized)
+                                    trim(authored)
+                                if (trim(authored) /= trim(normalized)) message = &
+                                    trim(message)//' (resolved '//trim(normalized)//')'
                                 return
                             end if
                             if (present(inventory)) then
