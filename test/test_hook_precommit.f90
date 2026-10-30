@@ -120,6 +120,8 @@ program test_hook_precommit
     call assert_contains(result%stdout, '"deferred":["test_answer"]', 'slow name reported')
     call assert_contains(result%stdout, '"fast_passed":0', 'slow test never passed implicitly')
 
+    call markerless_git_dependency()
+
     ! CTest's external command gives an independent deterministic budget oracle.
     project = join_path(scratch, 'cmake')
     call write_text(project//'/CMakeLists.txt', 'cmake_minimum_required(VERSION 3.20)'//nl// &
@@ -194,21 +196,7 @@ program test_hook_precommit
     call git([character(len=128) :: 'remote', 'add', 'origin', &
         'https://example.invalid/hook-fixture'])
     config_before = read_text(project//'/.git/config')
-    call write_text(scratch//'/hooks/pre-commit', '#!/bin/sh'//nl// &
-        'exec "$FO_TEST_HOOK_DRIVER" hook pre-commit --json'//nl)
-    call set_mode(scratch//'/hooks/pre-commit', int(o'755'))
-    args = string_list_t()
-    call list_add(args, '-c')
-    call list_add(args, 'core.hooksPath='//scratch//'/hooks')
-    call list_add(args, '--git-dir='//project//'/.git')
-    call list_add(args, '--work-tree='//project)
-    call list_add(args, 'hook')
-    call list_add(args, 'run')
-    call list_add(args, 'pre-commit')
-    environment = string_list_t()
-    call list_add(environment, 'FO_TEST_HOOK_DRIVER='//driver)
-    call list_add(environment, 'FO_CACHE_DIR='//scratch//'/cache')
-    call run_external('git', args, project, result, environment, timeout_ms=90000)
+    call git_hook()
     call assert_process_ok(result, 'actual Git hook validates staged CMake')
     call assert_contains(result%stdout//result%stderr, '"build":"PASS', &
         'actual Git hook build passes')
@@ -774,6 +762,100 @@ contains
         call run_external('cmake', cmake_args, directory, result, timeout_ms=180000)
         call assert_process_ok(result, 'configure the CMake fixture')
     end subroutine configure_cmake
+    subroutine markerless_git_dependency()
+        character(len=:), allocatable :: provider, consumer, checkout, revision, marker
+
+        provider = join_path(scratch, 'git-provider')
+        consumer = join_path(scratch, 'git-consumer')
+        checkout = consumer//'/build/dependencies/hookdep'
+        marker = consumer//'/build/dependencies/.fo-git-identities/hookdep'
+        project = provider
+        call write_text(provider//'/fpm.toml', 'name = "hookdep"'//nl)
+        call write_text(provider//'/src/answer.f90', original)
+        call git([character(len=64) :: 'init', '-q', '-b', 'main'])
+        call git([character(len=64) :: 'add', 'fpm.toml', 'src/answer.f90'])
+        call git([character(len=64) :: 'commit', '-qm', 'Pinned provider'])
+        call git([character(len=64) :: 'rev-parse', 'HEAD'])
+        revision = result%stdout(:index(result%stdout, nl) - 1)
+        call git([character(len=64) :: 'tag', '--no-sign', '--no-annotate', 'v1'])
+        call write_text(provider//'/src/answer.f90', original//'! Later revision'//nl)
+        call git([character(len=64) :: 'commit', '-qam', 'Later provider'])
+        call make_directory(consumer//'/build/dependencies')
+        call git([character(len=1024) :: 'clone', '-q', provider, checkout])
+        project = checkout
+        call git([character(len=128) :: 'remote', 'set-url', 'origin', &
+            'https://example.invalid/wrong-provider.git'])
+        project = consumer
+        call write_text(consumer//'/test/test_answer.f90', &
+            'program test_answer'//nl//'    use answer_mod, only: answer'//nl// &
+            '    implicit none'//nl//'    if (answer /= 42) stop 1'//nl// &
+            'end program test_answer'//nl)
+        call git([character(len=64) :: 'init', '-q'])
+        call dependency_manifest('rev = "'//revision//'"')
+        call git([character(len=64) :: 'add', 'test/test_answer.f90'])
+        call hook()
+        call assert_true(result%exit_code /= 0, 'markerless wrong origin blocks hook')
+        call assert_true(.not. file_exists(marker), 'wrong origin is not blessed')
+        project = checkout
+        call git([character(len=128) :: 'remote', 'set-url', 'origin', &
+            'https://example.invalid/hookdep.git'])
+        project = consumer
+        call hook()
+        call assert_true(result%exit_code /= 0, 'markerless wrong revision blocks hook')
+        call assert_true(.not. file_exists(marker), 'wrong revision is not blessed')
+        project = checkout
+        call git([character(len=128) :: 'checkout', '-q', '--detach', revision])
+        call write_text(checkout//'/src/answer.f90', original//'! Dirty tracked source'//nl)
+        project = consumer
+        call hook()
+        call assert_true(result%exit_code /= 0, 'markerless dirty worktree blocks hook')
+        call assert_true(.not. file_exists(marker), 'dirty worktree is not blessed')
+        project = checkout
+        call git([character(len=64) :: 'add', 'src/answer.f90'])
+        project = consumer
+        call hook()
+        call assert_true(result%exit_code /= 0, 'markerless dirty index blocks hook')
+        call assert_true(.not. file_exists(marker), 'dirty index is not blessed')
+        project = checkout
+        call git([character(len=128) :: 'reset', '--hard', '-q', revision])
+        project = consumer
+        call git_hook()
+        call assert_process_ok(result, 'markerless pinned dependency builds in offline Git hook')
+        call assert_contains(result%stdout//result%stderr, &
+            '"fast_passed":1', 'pinned dependency test runs')
+        call assert_true(file_exists(marker), 'validated checkout gains identity')
+        call remove_tree(marker)
+        call dependency_manifest('tag = "v1"')
+        call hook()
+        call assert_process_ok(result, 'markerless local tag builds in offline hook')
+        call assert_contains(result%stdout, '"fast_passed":1', 'tag dependency test runs')
+        call remove_tree(marker)
+        project = checkout
+        call git([character(len=64) :: 'checkout', '-q', 'main'])
+        project = consumer
+        call dependency_manifest('branch = "main"')
+        call hook()
+        call assert_process_ok(result, 'markerless local branch builds in offline hook')
+        call assert_contains(result%stdout, '"fast_passed":1', 'branch dependency test runs')
+        call remove_tree(marker)
+        project = checkout
+        call git([character(len=64) :: 'update-ref', '-d', 'refs/remotes/origin/main'])
+        project = consumer
+        call hook()
+        call assert_process_ok(result, 'markerless local-only branch builds in offline hook')
+        call assert_true(file_exists(marker), 'local branch validates the declared selector')
+        project = join_path(scratch, 'project')
+    end subroutine markerless_git_dependency
+
+    subroutine dependency_manifest(selector)
+        character(len=*), intent(in) :: selector
+
+        call write_text(project//'/fpm.toml', 'name = "hook_git_consumer"'//nl// &
+            '[dependencies]'//nl//'hookdep = { git = '// &
+            '"https://example.invalid/hookdep.git", '//selector//' }'//nl)
+        call git([character(len=64) :: 'add', 'fpm.toml'])
+    end subroutine dependency_manifest
+
     subroutine git(words)
         character(len=*), intent(in) :: words(:)
         integer :: i
@@ -784,6 +866,24 @@ contains
         call run_external('git', args, project, result)
         call assert_process_ok(result, 'git fixture command')
     end subroutine git
+    subroutine git_hook()
+        call write_text(scratch//'/hooks/pre-commit', '#!/bin/sh'//nl// &
+            'exec "$FO_TEST_HOOK_DRIVER" hook pre-commit --json'//nl)
+        call set_mode(scratch//'/hooks/pre-commit', int(o'755'))
+        args = string_list_t()
+        call list_add(args, '-c')
+        call list_add(args, 'core.hooksPath='//scratch//'/hooks')
+        call list_add(args, '--git-dir='//project//'/.git')
+        call list_add(args, '--work-tree='//project)
+        call list_add(args, 'hook')
+        call list_add(args, 'run')
+        call list_add(args, 'pre-commit')
+        environment = string_list_t()
+        call list_add(environment, 'FO_TEST_HOOK_DRIVER='//driver)
+        call list_add(environment, 'FO_CACHE_DIR='//scratch//'/cache')
+        call list_add(environment, 'GIT_CONFIG_GLOBAL='//scratch//'/hook-gitconfig')
+        call run_external('git', args, project, result, environment, timeout_ms=90000)
+    end subroutine git_hook
     subroutine hook(extra)
         type(string_list_t), intent(in), optional :: extra
         type(string_list_t) :: environment
