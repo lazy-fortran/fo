@@ -7,6 +7,21 @@ Issues define observable success and this plan orders delivery. Apply
 smallest complete change, and preserve supported behaviour and independent
 failure detection. The workspace master plan, when present, owns delivery order.
 
+## Gremlin client cleanup and idle reaping (2026-10-30)
+
+- MCP starts default to task ownership; explicit persistence and CLI defaults
+  remain available. Long-lived clients still stop temporary watchers explicitly.
+- Linux idle reaping examines the owner's thread children rather than all host
+  processes, preserving registered asynchronous child exit statuses.
+- The updated lifecycle oracle fails with the unchanged driver and passes with
+  the repaired macOS and Linux release candidates. Five focused native programs
+  pass on each; the two Linux-specific reaping branches skip on macOS.
+- Candidate SHA256: macOS
+  `aea74ad12d626b189b114a87246755afacdb1d381bf3174bbb4c17b0707b9ed6`, Linux
+  `5e3416192e7a0a9b92fa8b0c366b5d4e874ab4c14661d7d639404bdc6679f996`.
+- A quiescent consumer trace confirms that the repaired Linux watcher reads no
+  unrelated process status files. Full-suite verification was not run.
+
 ## Dependency provider linker flags (2026-10-29)
 
 - [V] A consumer of FortNum lost OpenBLAS's search path at the final link:

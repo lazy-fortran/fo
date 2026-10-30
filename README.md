@@ -61,6 +61,12 @@ fo lsp                     LSP diagnostics for unsaved buffers
 `fo help` lists all commands and options. Build output goes to `build/fo`;
 running fpm in the same tree afterwards is safe.
 
+Gremlin started through MCP stops when its server process exits unless
+`lifetime: persistent` is requested. CLI watchers remain persistent by default;
+on Linux or macOS, use `fo gremlin start --owner task` to stop a temporary watcher
+with its parent process. Explicitly stop temporary watchers when their work ends
+if the parent or server remains shared across tasks.
+
 ## Documentation
 
 - [doc/testing.md](doc/testing.md): test budgets, retries, cases and build profiles

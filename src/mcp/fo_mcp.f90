@@ -660,6 +660,7 @@ contains
         type(json_builder_t) :: jb
         character(len=:), allocatable :: key
         integer :: action_count, dir_count, skip_error, value_end
+        logical :: lifetime_seen
 
         public_action = ''
         project_dir = '.'
@@ -669,6 +670,7 @@ contains
         ierr = 1
         action_count = 0
         dir_count = 0
+        lifetime_seen = .false.
         jb = json_new()
         call json_object_start(jb)
         call json_parser_init_strict(parser, arguments)
@@ -716,6 +718,7 @@ contains
                 end if
                 project_dir = value_event%string_val
             else
+                if (key == 'lifetime') lifetime_seen = .true.
                 value_end = value_event%raw_end
                 call json_skip_value(parser, value_event, skip_error)
                 if (skip_error /= 0) then
@@ -745,6 +748,11 @@ contains
             message = 'unknown Gremlin MCP action: '//trim(public_action)
             return
         end select
+        if (core_action == 'start' .and. .not. lifetime_seen) then
+            ! Agent connections should not leave detached watchers behind.
+            call json_key(jb, 'lifetime')
+            call json_value_string(jb, 'task')
+        end if
         call json_object_end(jb)
         request_json = json_to_string(jb)
         call gremlin_apply_adapter_defaults(core_action, request_json)
