@@ -2,7 +2,7 @@ program test_hook_precommit
     use fo_test_harness, only: string_list_t, process_result_t, list_add, &
         make_scratch, make_directory, join_path, write_text, read_text, remove_tree, &
         assert_contains, assert_not_contains, assert_equal_string, assert_true, assert_process_ok, &
-        finish_assertions, copy_mtime, set_mode, make_symlink
+        finish_assertions, copy_mtime, set_mode, make_symlink, file_exists
     use fo_fs, only: fs_find_executable, fs_sleep_ms
     use fo_test_gremlin_oracle, only: gremlin_json, gremlin_field, gremlin_stop_lane
     use fo_test_json, only: json_value_t
@@ -20,6 +20,10 @@ program test_hook_precommit
 
     call resolve_driver(driver)
     call make_scratch('fo-hook', scratch)
+    ! The unbounded hook runs fast tests until fo.hookBudget, counted from its
+    ! start, and a cold build on a loaded host can use up the default 10 s.
+    ! Checks of the budget itself set it in the repository, which overrides this.
+    call write_text(scratch//'/hook-gitconfig', '[fo]'//nl//'    hookBudget = 600'//nl)
     project = join_path(scratch, 'project')
     call write_text(project//'/fpm.toml', 'name = "hook_probe"'//nl)
     original = 'module answer_mod'//nl//'    implicit none'//nl// &
@@ -451,6 +455,44 @@ program test_hook_precommit
     call assert_process_ok(result, 'absolute populated build root stays usable in the hook')
     call assert_contains(result%stdout, '"fast_passed":1', 'absolute root test ran')
 
+    ! A linked worktree without its own build reuses the dependency roots its
+    ! main checkout populated; a clone with none populated anywhere configures
+    ! itself once with network access, and names a dependency it cannot fetch.
+    call configure_cmake(project)
+    call git([character(len=64) :: 'commit', '-qm', 'Fetch a header dependency'])
+    call git([character(len=4096) :: 'worktree', 'add', '-q', &
+        join_path(scratch, 'fetch-linked'), 'HEAD'])
+    call git([character(len=4096) :: 'clone', '-q', project, join_path(scratch, 'fetch-clone')])
+    project = join_path(scratch, 'fetch-linked')
+    call write_text(project//'/app.f90', read_text(project//'/app.f90')//'! linked'//nl)
+    call git([character(len=64) :: 'add', 'app.f90'])
+    call hook()
+    call assert_process_ok(result, 'linked worktree reuses its main checkout dependencies')
+    call assert_contains(result%stdout, '"fast_passed":1', 'linked worktree test ran')
+    project = join_path(scratch, 'fetch-clone')
+    call write_text(project//'/app.f90', read_text(project//'/app.f90')//'! clone'//nl)
+    call git([character(len=64) :: 'add', 'app.f90'])
+    call hook()
+    call assert_process_ok(result, 'fresh clone fetches its CMake dependencies once')
+    call assert_contains(result%stdout, '"fast_passed":1', 'fresh clone test ran')
+    call assert_true(file_exists(project//'/build/CMakeCache.txt'), &
+        'fresh clone keeps the configured build for later commits')
+    project = join_path(scratch, 'fetch-lost')
+    call write_text(project//'/CMakeLists.txt', 'cmake_minimum_required(VERSION 3.20)'//nl// &
+        'project(hook_lost LANGUAGES Fortran)'//nl//'include(FetchContent)'//nl// &
+        'FetchContent_Declare(lostdep GIT_REPOSITORY "'// &
+        join_path(scratch, 'no-such-repository')//'" GIT_TAG main)'//nl// &
+        'FetchContent_MakeAvailable(lostdep)'//nl//'enable_testing()'//nl// &
+        'add_executable(app.x app.f90)'//nl//'add_test(NAME app COMMAND app.x)'//nl)
+    call write_text(project//'/app.f90', 'program app'//nl//'end program app'//nl)
+    call git([character(len=64) :: 'init', '-q'])
+    call git([character(len=64) :: 'add', 'CMakeLists.txt', 'app.f90'])
+    call hook()
+    call assert_true(result%exit_code /= 0, 'unfetchable CMake dependency blocks the commit')
+    call assert_contains(result%stdout, 'missing dependency: lostdep', &
+        'hook names the dependency it cannot fetch')
+    call assert_contains(result%stdout, 'CMake Error', 'hook shows the CMake error')
+
     ! A fresh checkout whose Git dependency was never populated cannot build in
     ! the offline hook; the diagnostic names the step that populates it.
     project = join_path(scratch, 'unpopulated-dependency')
@@ -744,12 +786,15 @@ contains
     end subroutine git
     subroutine hook(extra)
         type(string_list_t), intent(in), optional :: extra
+        type(string_list_t) :: environment
         args = string_list_t()
         call list_add(args, 'hook')
         call list_add(args, 'pre-commit')
         call list_add(args, '--json')
+        if (present(extra)) environment = extra
+        call list_add(environment, 'GIT_CONFIG_GLOBAL='//scratch//'/hook-gitconfig')
         call run_fo(driver, args, project, scratch//'/cache', result, &
-            extra_environment=extra, timeout_ms=90000)
+            extra_environment=environment, timeout_ms=600000)
     end subroutine hook
     subroutine bounded_hook(extra_environment)
         type(string_list_t), optional, intent(in) :: extra_environment

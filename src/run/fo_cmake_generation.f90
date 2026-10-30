@@ -579,7 +579,7 @@ contains
         character(len=PATH_LEN) :: roots(MAX_ROOTS), bundles(MAX_ROOTS)
         character(len=256) :: labels(MAX_ROOTS), names(MAX_ROOTS)
         character(len=:), allocatable :: cache, line, key, kind, value, base, name
-        integer :: cursor, n, i
+        integer :: cursor, n, i, pass
         logical :: exists
 
         ierr = 0
@@ -596,24 +596,32 @@ contains
             if (key == 'CMAKE_HOME_DIRECTORY') backend%project_dir = value
         end do
         n = 0
-        cursor = 1
-        do while (next_cache_line(cache, cursor, line))
-            call cache_entry(line, key, kind, value)
-            if (len_trim(value) == 0) cycle
-            if (index(key, 'FETCHCONTENT_SOURCE_DIR_') == 1) then
-                name = key(25:)
-            else
-                if (len(key) <= 11) cycle
-                if (key(len(key) - 10:) /= '_SOURCE_DIR') cycle
-                if (.not. inside(value, base)) cycle
-                name = key(:len(key) - 11)
-                if (index(value(len_trim(base) + 2:), '/') /= 0) cycle
-            end if
-            inquire(file=value, exist=exists)
-            if (.not. exists) cycle
-            call add_source(value, name, n, roots, bundles, labels, names, &
-                ierr, message, .false.)
-            if (ierr /= 0) return
+        ! CMake caches FETCHCONTENT_SOURCE_DIR_<NAME> for every declared
+        ! dependency, populated or not, so it names each one exactly; a
+        ! <project>_SOURCE_DIR entry exists only when the dependency calls
+        ! project(), possibly under another name. Declared names go first.
+        do pass = 1, 2
+            cursor = 1
+            do while (next_cache_line(cache, cursor, line))
+                call cache_entry(line, key, kind, value)
+                if (index(key, 'FETCHCONTENT_SOURCE_DIR_') == 1) then
+                    if (pass /= 1 .or. len(key) <= 24) cycle
+                    name = key(25:)
+                    if (len_trim(value) == 0) value = trim(base)//'/'//lower(name)//'-src'
+                else
+                    if (pass /= 2 .or. len_trim(value) == 0) cycle
+                    if (len(key) <= 11) cycle
+                    if (key(len(key) - 10:) /= '_SOURCE_DIR') cycle
+                    if (.not. inside(value, base)) cycle
+                    name = key(:len(key) - 11)
+                    if (index(value(len_trim(base) + 2:), '/') /= 0) cycle
+                end if
+                inquire(file=value, exist=exists)
+                if (.not. exists) cycle
+                call add_source(value, name, n, roots, bundles, labels, names, &
+                    ierr, message, .false.)
+                if (ierr /= 0) return
+            end do
         end do
         inquire(file=trim(populated_build)//'/.cmake/api/v1/reply', exist=exists)
         if (exists .and. len_trim(backend%project_dir) > 0) then
@@ -1174,6 +1182,18 @@ contains
             escaped = escaped//value(i:i)
         end do
     end function cmake_quote
+
+    function lower(value) result(converted)
+        character(len=*), intent(in) :: value
+        character(len=len(value)) :: converted
+        integer :: i, code
+        converted = value
+        do i = 1, len(value)
+            code = iachar(value(i:i))
+            if (code >= iachar('A') .and. code <= iachar('Z')) &
+                converted(i:i) = achar(code + 32)
+        end do
+    end function lower
 
     function upper(value) result(converted)
         character(len=*), intent(in) :: value

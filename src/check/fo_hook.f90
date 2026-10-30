@@ -2,9 +2,9 @@ module fo_hook
     use, intrinsic :: iso_c_binding, only: c_int, c_char, c_null_char
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit, dp => real64
     use fo_build_backend, only: backend_t, detect_backend, BACKEND_NONE, BACKEND_CMAKE, &
-        cmake_configured_build_dir
+        cmake_configured_build_dir, cmake_configure
     use fo_project_model, only: project_model_t, model_request_t, model_selection_t
-    use fo_project_load, only: project_affected
+    use fo_project_load, only: project_affected, configure_error_excerpt
     use fo_gremlin_context, only: case_identity_capture
     use fo_gremlin_generation, only: generation_t
     use fo_gremlin_request, only: gremlin_json_text_valid
@@ -169,7 +169,7 @@ contains
         character(len=4096) :: driver, logfile, resultfile, dependency_message
         character(len=64) :: driver_digest, key
         character(len=:), allocatable :: root, snapshot, tree, text, message, packed, child_env
-        character(len=:), allocatable :: reuse, populated, backend_name, common
+        character(len=:), allocatable :: reuse, populated, backend_name
         type(string_t), allocatable :: excluded(:), included(:)
         character(len=4096), allocatable :: files(:)
         character(len=16384) :: formatting
@@ -221,16 +221,7 @@ contains
             ! own build stands on the configuration of its main checkout.
             call git_text(root, git_words('cat-file', '-e', ':fpm.toml'), text, status)
             if (status /= 0) then
-                call cmake_configured_build_dir(root, populated, populated_found, fortran)
-                if (.not. populated_found) then
-                    call git_text(root, git_words('rev-parse', '--path-format=absolute', &
-                        '--git-common-dir'), common, status)
-                    if (status == 0 .and. len(common) > 5) then
-                        if (common(len(common) - 4:) == '/.git') call &
-                            cmake_configured_build_dir(path_dirname(common), populated, &
-                            populated_found, fortran)
-                    end if
-                end if
+                call hook_cmake_build_dir(root, populated, populated_found, fortran)
                 if (populated_found .and. .not. fortran) then
                     message = 'configured CMake build enables no Fortran: '// &
                         populated//'; nothing to check'
@@ -312,10 +303,16 @@ contains
                 exit validation
             end if
             ! A project already configured with CMake keeps its populated
-            ! dependency trees: the staged copy is pointed at them, because a
-            ! commit never acquires a dependency. This runs before the backend
+            ! dependency trees: the staged copy is pointed at them, because its own
+            ! configure is offline. This runs before the backend
             ! is initialized so the effective configure arguments include it.
-            call cmake_configured_build_dir(root, populated, populated_found)
+            call hook_cmake_build_dir(root, populated, populated_found)
+            ! The bounded hook keeps its deadline and never acquires anything.
+            if (.not. populated_found .and. len(owned_view) == 0) then
+                call populate_cmake_dependencies(root, populated, populated_found, &
+                    message)
+                if (len(message) > 0) exit validation
+            end if
             if (populated_found) then
                 call cmake_populated_dependency_args(populated, &
                     'build/_deps', reuse, status, dependency_message)
@@ -555,6 +552,105 @@ contains
             if (status /= 0) return
         end do
     end subroutine checkout_tree
+
+    subroutine hook_cmake_build_dir(root, build_dir, found, fortran)
+        !! The configured build of `root`, else that of its main checkout: a
+        !! linked worktree without its own build stands on that configuration.
+        character(len=*), intent(in) :: root
+        character(len=:), allocatable, intent(out) :: build_dir
+        logical, intent(out) :: found
+        logical, intent(out), optional :: fortran
+        character(len=:), allocatable :: common
+        integer :: status
+
+        call cmake_configured_build_dir(root, build_dir, found, fortran)
+        if (found) return
+        call git_text(root, git_words('rev-parse', '--path-format=absolute', &
+            '--git-common-dir'), common, status)
+        if (status /= 0 .or. len(common) <= 5) return
+        if (common(len(common) - 4:) /= '/.git') return
+        call cmake_configured_build_dir(path_dirname(common), build_dir, found, fortran)
+    end subroutine hook_cmake_build_dir
+
+    subroutine populate_cmake_dependencies(root, build_dir, found, message)
+        !! A fresh CMake checkout has never fetched what it fetches at configure
+        !! time (FetchContent, ExternalProject), and the staged configure is
+        !! offline. Configure the checkout's own build directory once, with
+        !! network access, as `cmake -B build` would; later commits reuse it.
+        character(len=*), intent(in) :: root
+        character(len=:), allocatable, intent(out) :: build_dir, message
+        logical, intent(out) :: found
+        type(backend_t) :: backend
+        character(len=1024) :: log_file
+        character(len=:), allocatable :: text, names
+        integer :: exitcode, status, length
+
+        message = ''
+        build_dir = ''
+        found = .false.
+        backend = detect_backend(root, authority_dir=root)
+        if (backend%kind /= BACKEND_CMAKE) return
+        call get_environment_variable('FO_CMAKE_BUILD_DIR', length=length, status=status)
+        if (status /= 0 .or. length == 0) then
+            backend%cmake%build_root = 'build'
+            backend%cmake%build_root_hint = .true.
+        end if
+        write (error_unit, '(a)') 'fo hook: no configured CMake build; configuring '// &
+            'this checkout once to fetch its dependencies'
+        call make_tmpfile('fo-hook-populate', log_file)
+        call cmake_configure(backend%cmake, '', trim(log_file), exitcode)
+        if (exitcode == 0) then
+            call delete_tmpfile(trim(log_file))
+            call hook_cmake_build_dir(root, build_dir, found)
+            if (.not. found) message = 'CMake configured this checkout, but fo finds '// &
+                'no build directory to reuse; set FO_CMAKE_BUILD_DIR to it'
+            return
+        end if
+        call read_text_file_alloc(trim(log_file), text, status)
+        call delete_tmpfile(trim(log_file))
+        if (status /= 0) text = ''
+        names = dependency_names(text)
+        message = 'cannot fetch the CMake dependencies of this checkout'
+        if (len(names) > 0) message = message//'; missing dependency: '//names
+        message = message//new_line('a')//trim(configure_error_excerpt(text))
+    end subroutine populate_cmake_dependencies
+
+    function dependency_names(text) result(names)
+        !! Dependencies a failed configure names by their FetchContent or
+        !! ExternalProject directories (<base>/_deps/<name>-src and the like).
+        character(len=*), intent(in) :: text
+        character(len=:), allocatable :: names
+        character(len=:), allocatable :: name
+        character(len=*), parameter :: delimiters = ' "''/'//new_line('a')
+        integer :: at, finish, dash
+
+        names = ''
+        at = index(text, '/_deps/')
+        do while (at > 0)
+            at = at + 7
+            finish = at - 1
+            do while (finish < len(text))
+                if (index(delimiters, text(finish + 1:finish + 1)) > 0) exit
+                finish = finish + 1
+            end do
+            name = text(at:finish)
+            dash = index(name, '-', back=.true.)
+            if (dash > 1) then
+                select case (name(dash + 1:))
+                case ('src', 'build', 'subbuild', 'populate')
+                    name = name(:dash - 1)
+                    if (index(', '//names//',', ', '//name//',') == 0) then
+                        if (len(names) > 0) names = names//', '
+                        names = names//name
+                    end if
+                end select
+            end if
+            if (finish >= len(text)) exit
+            dash = index(text(finish + 1:), '/_deps/')
+            if (dash == 0) exit
+            at = finish + dash
+        end do
+    end function dependency_names
 
     subroutine copy_log(source, destination)
         character(len=*), intent(in) :: source, destination

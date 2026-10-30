@@ -1,6 +1,8 @@
 program test_gremlin_process_boundary_slow
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
+    use, intrinsic :: iso_fortran_env, only: real64
     use fo_fs, only: fs_make_dir, fs_sleep_ms
+    use fo_util, only: wall_time_seconds
     use fo_process, only: process_getpid
     use fo_gremlin_state, only: gremlin_session_read
     use fo_test_harness, only: string_list_t, process_result_t, list_add, &
@@ -388,6 +390,7 @@ contains
         character(len=*), intent(in) :: executable, state_path, cache_path, temp_path
         integer, intent(in) :: unrelated_pid
         integer :: owner, ierr, attempt, match
+        real(real64) :: deadline
         character(len=128) :: owner_id, owner_birth
         character(len=65536) :: owner_status
         type(process_result_t) :: child
@@ -417,6 +420,13 @@ contains
             response_state(child%stdout) == 'stopped', &
             'status observes the durable stopped session')
         call assert_quiet(marker, 'normal stop ends every nested process heartbeat')
+        ! The owner publishes stopped before it returns and exits, so its exit
+        ! follows the state; the deadline only guards a hang.
+        deadline = wall_time_seconds() + 60.0_real64
+        do while (c_process_matches(int(owner, c_int), trim(owner_birth)//c_null_char) /= 0)
+            if (wall_time_seconds() >= deadline) exit
+            call fs_sleep_ms(100)
+        end do
         call assert_true(c_process_matches(int(owner, c_int), &
             trim(owner_birth)//c_null_char) == 0, 'normal stop releases its owner identity')
         call assert_true(process_alive(unrelated_pid), 'normal stop preserves unrelated sentinel')
