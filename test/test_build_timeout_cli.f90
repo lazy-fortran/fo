@@ -33,6 +33,27 @@ program test_build_timeout_cli
     call run_fo(driver, arguments, project, scratch//'/cache', result, &
         environment, 20000)
     call assert_process_ok(result, 'a successful build keeps its success status')
+
+    call list_add(arguments, '--tests')
+    call write_lines(project//'/CMakeLists.txt', [character(len=160) :: &
+        'cmake_minimum_required(VERSION 3.20)', &
+        'project(configure_timeout_status LANGUAGES NONE)', &
+        'execute_process(COMMAND "${CMAKE_COMMAND}" -E sleep 3)'])
+    call run_fo(driver, arguments, project, scratch//'/cache', result, &
+        environment, 20000)
+    call assert_equal_integer(result%exit_code, 124, &
+        'building the test model preserves the configure timeout status')
+    call assert_contains(result%stdout//result%stderr, 'configure timed out', &
+        'the configure timeout remains diagnosed')
+
+    call write_lines(project//'/CMakeLists.txt', [character(len=160) :: &
+        'cmake_minimum_required(VERSION 3.20)', &
+        'project(configure_failure_status LANGUAGES NONE)', &
+        'message(FATAL_ERROR "synthetic configure failure")'])
+    call run_fo(driver, arguments, project, scratch//'/cache', result, &
+        environment, 20000)
+    call assert_equal_integer(result%exit_code, 1, &
+        'an ordinary configure failure keeps the public failure status')
     call remove_tree(scratch)
     call finish_assertions()
 contains

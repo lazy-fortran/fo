@@ -98,7 +98,10 @@ contains
         call cmake_configure(b%cmake, flags, trim(log_file), exitcode)
         if (exitcode /= 0) then
             ierr = 1
+            if (exitcode == 124 .or. exitcode == 126) ierr = exitcode
             message = 'CMake configure failed'
+            if (exitcode == 124) &
+                message = 'CMake configure timed out (FO_BUILD_TIMEOUT exceeded)'
             call read_text_file_alloc(trim(log_file), text, status)
             if (status == 0) message = message//new_line('a')// &
                 trim(configure_error_excerpt(text))

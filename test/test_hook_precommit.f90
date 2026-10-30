@@ -233,6 +233,27 @@ program test_hook_precommit
     call hook()
     call assert_true(result%exit_code /= 0, 'mandatory build hard cap blocks')
     call assert_contains(result%stdout, 'staged build exceeded hard cap', 'hard cap identified')
+    block
+        character(:), allocatable :: before_configure_delay
+
+        before_configure_delay = read_text(project//'/CMakeLists.txt')
+        call write_text(project//'/CMakeLists.txt', &
+            'cmake_minimum_required(VERSION 3.20)'//nl// &
+            'execute_process(COMMAND "${CMAKE_COMMAND}" -E sleep 3)'//nl// &
+            before_configure_delay)
+        call git([character(len=64) :: 'add', 'CMakeLists.txt'])
+        call hook()
+        call assert_true(result%exit_code /= 0, 'configure hard cap blocks')
+        call assert_contains(result%stdout, &
+            'staged build exceeded hard cap during CMake configure', &
+            'configure hard cap identified before mandatory build')
+        call assert_contains(result%stdout, '"cache_hit":false', &
+            'configure timeout cannot reuse proof')
+        call assert_contains(result%stdout, '"fast_passed":0', &
+            'configure timeout proves no fast test')
+        call write_text(project//'/CMakeLists.txt', before_configure_delay)
+        call git([character(len=64) :: 'add', 'CMakeLists.txt'])
+    end block
     call git([character(len=64) :: 'config', 'fo.hookBuildCap', '60'])
     call write_text(project//'/CMakeLists.txt', read_text(project//'/CMakeLists.txt')// &
         'add_custom_target(long_build ALL COMMAND "${CMAKE_COMMAND}" -E sleep 30)'//nl)
@@ -279,6 +300,10 @@ program test_hook_precommit
     call gremlin_json(driver, project, scratch//'/cache', scratch//'/state', &
         args, reply, result, 30000)
     call assert_process_ok(result, 'online context reaches quiescence')
+    if (index(result%stdout, '"local_gate_green":true') == 0) then
+        write (*, '(a)') 'online context wait reply: '//result%stdout
+        write (*, '(a)') 'online context wait stderr: '//result%stderr
+    end if
     call assert_contains(result%stdout, '"local_gate_green":true', 'online context has verified PASS')
     call gremlin_stop_lane(driver, project, scratch//'/cache', scratch//'/state', &
         'hook-proof', session)
