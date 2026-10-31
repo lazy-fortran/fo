@@ -14,6 +14,14 @@ module fo_dep_update
     !! build re-fetches and recompiles. `dep_update_missing_sources` reports
     !! declared git dependencies whose source tree is gone while their objects
     !! remain, which is the silent case the build must never accept.
+    !!
+    !! CMake FetchContent dependencies have the same disease: CMake populates
+    !! `build/_deps/<name>-src` once and never re-fetches it, even when the
+    !! declared tag moves, so a project keeps compiling against a dependency
+    !! from the day its build tree was first configured. `fo update` drops the
+    !! FetchContent source, subbuild and build directories of every dependency
+    !! the build tree manages itself; a `FETCHCONTENT_SOURCE_DIR_<NAME>`
+    !! override pointing outside the build tree is a deliberate pin and stays.
     use fo_fpm_config, only: fpm_config_t, fpm_dep_t, fpm_config_parse, &
         fpm_config_allocate, &
         dep_kind, DEP_PATH, DEP_GIT, DEP_REGISTRY
@@ -31,6 +39,7 @@ module fo_dep_update
     private
 
     public :: dep_update_run
+    public :: dep_update_cmake_fetchcontent
     public :: dep_update_missing_sources
     public :: dep_acquire_sources
     public :: MAX_UPDATE_NAMES
@@ -646,12 +655,153 @@ contains
         end do
     end subroutine dep_update_missing_sources
 
+    subroutine dep_update_cmake_fetchcontent(project_dir, n_cmake, refreshed, &
+            error_message)
+        !! Drop the FetchContent dependency trees the project build tree
+        !! manages itself so the next CMake configure re-fetches them at the
+        !! declared refs. Sources pinned by a FETCHCONTENT_SOURCE_DIR_<NAME>
+        !! override outside the build tree are deliberate and stay.
+        character(len=*), intent(in) :: project_dir
+        integer, intent(out) :: n_cmake
+        logical, intent(inout) :: refreshed
+        character(len=*), intent(out), optional :: error_message
+
+        character(len=8192) :: cache_text
+        character(len=1024) :: build_dir, line, key, kind, value, base, dir, stem
+        character(len=64) :: names(MAX_UPDATE_NAMES)
+        integer :: cursor, n_names, i, ierr, k
+        logical :: exists, listed
+
+        n_cmake = 0
+        if (present(error_message)) error_message = ''
+        build_dir = trim(project_dir)//'/build'
+        call get_environment_variable('FO_CMAKE_BUILD_DIR', value=value)
+        if (len_trim(value) > 0) build_dir = trim(value)
+        inquire(file=trim(build_dir)//'/CMakeCache.txt', exist=exists)
+        if (.not. exists) return
+
+        call read_text_file(trim(build_dir)//'/CMakeCache.txt', cache_text)
+        if (len_trim(cache_text) == 0) return
+        base = ''
+        n_names = 0
+        cursor = 1
+        do while (update_cache_line(cache_text, cursor, line))
+            call update_cache_entry(line, key, kind, value)
+            if (trim(key) == 'FETCHCONTENT_BASE_DIR') base = trim(value)
+            if (index(key, 'FETCHCONTENT_SOURCE_DIR_') == 1 .and. len(key) > 24) then
+                if (n_names < MAX_UPDATE_NAMES) then
+                    n_names = n_names + 1
+                    names(n_names) = key(25:min(len(key), 24 + 64))
+                end if
+            end if
+        end do
+        if (n_names == 0) return
+        if (len_trim(base) == 0) base = trim(build_dir)//'/_deps'
+
+        listed = .false.
+        do i = 1, n_names
+            ! Resolve the source dir the same way the hook does: the cache
+            ! value when set, otherwise the conventional _deps location.
+            dir = ''
+            cursor = 1
+            do while (update_cache_line(cache_text, cursor, line))
+                call update_cache_entry(line, key, kind, value)
+                if (trim(key) == 'FETCHCONTENT_SOURCE_DIR_'//trim(names(i))) then
+                    dir = trim(value)
+                    exit
+                end if
+            end do
+            stem = trim(base)//'/'//update_lower(trim(names(i)))
+            if (len_trim(dir) == 0) dir = trim(stem)//'-src'
+            ! Outside the FetchContent base the source is a deliberate pin.
+            if (index(trim(dir), trim(stem)) /= 1) cycle
+            inquire(file=trim(dir), exist=exists)
+            if (exists) then
+                call fs_remove_tree(trim(dir), ierr)
+                if (ierr /= 0) then
+                    if (present(error_message)) error_message = &
+                        'cannot remove FetchContent source '//trim(dir)
+                    return
+                end if
+                listed = .true.
+            end if
+            do k = 1, 3
+                select case (k)
+                case (1)
+                    dir = trim(stem)//'-subbuild'
+                case (2)
+                    dir = trim(stem)//'-build'
+                case default
+                    dir = trim(stem)//'-populate'
+                end select
+                inquire(file=trim(dir), exist=exists)
+                if (.not. exists) cycle
+                call fs_remove_tree(trim(dir), ierr)
+                if (ierr /= 0) then
+                    if (present(error_message)) error_message = &
+                        'cannot remove FetchContent artifact '//trim(dir)
+                    return
+                end if
+                listed = .true.
+            end do
+            n_cmake = n_cmake + 1
+        end do
+        if (listed) refreshed = .true.
+    end subroutine dep_update_cmake_fetchcontent
+
+    logical function update_cache_line(cache, cursor, line) result(found)
+        character(len=*), intent(in) :: cache
+        integer, intent(inout) :: cursor
+        character(len=*), intent(out) :: line
+        integer :: nextn
+        found = .false.
+        line = ''
+        if (cursor > len_trim(cache)) return
+        nextn = index(cache(cursor:), new_line('a'))
+        if (nextn == 0) then
+            line = cache(cursor:)
+            cursor = len_trim(cache) + 1
+        else
+            line = cache(cursor:cursor + nextn - 2)
+            cursor = cursor + nextn
+        end if
+        found = .true.
+    end function update_cache_line
+
+    subroutine update_cache_entry(line, key, kind, value)
+        character(len=*), intent(in) :: line
+        character(len=*), intent(out) :: key, kind, value
+        integer :: colon, equals
+        key = ''
+        kind = ''
+        value = ''
+        colon = index(line, ':')
+        equals = index(line, '=')
+        if (equals <= colon .or. colon == 0) return
+        key = line(:colon - 1)
+        kind = line(colon + 1:equals - 1)
+        value = line(equals + 1:)
+    end subroutine update_cache_entry
+
+    function update_lower(text) result(converted)
+        character(len=*), intent(in) :: text
+        character(len=len(text)) :: converted
+        integer :: i, code
+        converted = text
+        do i = 1, len_trim(converted)
+            code = iachar(converted(i:i))
+            if (code >= iachar('A') .and. code <= iachar('Z')) &
+                converted(i:i) = achar(code + 32)
+        end do
+    end function update_lower
+
     subroutine dep_update_run(project_dir, n_deps, refreshed, error_message)
         !! Remove the cached clones and the compiled dependency artifacts.
         !!
         !! The fpm profile directories are removed as well as the clone: leaving
         !! them behind lets the next build link objects compiled from the source
-        !! that was just discarded.
+        !! that was just discarded. The CMake FetchContent trees are dropped
+        !! first so a native build also re-fetches its dependencies.
         character(len=*), intent(in) :: project_dir
         integer, intent(out) :: n_deps
         logical, intent(out) :: refreshed
@@ -659,24 +809,35 @@ contains
 
         type(fpm_config_t), allocatable :: config
         character(len=512) :: root
-        integer :: i, ierr
+        integer :: i, ierr, n_fpm
 
         n_deps = 0
         refreshed = .false.
         if (present(error_message)) error_message = ''
-        call fpm_config_allocate(config)
         call normalize_path(project_dir, root)
+        block
+            integer :: n_cmake
+            call dep_update_cmake_fetchcontent(root, n_cmake, refreshed, &
+                error_message)
+            if (present(error_message)) then
+                if (len_trim(error_message) > 0) return
+            end if
+            n_deps = n_cmake
+            n_fpm = 0
+        end block
+        call fpm_config_allocate(config)
         call fpm_config_parse(root, config, ierr)
         if (ierr /= 0) return
         do i = 1, config%n_deps
             if (dep_kind(config%deps(i)) == DEP_PATH) cycle
-            n_deps = n_deps + 1
+            n_fpm = n_fpm + 1
         end do
         do i = 1, config%n_dev_deps
             if (dep_kind(config%dev_deps(i)) == DEP_PATH) cycle
-            n_deps = n_deps + 1
+            n_fpm = n_fpm + 1
         end do
-        if (n_deps == 0) return
+        if (n_fpm == 0) return
+        n_deps = n_deps + n_fpm
 
         block
             character(len=1024) :: problem

@@ -21,6 +21,7 @@ program test_dep_update
     call test_update_keeps_native_tree()
     call test_path_only_project_has_nothing_to_refresh()
     call test_missing_sources_are_reported()
+    call test_update_drops_cmake_fetchcontent_trees()
 
     write (output_unit, '(a,i0,a,i0,a)') 'dep_update: ', n_pass, ' pass, ', &
         n_fail, ' fail'
@@ -106,6 +107,42 @@ contains
         end if
         call remove_tree(root)
     end subroutine test_missing_sources_are_reported
+
+    subroutine test_update_drops_cmake_fetchcontent_trees()
+        character(len=512) :: root
+        character(len=512) :: base, pinned, cache
+        integer :: n_deps, u
+        logical :: refreshed
+
+        call make_tmp('fo_test_update_cmake', root)
+        call write_project(root, '')
+        base = trim(root)//'/build/_deps'
+        pinned = trim(root)//'/pinned-src'
+        call touch(trim(base)//'/libneo-src/fpm.toml')
+        call touch(trim(base)//'/libneo-subbuild/CMakeCache.txt')
+        call touch(trim(base)//'/libneo-build/libneo.a')
+        call touch(trim(pinned)//'/fpm.toml')
+        cache = trim(root)//'/build/CMakeCache.txt'
+        open (newunit=u, file=trim(cache), status='replace')
+        write (u, '(a)') 'FETCHCONTENT_BASE_DIR:INTERNAL='//trim(base)
+        write (u, '(a)') 'FETCHCONTENT_SOURCE_DIR_LIBNEO:PATH='//trim(base)// &
+            '/libneo-src'
+        write (u, '(a)') 'FETCHCONTENT_SOURCE_DIR_PINNED:PATH='//trim(pinned)
+        close (u)
+
+        call dep_update_run(trim(root), n_deps, refreshed)
+        call assert(refreshed, 'update reports a refresh for cmake deps')
+        call assert(n_deps == 1, 'update counts the managed cmake dependency')
+        call assert(.not. exists(trim(base)//'/libneo-src'), &
+            'update drops the populated fetchcontent source')
+        call assert(.not. exists(trim(base)//'/libneo-subbuild'), &
+            'update drops the fetchcontent subbuild')
+        call assert(.not. exists(trim(base)//'/libneo-build'), &
+            'update drops the fetchcontent build tree')
+        call assert(exists(trim(pinned)), &
+            'update keeps a source pinned outside the fetchcontent base')
+        call remove_tree(root)
+    end subroutine test_update_drops_cmake_fetchcontent_trees
 
     subroutine make_git_project(root)
         character(len=*), intent(out) :: root
