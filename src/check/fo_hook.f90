@@ -422,6 +422,12 @@ contains
                 message = 'staged build failed'
                 if (timeout_kind == TIMEOUT_WALL .or. status == 124) &
                     message = 'staged build exceeded hard cap'
+                if (populated_found .and. len(trim(reuse)) > 0) then
+                    message = trim(message)//'; this commit reused the '// &
+                        'populated CMake dependencies from the build tree, '// &
+                        'which CMake never re-fetches - run `fo update` and '// &
+                        'rebuild if they are stale'
+                end if
                 do i = 1, size(selection%cases)
                     j = selection%cases(i)
                     if (hook_slow_case(model%cases(j))) cycle
