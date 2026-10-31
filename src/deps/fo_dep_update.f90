@@ -32,7 +32,7 @@ module fo_dep_update
     use fo_dep_resolve, only: normalize_path, join_path
     use fo_process, only: process_run_argv_logged, argv_push
     use fo_util, only: make_tmpfile, make_sibling_tmpfile, delete_tmpfile, &
-        read_text_file
+        read_text_file, read_text_file_alloc
     use, intrinsic :: iso_c_binding, only: c_long_long
     use, intrinsic :: iso_fortran_env, only: error_unit
     implicit none
@@ -666,7 +666,7 @@ contains
         logical, intent(inout) :: refreshed
         character(len=*), intent(out), optional :: error_message
 
-        character(len=8192) :: cache_text
+        character(len=:), allocatable :: cache_text
         character(len=1024) :: build_dir, line, key, kind, value, base, dir, stem
         character(len=64) :: names(MAX_UPDATE_NAMES)
         integer :: cursor, n_names, i, ierr, k
@@ -680,7 +680,9 @@ contains
         inquire(file=trim(build_dir)//'/CMakeCache.txt', exist=exists)
         if (.not. exists) return
 
-        call read_text_file(trim(build_dir)//'/CMakeCache.txt', cache_text)
+        call read_text_file_alloc(trim(build_dir)//'/CMakeCache.txt', &
+            cache_text, ierr)
+        if (ierr /= 0) return
         if (len_trim(cache_text) == 0) return
         base = ''
         n_names = 0
