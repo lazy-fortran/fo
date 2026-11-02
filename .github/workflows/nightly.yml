@@ -1,7 +1,8 @@
 name: nightly
 
 # Slow checks run once a night on main instead of in every merge-queue entry:
-# bootstrapping Fo with LLVM Flang and building the Flang consumer fixtures.
+# bootstrapping Fo with LLVM Flang, building the Flang consumer fixtures, and
+# the tests of the `slow` test group in fpm.toml (merge CI runs none of them).
 # When a cell fails, the triage job bisects it between the last green commit
 # and this one and files or updates one issue labelled nightly-failure; the
 # next green run that covers the recorded cells closes it.
@@ -66,6 +67,42 @@ jobs:
           path: |
             build/fo/test-logs/*.log
             ${{ runner.temp }}/flang-${{ matrix.llvm }}/tmp/**/*.log
+
+  slow_tests:
+    name: Slow test group (gfortran)
+    runs-on: [self-hosted, itp-ubuntu24]
+    # test_hook_precommit alone took 17.4 min on a workstation (2026-11-02).
+    timeout-minutes: 60
+    env:
+      GIT_TERMINAL_PROMPT: 0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install gfortran, CMake and fpm
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gfortran cmake
+          sudo curl -L -o /usr/local/bin/fpm \
+            https://github.com/fortran-lang/fpm/releases/download/v0.13.0/fpm-0.13.0-linux-x86_64-gcc-12
+          sudo chmod +x /usr/local/bin/fpm
+      - name: Build and install fo
+        run: |
+          # Runner home is noexec; use job-private executable scratch.
+          fpm install --prefix "$RUNNER_TEMP/fo-install"
+          echo "$RUNNER_TEMP/fo-install/bin" >> "$GITHUB_PATH"
+      - name: Run the slow test group
+        run: |
+          tests=$(sed -n 's/^slow = { tests = \[\(.*\)\] }$/\1/p' fpm.toml | tr -d '",')
+          test -n "$tests"
+          fo test --all $tests
+      - name: Retain slow-test failure logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: slow-test-failure-logs
+          if-no-files-found: ignore
+          path: build/fo/test-logs/*.log
 
   triage:
     name: Bisect failing cells and report
