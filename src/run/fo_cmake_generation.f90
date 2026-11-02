@@ -11,7 +11,8 @@ module fo_cmake_generation
         input_inventory_cmake_reference, input_inventory_cmake_missing_include, &
         input_inventory_cmake_include_search, input_inventory_cmake_provider_file
     use fo_fs, only: fs_make_dir, fs_write_text, fs_collect_files, fs_remove_tree, &
-        fs_realpath, fs_canonical_path, fs_path_is_absolute, fs_parent_path
+        fs_realpath, fs_canonical_path, fs_path_is_absolute, fs_parent_path, &
+        fs_dir_entry_count
     use fo_util, only: make_tmpfile, delete_tmpfile, read_text_file, &
         read_text_file_alloc
     use fo_dep_resolve, only: normalize_path
@@ -34,6 +35,7 @@ module fo_cmake_generation
     end type path_alias_t
     public :: cmake_capture_inventory, cmake_registered_names, cmake_capture_cleanup
     public :: cmake_stage_git, cmake_populated_dependency_args
+    public :: cmake_unpopulated_dependency
 contains
     subroutine cmake_capture_inventory(backend, inventory, ierr, message, flags, &
             configured)
@@ -811,6 +813,35 @@ contains
             return
         end do
     end subroutine cmake_capture_cleanup
+
+    function cmake_unpopulated_dependency(build_dir) result(name)
+        !! First declared FetchContent dependency of a configured build that has
+        !! no source override and an empty or missing populated source, as an
+        !! offline configure leaves it; '' when every dependency has a source.
+        character(len=*), intent(in) :: build_dir
+        character(len=:), allocatable :: name
+        character(len=:), allocatable :: cache, line, key, kind, value, base
+        integer :: cursor, ierr
+
+        name = ''
+        call read_text_file_alloc(trim(build_dir)//'/CMakeCache.txt', cache, ierr)
+        if (ierr /= 0) return
+        base = trim(build_dir)//'/_deps'
+        cursor = 1
+        do while (next_cache_line(cache, cursor, line))
+            call cache_entry(line, key, kind, value)
+            if (key == 'FETCHCONTENT_BASE_DIR' .and. len_trim(value) > 0) base = value
+        end do
+        cursor = 1
+        do while (next_cache_line(cache, cursor, line))
+            call cache_entry(line, key, kind, value)
+            if (index(key, 'FETCHCONTENT_SOURCE_DIR_') /= 1 .or. len(key) <= 24) cycle
+            if (len_trim(value) > 0) cycle
+            if (fs_dir_entry_count(trim(base)//'/'//lower(key(25:))//'-src') > 0) cycle
+            name = lower(key(25:))
+            return
+        end do
+    end function cmake_unpopulated_dependency
 
     logical function next_cache_line(text, cursor, line) result(found)
         character(len=*), intent(in) :: text

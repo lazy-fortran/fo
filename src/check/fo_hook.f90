@@ -9,7 +9,8 @@ module fo_hook
     use fo_gremlin_generation, only: generation_t
     use fo_gremlin_request, only: gremlin_json_text_valid
     use fo_exec_service, only: exec_job_t, exec_start, exec_poll, EXEC_UNCANCELLED
-    use fo_cmake_generation, only: cmake_stage_git, cmake_populated_dependency_args
+    use fo_cmake_generation, only: cmake_stage_git, cmake_populated_dependency_args, &
+        cmake_unpopulated_dependency
     use fo_hook_evidence, only: hook_input_key, hook_receipt_read, &
         hook_receipt_write, hook_slow_case, hook_prepared_key
     use fo_test_results, only: test_result_entry_t, parse_test_results
@@ -178,7 +179,7 @@ contains
         character(len=4096) :: driver, logfile, resultfile, dependency_message
         character(len=64) :: driver_digest, key, prepared_key
         character(len=:), allocatable :: root, snapshot, tree, text, message, packed, child_env
-        character(len=:), allocatable :: reuse, populated, backend_name
+        character(len=:), allocatable :: reuse, populated, backend_name, refresh_message
         type(string_t), allocatable :: excluded(:), included(:)
         character(len=4096), allocatable :: files(:)
         character(len=16384) :: formatting
@@ -187,7 +188,7 @@ contains
         real :: seconds
         real(dp) :: started, elapsed, threshold
         logical :: found, snapshot_owned, hit, built, identity_ok, populated_found, has_base
-        logical :: fortran
+        logical :: fortran, refreshed
         logical, allocatable :: added(:)
 
         code = 1
@@ -363,12 +364,46 @@ contains
             call config_labels(root, 'fo.hookIncludeLabels', included)
             if (size(excluded) > 0) request%exclude_labels = excluded
             if (size(included) > 0) request%include_labels = included
-            if (prepare) then
-                call project_resolve(backend, '', request, model, selection, status, message)
-            else
-                call project_affected(backend, '', request, changed, model, selection, &
-                    reasons, status, message)
-            end if
+            refreshed = .not. populated_found .or. len(owned_view) > 0 .or. &
+                backend%kind /= BACKEND_CMAKE
+            do
+                if (prepare) then
+                    call project_resolve(backend, '', request, model, selection, status, &
+                        message)
+                else
+                    call project_affected(backend, '', request, changed, model, selection, &
+                        reasons, status, message)
+                end if
+                if (refreshed .or. status == 124) exit
+                ! The reused build may predate a dependency this commit declares:
+                ! the offline staged configure then leaves its source empty.
+                ! Configure this checkout once with network access and retry
+                ! with the dependency roots it populates.
+                refresh_message = cmake_unpopulated_dependency(snapshot//'/build')
+                if (len(refresh_message) == 0) exit
+                refreshed = .true.
+                call populate_cmake_dependencies(root, populated, populated_found, &
+                    refresh_message, refresh=.true.)
+                if (len(refresh_message) > 0 .or. .not. populated_found) then
+                    status = 1
+                    message = 'cannot fetch a dependency the reused CMake build '// &
+                        'lacks'//new_line('a')//refresh_message
+                    exit
+                end if
+                call cmake_populated_dependency_args(populated, 'build/_deps', reuse, &
+                    status, dependency_message)
+                if (status /= 0) then
+                    message = trim(dependency_message)
+                    exit
+                end if
+                call fs_remove_tree(snapshot//'/build', status)
+                status = c_prepare(root//c_null_char, snapshot//c_null_char, &
+                    int(cap, c_int), reuse//c_null_char)
+                if (status /= 0) then
+                    message = 'cannot prepare private build/dependency view'
+                    exit
+                end if
+            end do
             if (status /= 0) then
                 if (status == 124) message = &
                     'staged build exceeded hard cap during CMake configure'
@@ -605,14 +640,16 @@ contains
         call cmake_configured_build_dir(path_dirname(common), build_dir, found, fortran)
     end subroutine hook_cmake_build_dir
 
-    subroutine populate_cmake_dependencies(root, build_dir, found, message)
+    subroutine populate_cmake_dependencies(root, build_dir, found, message, refresh)
         !! A fresh CMake checkout has never fetched what it fetches at configure
         !! time (FetchContent, ExternalProject), and the staged configure is
         !! offline. Configure the checkout's own build directory once, with
         !! network access, as `cmake -B build` would; later commits reuse it.
+        !! `refresh` does the same when a reused build predates a dependency.
         character(len=*), intent(in) :: root
         character(len=:), allocatable, intent(out) :: build_dir, message
         logical, intent(out) :: found
+        logical, intent(in), optional :: refresh
         type(backend_t) :: backend
         character(len=1024) :: log_file
         character(len=:), allocatable :: text, names
@@ -628,8 +665,13 @@ contains
             backend%cmake%build_root = 'build'
             backend%cmake%build_root_hint = .true.
         end if
-        write (error_unit, '(a)') 'fo hook: no configured CMake build; configuring '// &
-            'this checkout once to fetch its dependencies'
+        if (present(refresh)) then
+            write (error_unit, '(a)') 'fo hook: the reused CMake build lacks a '// &
+                'dependency of this commit; configuring this checkout to fetch it'
+        else
+            write (error_unit, '(a)') 'fo hook: no configured CMake build; configuring '// &
+                'this checkout once to fetch its dependencies'
+        end if
         call make_tmpfile('fo-hook-populate', log_file)
         call cmake_configure(backend%cmake, '', trim(log_file), exitcode)
         if (exitcode == 0) then
