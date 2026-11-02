@@ -41,7 +41,7 @@ contains
             call fs_collect_files(trim(scan_root), '', trim(suffixes(s)), '', &
                 hits, n_hits)
             do i = 1, n_hits
-                if (skip_generated_source(scan_root, hits(i), .false.)) cycle
+                if (fmt_skips_source(scan_root, hits(i))) cycle
                 if (n_files >= size(files)) exit
                 n_files = n_files + 1
                 files(n_files) = hits(i)
@@ -151,7 +151,7 @@ contains
         b = detect_backend(trim(dir))
         scan_root = trim(dir)
         if (b%kind /= BACKEND_NONE) scan_root = b%project_dir
-        if (skip_generated_source(scan_root, fpath, .false.)) return
+        if (fmt_skips_source(scan_root, fpath)) return
         call find_fprettify_config(scan_root, config_file)
 
         call make_tmpfile('fo_fmt_check', tmpf)
@@ -622,7 +622,7 @@ contains
         if (len_trim(fpath) == 0) return
         if (.not. is_fortran_source(fpath)) return
         if (fpath(1:1) /= '/') fpath = trim(project_dir)//'/'//trim(fpath)
-        if (skip_generated_source(project_dir, fpath, .false.)) return
+        if (fmt_skips_source(project_dir, fpath)) return
         inquire (file=trim(fpath), exist=exists)
         if (.not. exists) return
 
@@ -721,6 +721,39 @@ contains
         close (uo)
         close (uf)
     end function first_difference
+
+    logical function fmt_skips_source(root, path)
+        !! Formatting skips build, vendored and hidden trees, and sources whose
+        !! leading comment says they are generated, so generator output keeps its bytes.
+        character(len=*), intent(in) :: root, path
+
+        fmt_skips_source = skip_generated_source(root, path, .false.)
+        if (.not. fmt_skips_source) fmt_skips_source = declares_generated_source(path)
+    end function fmt_skips_source
+
+    logical function declares_generated_source(path)
+        !! True when one of the first five lines is a comment containing both
+        !! "generated" and "do not edit", case-insensitively.
+        character(len=*), intent(in) :: path
+
+        character(len=512) :: line, lowered
+        integer :: u, ios, k
+
+        declares_generated_source = .false.
+        open (newunit=u, file=trim(path), status='old', action='read', iostat=ios)
+        if (ios /= 0) return
+        do k = 1, 5
+            read (u, '(a)', iostat=ios) line
+            if (ios /= 0) exit
+            lowered = to_lower(adjustl(line))
+            if (index(lowered, '!') /= 1) cycle
+            if (index(lowered, 'generated') == 0) cycle
+            if (index(lowered, 'do not edit') == 0) cycle
+            declares_generated_source = .true.
+            exit
+        end do
+        close (u)
+    end function declares_generated_source
 
     logical function is_fortran_source(path)
         character(len=*), intent(in) :: path
