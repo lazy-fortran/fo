@@ -488,10 +488,20 @@ program test_hook_precommit
     call assert_contains(result%stdout, '"fast_passed":1', 'linked worktree test ran')
     ! A dependency declared after the reused build was configured has no
     ! populated source; the hook configures this checkout once and retries.
-    call write_text(scratch//'/late.inc', 'integer, parameter :: late_answer = 3'//nl)
+    ! The Git dependency is cloned under the repository and index variables
+    ! that `git commit` exports to its hook.
+    project = join_path(scratch, 'late-dependency')
+    call write_text(project//'/late.inc', 'integer, parameter :: late_answer = 3'//nl)
+    call git([character(len=64) :: 'init', '-q'])
+    call git([character(len=64) :: 'add', 'late.inc'])
+    call git([character(len=64) :: 'commit', '-qm', 'Synthetic late dependency'])
+    call git([character(len=64) :: 'rev-parse', 'HEAD'])
+    tag = trim(result%stdout)
+    project = join_path(scratch, 'fetch-linked')
     call write_text(project//'/CMakeLists.txt', read_text(project//'/CMakeLists.txt')// &
-        'FetchContent_Declare(latedep URL "file://'//scratch//'/late.inc" '// &
-        'DOWNLOAD_NO_EXTRACT TRUE)'//nl//'FetchContent_MakeAvailable(latedep)'//nl// &
+        'FetchContent_Declare(latedep GIT_REPOSITORY "'// &
+        join_path(scratch, 'late-dependency')//'" GIT_TAG '//trim(tag)// &
+        ' SOURCE_SUBDIR populate-only)'//nl//'FetchContent_MakeAvailable(latedep)'//nl// &
         'target_include_directories(app.x PRIVATE "${latedep_SOURCE_DIR}")'//nl)
     call write_text(project//'/app.f90', 'program app'//nl// &
         '    use hook_dep_mod, only: dep_answer'//nl//'    implicit none'//nl// &
@@ -499,7 +509,11 @@ program test_hook_precommit
         '    if (dep_answer /= 7 .or. header_answer /= 9 .or. late_answer /= 3) stop 1'//nl// &
         'end program app'//nl)
     call git([character(len=64) :: 'add', 'CMakeLists.txt', 'app.f90'])
-    call hook()
+    call git([character(len=64) :: 'rev-parse', '--absolute-git-dir'])
+    environment = string_list_t()
+    call list_add(environment, 'GIT_DIR='//trim(result%stdout))
+    call list_add(environment, 'GIT_INDEX_FILE='//trim(result%stdout)//'/index')
+    call hook(environment)
     call assert_process_ok(result, 'dependency declared after the reused build is fetched')
     call assert_contains(result%stdout, '"fast_passed":1', 'late dependency test ran')
     project = join_path(scratch, 'fetch-clone')

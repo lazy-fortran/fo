@@ -16,6 +16,7 @@ module fo_hook
     use fo_test_results, only: test_result_entry_t, parse_test_results
     use fo_fmt, only: fmt_sources, FMT_SELECT_FILES, fmt_check_lines, fmt_diff_lines
     use fo_process, only: process_run_argv_logged, argv_push, process_self_executable, &
+        process_setenv_default, &
         process_getpid, process_exit, process_has_fortran_source_ext, TIMEOUT_WALL
     use fo_fs, only: fs_mkdir_excl, fs_remove_tree, fs_canonical_path, fs_sleep_ms
     use fo_util, only: make_tmpfile, delete_tmpfile, read_text_file_alloc, &
@@ -36,6 +37,10 @@ module fo_hook
             character(kind=c_char), intent(in) :: root(*), view(*), reuse(*)
             integer(c_int), value :: cap
         end function c_prepare
+        integer(c_int) function c_unsetenv(name) bind(C, name='fo_c_unsetenv')
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: name(*)
+        end function c_unsetenv
     end interface
 contains
     subroutine hook_cli()
@@ -403,6 +408,10 @@ contains
                     message = 'cannot prepare private build/dependency view'
                     exit
                 end if
+                ! The backend parsed the earlier CMake arguments; take the new roots.
+                backend = detect_backend(snapshot, authority_dir=root)
+                backend%cmake%build_root = 'build'
+                backend%cmake%build_root_hint = .true.
             end do
             if (status /= 0) then
                 if (status == 124) message = &
@@ -653,41 +662,71 @@ contains
         type(backend_t) :: backend
         character(len=1024) :: log_file
         character(len=:), allocatable :: text, names
-        integer :: exitcode, status, length
+        integer :: exitcode, status, length, i
+        character(len=*), parameter :: git_context(*) = [character(len=34) :: &
+            'GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_COMMON_DIR', &
+            'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_PREFIX', &
+            'GIT_ALLOW_PROTOCOL', 'FO_CMAKE_ARGS']
+        type :: saved_value_t
+            character(len=:), allocatable :: text
+        end type saved_value_t
+        type(saved_value_t) :: saved(size(git_context))
+        logical :: kept(size(git_context))
 
         message = ''
         build_dir = ''
         found = .false.
-        backend = detect_backend(root, authority_dir=root)
-        if (backend%kind /= BACKEND_CMAKE) return
-        call get_environment_variable('FO_CMAKE_BUILD_DIR', length=length, status=status)
-        if (status /= 0 .or. length == 0) then
-            backend%cmake%build_root = 'build'
-            backend%cmake%build_root_hint = .true.
-        end if
-        if (present(refresh)) then
-            write (error_unit, '(a)') 'fo hook: the reused CMake build lacks a '// &
-                'dependency of this commit; configuring this checkout to fetch it'
-        else
-            write (error_unit, '(a)') 'fo hook: no configured CMake build; configuring '// &
-                'this checkout once to fetch its dependencies'
-        end if
-        call make_tmpfile('fo-hook-populate', log_file)
-        call cmake_configure(backend%cmake, '', trim(log_file), exitcode)
-        if (exitcode == 0) then
+        ! `git commit` exports its repository and index to the hook, and the
+        ! staged view restricts Git to file transport and CMake to offline
+        ! arguments. This online configure, including backend detection, must
+        ! see none of them; the hook needs them back afterwards.
+        do i = 1, size(git_context)
+            call get_environment_variable(trim(git_context(i)), length=length, &
+                status=status)
+            kept(i) = status == 0
+            if (.not. kept(i)) cycle
+            allocate(character(len=length) :: saved(i)%text)
+            if (length > 0) call get_environment_variable(trim(git_context(i)), &
+                saved(i)%text)
+            status = c_unsetenv(trim(git_context(i))//c_null_char)
+        end do
+        call populate()
+        do i = 1, size(git_context)
+            if (kept(i)) call process_setenv_default(trim(git_context(i)), saved(i)%text)
+        end do
+    contains
+        subroutine populate()
+            backend = detect_backend(root, authority_dir=root)
+            if (backend%kind /= BACKEND_CMAKE) return
+            call get_environment_variable('FO_CMAKE_BUILD_DIR', length=length, status=status)
+            if (status /= 0 .or. length == 0) then
+                backend%cmake%build_root = 'build'
+                backend%cmake%build_root_hint = .true.
+            end if
+            if (present(refresh)) then
+                write (error_unit, '(a)') 'fo hook: the reused CMake build lacks a '// &
+                    'dependency of this commit; configuring this checkout to fetch it'
+            else
+                write (error_unit, '(a)') 'fo hook: no configured CMake build; configuring '// &
+                    'this checkout once to fetch its dependencies'
+            end if
+            call make_tmpfile('fo-hook-populate', log_file)
+            call cmake_configure(backend%cmake, '', trim(log_file), exitcode)
+            if (exitcode == 0) then
+                call delete_tmpfile(trim(log_file))
+                call hook_cmake_build_dir(root, build_dir, found)
+                if (.not. found) message = 'CMake configured this checkout, but fo finds '// &
+                    'no build directory to reuse; set FO_CMAKE_BUILD_DIR to it'
+                return
+            end if
+            call read_text_file_alloc(trim(log_file), text, status)
             call delete_tmpfile(trim(log_file))
-            call hook_cmake_build_dir(root, build_dir, found)
-            if (.not. found) message = 'CMake configured this checkout, but fo finds '// &
-                'no build directory to reuse; set FO_CMAKE_BUILD_DIR to it'
-            return
-        end if
-        call read_text_file_alloc(trim(log_file), text, status)
-        call delete_tmpfile(trim(log_file))
-        if (status /= 0) text = ''
-        names = dependency_names(text)
-        message = 'cannot fetch the CMake dependencies of this checkout'
-        if (len(names) > 0) message = message//'; missing dependency: '//names
-        message = message//new_line('a')//trim(configure_error_excerpt(text))
+            if (status /= 0) text = ''
+            names = dependency_names(text)
+            message = 'cannot fetch the CMake dependencies of this checkout'
+            if (len(names) > 0) message = message//'; missing dependency: '//names
+            message = message//new_line('a')//trim(configure_error_excerpt(text))
+        end subroutine populate
     end subroutine populate_cmake_dependencies
 
     function dependency_names(text) result(names)
