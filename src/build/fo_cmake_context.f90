@@ -40,6 +40,10 @@ module fo_cmake_context
     public :: cmake_context_init, cmake_context_query, cmake_context_read_reply
     public :: cmake_context_build_path, cmake_context_validate_hint
     public :: cmake_context_read_file, cmake_context_adopt_query
+    !! View-local build directory of a generation captured from a build tree
+    !! outside its project.
+    character(len=*), parameter, public :: CMAKE_EXTERNAL_BUILD_DIR = &
+        'build/fo-external'
 
 contains
 
@@ -95,6 +99,9 @@ contains
         if (present(test_preset)) context%test_preset = trim(test_preset)
         if (.not. present(test_preset)) call env_value( &
             'FO_CMAKE_TEST_PRESET', context%test_preset)
+        if (.not. present(build_root) .and. context%build_root(1:1) == '/' .and. &
+            len_trim(context%configure_preset) == 0) &
+            call adopt_generation_build(context)
         context%reported_generator = ''
         call system_clock(count=clock_tick)
         write (token_text, '(i0)') clock_tick
@@ -398,6 +405,22 @@ contains
         close (unit)
         if (ios /= 0) deallocate (text)
     end subroutine cmake_context_read_file
+
+    subroutine adopt_generation_build(context)
+        !! A frozen generation view builds in the directory its capture
+        !! recorded, never in the caller's absolute tree it was captured from.
+        type(cmake_context_t), intent(inout) :: context
+        character(:), allocatable :: recorded
+        integer :: line_end
+
+        call cmake_context_read_file(context%source_root// &
+            '/.fo-cmake/build-directory.txt', recorded)
+        if (.not. allocated(recorded)) return
+        line_end = index(recorded, new_line('a'))
+        if (line_end > 0) recorded = recorded(:line_end - 1)
+        if (len_trim(recorded) == 0) return
+        context%build_root = trim(recorded)
+    end subroutine adopt_generation_build
 
     subroutine env_value(name, value)
         character(len=*), intent(in) :: name

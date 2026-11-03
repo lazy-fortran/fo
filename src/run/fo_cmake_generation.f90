@@ -3,7 +3,7 @@ module fo_cmake_generation
     !! and registered-test semantics; no FPM manifest or source scanner is used.
     use fo_build_backend, only: backend_t, cmake_configure
     use fo_cmake_context, only: cmake_context_build_path, cmake_context_t, &
-        cmake_context_read_reply, cmake_context_init
+        cmake_context_read_reply, cmake_context_init, CMAKE_EXTERNAL_BUILD_DIR
     use fo_cmake_native_config, only: native_cmake_selected, native_cmake_configure
     use fo_cmake_native_model, only: cm_plan_t
     use fo_cmake_native_snapshot, only: native_snapshot_write
@@ -65,6 +65,7 @@ contains
         logical :: exists, source_key, provider, physical
         logical :: reuse, library_hint
         character(len=PATH_LEN) :: project_path, build_path, fetchcontent_base
+        character(:), allocatable :: recorded_build
 
         ierr = 1
         message = ''
@@ -76,8 +77,10 @@ contains
             message = backend%cmake%error
             return
         end if
-        if (backend%cmake%build_root(1:1) == '/') then
-            message = 'resident CMake requires a relocatable build directory'
+        if (backend%cmake%build_root(1:1) == '/' .and. &
+            len_trim(backend%cmake%configure_preset) > 0) then
+            ! The preset, not the generation, chooses its binaryDir.
+            message = 'resident CMake requires a relocatable preset build directory'
             return
         end if
         reuse = .false.
@@ -96,11 +99,6 @@ contains
             end if
             call delete_tmpfile(log_file)
         end if
-        if (backend%cmake%build_root(1:1) == '/') then
-            ierr = 1
-            message = 'resident CMake requires a relocatable build directory'
-            return
-        end if
         call read_text_file_alloc(cmake_context_build_path(backend%cmake)// &
             '/CMakeCache.txt', cache_text, ierr)
         if (ierr /= 0 .or. len_trim(cache_text) == 0) then
@@ -115,6 +113,9 @@ contains
             return
         end if
         call canonical_directory(cmake_context_build_path(backend%cmake), build_path)
+        call generation_build_directory(backend%cmake%build_root, trim(project_path), &
+            trim(build_path), recorded_build, ierr, message)
+        if (ierr /= 0) return
         fetchcontent_base = trim(build_path)//'/_deps'
         n_roots = 0
         roots = ''
@@ -315,8 +316,7 @@ contains
         end if
         call fs_write_text(trim(metadata_dir)//'/cache.cmake', script)
         call fs_write_text(trim(metadata_dir)//'/generator.txt', generator)
-        call fs_write_text(trim(metadata_dir)//'/build-directory.txt', &
-            backend%cmake%build_root)
+        call fs_write_text(trim(metadata_dir)//'/build-directory.txt', recorded_build)
         call input_inventory_discover_cmake(backend%project_dir, roots(:n_roots), &
             bundles(:n_roots), labels(:n_roots), trim(metadata_dir), inventory, &
             ierr, message, freeze_inputs=.true.)
@@ -1735,6 +1735,31 @@ contains
         call fs_realpath(path, normalized, ok)
         if (.not. ok) call normalize_path(path, normalized)
     end subroutine canonical_directory
+
+    subroutine generation_build_directory(build_root, project, build, recorded, &
+            ierr, message)
+        !! The project-relative build directory of a frozen generation view.
+        !! Its cache script names the build tree only as ${CMAKE_BINARY_DIR},
+        !! so an absolute caller tree maps to a view-local directory; the view
+        !! must never configure into the caller's tree.
+        character(len=*), intent(in) :: build_root, project, build
+        character(:), allocatable, intent(out) :: recorded
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+
+        ierr = 0
+        message = ''
+        recorded = trim(build_root)
+        if (.not. fs_path_is_absolute(recorded)) return
+        if (build == project) then
+            ierr = 1
+            message = 'resident CMake requires an out-of-source build directory'
+        else if (inside(build, project)) then
+            recorded = build(len(project) + 2:)
+        else
+            recorded = CMAKE_EXTERNAL_BUILD_DIR
+        end if
+    end subroutine generation_build_directory
 
     logical function inside(path, root) result(matches)
         character(len=*), intent(in) :: path, root
