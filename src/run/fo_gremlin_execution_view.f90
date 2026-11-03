@@ -2,7 +2,7 @@ module fo_gremlin_execution_view
     !! Private per-invocation working directories over frozen Gremlin inputs.
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
     use fo_fs, only: fs_collect_files, fs_copy_exec, fs_make_dir, &
-        fs_mkdir_excl, fs_remove_tree, fs_rename, fs_write_text
+        fs_mkdir_excl, fs_remove_tree, fs_rename, fs_write_text, fs_remove_file
     use fo_input_inventory, only: input_inventory_t, INPUT_FILE, &
         INPUT_DIRECTORY, safe_relative_path
     use fo_process, only: process_getpid
@@ -28,7 +28,7 @@ module fo_gremlin_execution_view
     end type execution_view_t
 
     public :: execution_view_create, execution_view_release
-    public :: execution_view_copy_app_outputs
+    public :: execution_view_copy_app_outputs, execution_view_update
 
     interface
         integer(c_int) function scratch_create(view, parent, output, capacity) &
@@ -420,6 +420,56 @@ contains
         ierr = 0
         message = trim(view%diagnostic)
     end subroutine execution_view_create
+
+    subroutine execution_view_update(view, previous, inventory, bundle, generation, &
+            ierr, message)
+        !! Only the idle build slot may be updated; unchanged files keep mtimes.
+        type(execution_view_t), intent(inout) :: view
+        type(input_inventory_t), intent(in) :: previous, inventory
+        character(len=*), intent(in) :: bundle, generation
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+        character(len=PATH_LEN) :: relative, source, destination
+        integer :: i, j, root_index, rc
+
+        ierr = 1
+        message = 'incompatible incremental build inventory'
+        if (previous%entry_count /= inventory%entry_count) return
+        do i = 1, inventory%entry_count
+            associate (old => previous%entries(i), entry => inventory%entries(i))
+                if (old%root_alias /= entry%root_alias .or. &
+                    old%relative_path /= entry%relative_path .or. &
+                    old%kind /= entry%kind) return
+                if (entry%kind /= INPUT_FILE) cycle
+                if (old%content_digest == entry%content_digest .and. &
+                    old%mode == entry%mode) cycle
+                root_index = find_root(inventory, entry%root_alias)
+                if (root_index == 0) return
+                do j = 1, inventory%roots(root_index)%alias_count
+                    if (any(inventory%roots(root_index)%bundle_paths(:j - 1) == &
+                        inventory%roots(root_index)%bundle_paths(j))) cycle
+                    relative = trim(inventory%roots(root_index)%bundle_paths(j))// &
+                        '/'//trim(entry%relative_path)
+                    source = trim(bundle)//'/'//trim(relative)
+                    destination = trim(view%root)//'/'//trim(relative)
+                    ! Replace from the frozen bundle, never the live checkout.
+                    call fs_remove_file(trim(destination))
+                    rc = copy_declared_file(trim(source)//c_null_char, &
+                        trim(destination)//c_null_char, 1_c_int)
+                    if (rc == 0) rc = restore_private_mode( &
+                        trim(destination)//c_null_char, int(entry%mode, c_int))
+                    if (rc /= 0) then
+                        message = 'cannot update idle build input: '//trim(relative)
+                        return
+                    end if
+                end do
+            end associate
+        end do
+        view%generation_id = generation
+        view%inventory_digest = inventory%digest
+        view%active = .true.
+        call create_private_scratch(view, ierr, message)
+    end subroutine execution_view_update
 
     subroutine publish_execution_view(view, parent, published, ierr, message)
         type(execution_view_t), intent(inout) :: view

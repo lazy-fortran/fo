@@ -215,6 +215,21 @@ but does not replace CMake's target model.
 
 ## Gremlin tuning
 
+Gremlin keeps two private build slots for each running lane. The first
+successful generation warms both fixed paths; CMake embeds absolute paths in
+its generated rules, so a configured build tree is not relocated between slots.
+Later generations synchronize changed captured inputs into the idle slot and
+preserve unchanged files and their modification times. Tests keep using the
+active slot while the candidate builds. Only a successful build switches the
+active slot, after stopping the previous generation's cases. A source-only
+generation reuses its slot's configuration; CMake's build rules still own
+regeneration dependencies. Configuration, toolchain or input-path changes
+conservatively replace the idle build tree. Slots are disposable when the owner
+stops; the caller's build tree is never a slot. Snapshot cleanup follows the
+cases, before publishing quiescence. Retention status bounds byte-count walks
+and marks incomplete estimates with `bytes_exact: false` or
+`view_bytes_exact: false`.
+
 `FO_GREMLIN_RECEIPT_LIMIT` sets how many campaign receipts a lane retains in
 its journal tail. It is clamped to 16 through 512, the default. PASS reuse does
 not depend on it: a per-case index keeps the latest reusable PASS of every case.
@@ -281,8 +296,9 @@ fo test --list [--json] [same selection]
   (repeatable) builds only what the named cases need; `-L`, `-LE` and
   `--layer` build the plan targets of that `fo test` selection (CMake; fpm
   builds every test program).
-  Gremlin builds each generation once this way (a campaign with explicit
-  targets and no random cases, and `reproduce`, pass their cases); its case runs and `reproduce`
+  After warming both slots, Gremlin builds each generation once this way
+  (a campaign with explicit targets and no random cases, and `reproduce`, pass
+  their cases); its case runs and `reproduce`
   use `fo test --no-build` on that build, and a failed build is reported once
   for the generation without running any case.
 - A Gremlin lane takes `-L/--label RE`, `-LE/--exclude-label RE` and

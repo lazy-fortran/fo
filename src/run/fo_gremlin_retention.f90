@@ -15,7 +15,7 @@ module fo_gremlin_retention
                 bind(C, name='fo_c_gremlin_retention')
             import :: c_char, c_int, c_long_long
             character(kind=c_char), intent(in) :: generation_root(*), views_dir(*)
-            integer(c_long_long), intent(out) :: out(7)
+            integer(c_long_long), intent(out) :: out(8)
         end function c_retention
         integer(c_int) function c_trim(generation_root, state_dir, limit, &
                 period, min_age) bind(C, name='fo_c_gremlin_trim')
@@ -51,11 +51,11 @@ contains
 
     function gremlin_retention_json(generation_root, views_dir) result(json)
         !! `{"generations":N,"bytes":B,"pinned":P,"owners":O,"views":V,
-        !! "view_bytes":VB,"view_bytes_exact":true}`; zeros when the paths do
-        !! not exist yet. generation_root is any published generation's root.
+        !! "view_bytes":VB,"view_bytes_exact":true,"bytes_exact":true}`; zeros
+        !! when the paths do not exist yet. generation_root is any published generation's root.
         character(len=*), intent(in) :: generation_root, views_dir
         character(len=:), allocatable :: json
-        integer(c_long_long) :: v(7)
+        integer(c_long_long) :: v(8)
         integer(c_int) :: rc
 
         rc = c_retention(trim(generation_root)//c_null_char, &
@@ -66,6 +66,12 @@ contains
             ',"views":'//num(v(5))//',"view_bytes":'//num(v(6))// &
             ',"view_bytes_exact":'
         if (v(7) /= 0_c_long_long) then
+            json = json//'true'
+        else
+            json = json//'false'
+        end if
+        json = json//',"bytes_exact":'
+        if (v(8) /= 0_c_long_long) then
             json = json//'true}'
         else
             json = json//'false}'

@@ -64,17 +64,18 @@ static long long walk_bytes(const char *path, long *budget) {
     return total;
 }
 
-static long long generation_bytes(const char *base, const char *id) {
+static long long generation_bytes(const char *base, const char *id,
+                                  long *budget, long long *exact) {
     char root[PATH_MAX];
-    long budget = 10000000;
     long long bytes;
     int i;
     for (i = 0; i < memo_count; ++i)
         if (strcmp(memo[i].id, id) == 0) return memo[i].bytes;
     if (snprintf(root, sizeof(root), "%s/%s", base, id) >= (int)sizeof(root))
         return 0;
-    bytes = walk_bytes(root, &budget);
-    if (budget > 0 && memo_count < RETENTION_MEMO) {
+    bytes = walk_bytes(root, budget);
+    if (*budget <= 0) *exact = 0;
+    if (*budget > 0 && memo_count < RETENTION_MEMO) {
         strncpy(memo[memo_count].id, id, sizeof(memo[0].id) - 1);
         memo[memo_count].id[sizeof(memo[0].id) - 1] = '\0';
         memo[memo_count].bytes = bytes;
@@ -112,17 +113,18 @@ static int has_owner(const char *sidecar) {
 }
 
 /* out: generations, generation bytes, pinned, owned, views, view bytes,
- * views_exact (1 when the view walk finished inside its budget). */
+ * views_exact, generation_bytes_exact (1 when each byte walk finished). */
 int fo_c_gremlin_retention(const char *generation_root, const char *views_dir,
                            long long *out) {
     char base[PATH_MAX], state[PATH_MAX];
     const char *slash;
     DIR *dir;
     struct dirent *entry;
-    long budget = 200000;
+    /* Status is frequent; large views report a bounded lower estimate. */
+    long budget = 2048, generation_budget = 2048;
     int i;
-    for (i = 0; i < 7; ++i) out[i] = 0;
-    out[6] = 1;
+    for (i = 0; i < 8; ++i) out[i] = 0;
+    out[6] = out[7] = 1;
     if (generation_root != NULL && generation_root[0] == '/' &&
         (slash = strrchr(generation_root, '/')) != NULL && slash != generation_root &&
         (size_t)(slash - generation_root) < sizeof(base)) {
@@ -140,7 +142,7 @@ int fo_c_gremlin_retention(const char *generation_root, const char *views_dir,
                              entry->d_name) >= (int)sizeof(marker)) continue;
                 if (lstat(marker, &st) != 0 || !S_ISDIR(st.st_mode)) continue;
                 ++out[0];
-                out[1] += generation_bytes(base, entry->d_name);
+                out[1] += generation_bytes(base, entry->d_name, &generation_budget, &out[7]);
                 if (snprintf(marker, sizeof(marker), "%s/pinned", sidecar) <
                         (int)sizeof(marker) && lstat(marker, &st) == 0) ++out[2];
                 if (has_owner(sidecar)) ++out[3];

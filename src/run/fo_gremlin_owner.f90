@@ -6,7 +6,7 @@ module fo_gremlin_owner
     !! run_owner is its event loop over the build child, the case children
     !! and the input watcher.
     use, intrinsic :: iso_fortran_env, only: int64, error_unit
-    use fo_cache, only: HASH_LEN, cache_store_root
+    use fo_cache, only: HASH_LEN, cache_store_root, cache_digest
     use fo_change_watch, only: change_watch_t, change_watch_init, change_watch_poll, &
         change_watch_close
     use fo_driver, only: driver_pin_t, driver_pin_current
@@ -25,8 +25,9 @@ module fo_gremlin_owner
         COVERAGE_OK, COVERAGE_NOT_FOUND
     use fo_gremlin_coverage_view, only: gremlin_coverage_view_t
     use fo_gremlin_execution_view, only: execution_view_t, execution_view_create, &
-        execution_view_release
-    use fo_gremlin_generation, only: generation_t
+        execution_view_release, execution_view_update
+    use fo_gremlin_generation, only: generation_t, generation_model_key
+    use fo_input_inventory, only: input_inventory_t
     use fo_gremlin_journal, only: JOURNAL_OK
     use fo_gremlin_lifecycle, only: gremlin_freshness_update, &
         gremlin_lifecycle_event_t, gremlin_lifecycle_append, &
@@ -102,6 +103,11 @@ module fo_gremlin_owner
         integer :: lane_jobs = 1
         !! In-flight children.
         type(child_t) :: build
+        type(execution_view_t) :: build_slots(2)
+        type(input_inventory_t) :: slot_inputs(2)
+        character(len=64) :: slot_keys(2) = ''
+        logical :: slot_ready(2) = .false.
+        integer :: active_slot = 0, building_slot = 0
         type(child_t) :: tests(GREMLIN_MAX_LANE_JOBS)
         !! Campaign cursor: the selection, its position, seed and number, the
         !! completed cases and the receipt sequence of this owner.
@@ -401,8 +407,9 @@ contains
         integer, intent(out) :: ierr
         character(len=PATH_LEN) :: log_file, detail
         character(len=:), allocatable :: packed, env
-        integer :: n_args, status
-        logical :: exists
+        integer :: n_args, status, slot
+        character(len=64) :: key, key_parts(2)
+        logical :: exists, reuse
 
         o%build = child_t()
         ierr = 1
@@ -416,16 +423,41 @@ contains
             return
         end if
         o%candidate%build_project_root = ''
-        call execution_view_create(o%session%state_dir//'/views', &
-            o%candidate%identity, o%session%session_id//'-build', 'build', &
-            o%candidate%input_inventory, o%candidate%input_inventory_ready, &
-            o%candidate%input_inventory_complete, o%build%execution_view, ierr, &
-            o%message, candidate_bundle_root=trim(o%candidate%root)//'/bundle')
+        slot = 3 - o%active_slot
+        if (o%active_slot == 0) then
+            slot = 1
+            if (o%slot_ready(1)) slot = 2
+        end if
+        o%building_slot = slot
+        key_parts(1) = generation_model_key(o%candidate%input_inventory, &
+            o%candidate%driver_digest, .false.)
+        key_parts(2) = o%candidate%toolchain_key
+        key = cache_digest(key_parts, 2)
+        reuse = o%slot_ready(slot) .and. o%slot_keys(slot) == key
+        if (reuse) then
+            o%build%execution_view = o%build_slots(slot)
+            call execution_view_update(o%build%execution_view, o%slot_inputs(slot), &
+                o%candidate%input_inventory, trim(o%candidate%root)//'/bundle', &
+                o%candidate%identity, ierr, o%message)
+        else
+            if (len_trim(o%build_slots(slot)%root) > 0) &
+                call fs_remove_tree(trim(o%build_slots(slot)%root))
+            call execution_view_create(o%session%state_dir//'/views', &
+                o%candidate%identity, o%session%session_id//'-build', 'build', &
+                o%candidate%input_inventory, o%candidate%input_inventory_ready, &
+                o%candidate%input_inventory_complete, o%build%execution_view, ierr, &
+                o%message, candidate_bundle_root=trim(o%candidate%root)//'/bundle')
+        end if
+        o%slot_ready(slot) = reuse
         if (ierr /= 0) then
+            o%slot_ready(slot) = .false.
             o%message = 'cannot create candidate build view: '//trim(o%message)
             return
         end if
         o%candidate%build_project_root = o%build%execution_view%cwd
+        o%build_slots(slot) = o%build%execution_view
+        o%slot_inputs(slot) = o%candidate%input_inventory
+        o%slot_keys(slot) = key
         call log_path(o%session, 'build-'//o%candidate%identity(1:16), log_file)
         if (o%request%random_count == 0) then
             call build_command(o%session%driver_path, o%build%execution_view, packed, &
@@ -434,6 +466,9 @@ contains
             call build_command(o%session%driver_path, o%build%execution_view, packed, &
                 n_args, env)
         end if
+        ! Fixed build slots let CMake own object freshness for either generator.
+        env = env//';FO_CMAKE_DELEGATE_BUILD=1'
+        if (reuse) env = env//';FO_GREMLIN_REUSE_CMAKE=1'
         ! A scoped lane builds the plan targets of its scope only.
         call push_scope_args(packed, n_args, o%request)
         call exec_start(o%build%job, trim(o%build%execution_view%cwd), packed, n_args, &
@@ -492,6 +527,7 @@ contains
             call fail(o, o%message)
             return
         end if
+        if (o%build%job%pid > 0) return
         if (build_exit == 0 .and. o%have_active .and. o%n_selected > 0) then
             o%number = o%number + 1
             o%index = 0
@@ -658,8 +694,8 @@ contains
                     o%message = 'cannot cancel superseded candidate build process'
                     return
                 end if
-                call execution_view_release(o%build%execution_view, .false., status, &
-                    detail)
+                call execution_view_release(o%build%execution_view, &
+                    o%slot_ready(o%building_slot), status, detail)
             end if
             call release_generation_lease(o%candidate_lease, o%have_candidate_lease, &
                 ierr, o%message)
@@ -755,7 +791,7 @@ contains
                 trim(o%candidate%identity), trim(o%session%session_id), &
                 trim(o%build%execution_view%root))
             if (o%build%execution_view%active) call execution_view_release( &
-                o%build%execution_view, .false., status, detail)
+                o%build%execution_view, o%slot_ready(o%building_slot), status, detail)
             o%candidate%build_project_root = ''
             o%last_failed = o%candidate%identity
             o%state = 'build_failed'
@@ -773,6 +809,14 @@ contains
         call execution_view_release(o%build%execution_view, .true., ierr, detail)
         if (ierr /= 0) then
             o%message = 'cannot release completed build scratch: '//trim(detail)
+            return
+        end if
+        o%build_slots(o%building_slot) = o%build%execution_view
+        o%slot_ready(o%building_slot) = .true.
+        ! Warm both fixed paths before admitting edits. CMake trees cannot be
+        ! relocated safely: compiler commands and generated rules embed paths.
+        if (.not. was_active .and. o%building_slot == 1) then
+            call start_build(o, ierr)
             return
         end if
         if (allocated(o%request%impact_cases)) deallocate (o%request%impact_cases)
@@ -823,8 +867,7 @@ contains
         o%active_lease = new_lease
         o%have_active_lease = .true.
         o%candidate%build_project_root = o%build%execution_view%cwd
-        if (was_active .and. len_trim(o%active%build_project_root) > 0) &
-            call fs_remove_tree(trim(o%active%build_project_root))
+        o%active_slot = o%building_slot
         o%request%has_previous_generation = was_active
         o%request%requirement_digest = ''
         o%request%gate_cases = ''
@@ -877,11 +920,6 @@ contains
         if (ierr /= 0) return
         call publish(o, o%state, current_case(o), 'NONE', 0, ierr, o%message, &
             diagnostic=trim(idle_note))
-        if (ierr == 0 .and. was_active) then
-            call gremlin_generation_prune_inactive(o%active%root, status, detail)
-            if (status /= 0) write (error_unit, '(a)') &
-                'Gremlin generation cleanup: '//trim(detail)
-        end if
     end subroutine complete_build
 
     subroutine idle_state(o, ierr, note)
@@ -1274,10 +1312,14 @@ contains
         end if
         ! Finish potentially slow filesystem work before exposing stopped or
         ! releasing the owner; observers use that terminal state as a barrier.
-        if (len_trim(o%active%build_project_root) > 0) then
-            call fs_remove_tree(trim(o%active%build_project_root))
-            o%active%build_project_root = ''
-        end if
+        block
+            integer :: slot
+            do slot = 1, 2
+                if (len_trim(o%build_slots(slot)%root) > 0) &
+                    call fs_remove_tree(trim(o%build_slots(slot)%root))
+            end do
+        end block
+        o%active%build_project_root = ''
         call maintain_fo_cache(o%cache_cursor, status)
         if (status /= 0) write (error_unit, '(a,i0)') &
             'Gremlin cache maintenance at stop: ', status
@@ -1421,6 +1463,11 @@ contains
         ! Quiescence is write-free once its lifecycle/state becomes visible.
         if (status == 0 .and. state == 'quiescent') then
             if (readiness%local_gate_green) call publish_hook_receipt(o%session, o%active)
+            ! Cleanup follows the cases so it cannot delay the first dispatch.
+            call gremlin_generation_prune_inactive(retention_root, status, local_message)
+            if (status /= 0) write (error_unit, '(a)') &
+                'Gremlin generation cleanup: '//trim(local_message)
+            status = 0
             trimmed = gremlin_trim_cache(retention_root, o%session%state_dir)
             if (trimmed < 0) write(error_unit, '(a,i0)') &
                 'Gremlin retained-view eviction: ', trimmed
