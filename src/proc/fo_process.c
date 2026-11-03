@@ -2062,6 +2062,32 @@ static int register_async_session(struct async_process *item) {
 }
 
 #if defined(__APPLE__) || defined(__linux__)
+/* A long build spawns far more short-lived descendants than the member cap;
+   an exited member has nothing left to signal or reap, so it frees its slot. */
+static size_t prune_exited_members(struct async_process *item) {
+    struct owned_process_identity **link = &item->members, *member;
+    size_t kept = 0;
+    while ((member = *link) != NULL) {
+        char member_start[64], path[PATH_MAX];
+        if (fo_sys_process_start(member->pid) == member->start) {
+            kept++;
+            link = &member->next;
+            continue;
+        }
+        if (item->registry_dir[0] != '\0' &&
+            fo_sys_identity_text(member->start, member_start,
+                                 sizeof(member_start)) == 0 &&
+            snprintf(path, sizeof(path), "%s/%ld-%s--member-%ld-%s.member",
+                     item->registry_dir, (long)item->pid,
+                     item->start_identity_text, (long)member->pid,
+                     member_start) < (int)sizeof(path))
+            (void)unlink(path);
+        *link = member->next;
+        free(member);
+    }
+    return kept;
+}
+
 static int register_async_descendants(struct async_process *item,
                                                int force) {
     struct owned_process_record *records = NULL;
@@ -2090,6 +2116,7 @@ static int register_async_descendants(struct async_process *item,
             member_count++;
         }
         if (member == NULL) {
+            if (member_count == 4096) member_count = prune_exited_members(item);
             if (member_count == 4096) { e = EOVERFLOW; break; }
             member = calloc(1, sizeof(*member));
             if (member == NULL) { e = ENOMEM; break; }
@@ -2574,6 +2601,16 @@ read_registry:
            finished; it leaves nothing to recover. */
         if (e == ENOENT) { e = 0; continue; }
         if (e != 0) break;
+        /* So does a recorded member that has exited; without dropping it, a
+           long build's records exceed the cap and the scope never drains. */
+        if (items[count].is_member &&
+            fo_sys_process_start(items[count].pid) != items[count].identity) {
+            if (unlink(items[count].path) != 0 && errno != ENOENT) {
+                e = errno;
+                break;
+            }
+            continue;
+        }
         count++;
     }
     if (closedir(directory) != 0 && e == 0) e = errno;

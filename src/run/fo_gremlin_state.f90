@@ -49,7 +49,7 @@ module fo_gremlin_state
     public :: gremlin_session_recovery_complete
     public :: gremlin_session_request_stop, gremlin_session_stop_requested
     public :: gremlin_session_process_matches, gremlin_client_identity
-    public :: gremlin_session_bind_task
+    public :: gremlin_session_bind_task, gremlin_owner_trap_term
     public :: gremlin_lease_acquire, gremlin_lease_release
     public :: gremlin_host_lease_acquire_weighted, gremlin_host_lease_release
     public :: gremlin_generation_register_lease_at
@@ -136,6 +136,12 @@ module fo_gremlin_state
             integer(c_int), value :: lockfd
             integer(c_int) :: requested
         end function c_session_stop_requested
+
+        function c_owner_trap_term() bind(C, name='fo_gremlin_owner_trap_term') &
+                result(ierr)
+            import :: c_int
+            integer(c_int) :: ierr
+        end function c_owner_trap_term
 
         function c_session_bind_task(dir, pid, start) &
                 bind(C, name='fo_gremlin_session_bind_task') result(ierr)
@@ -506,6 +512,13 @@ contains
             int(pid, c_int), trim(start)//c_null_char))
         message = error_text(ierr)
     end subroutine gremlin_session_bind_task
+
+    subroutine gremlin_owner_trap_term(ierr)
+        !! Turn TERM into a stop request of this lane owner.
+        integer, intent(out) :: ierr
+
+        ierr = int(c_owner_trap_term())
+    end subroutine gremlin_owner_trap_term
 
     logical function gremlin_session_process_matches(session)
         type(gremlin_session_t), intent(in) :: session

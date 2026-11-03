@@ -52,6 +52,9 @@ static int base_path(char *out, size_t cap, int create_dirs) {
     return create_dirs ? fo_sys_mkdirs(out, 0700) : 0;
 }
 
+int fo_gremlin_project_identity(const char *project, char *resolved,
+                                int allow_vanished);
+
 static int paths(const char *project, const char *lane, const char *session,
                  char *canonical, size_t canonical_cap,
                  char *terminal_parent, size_t terminal_parent_cap,
@@ -63,7 +66,8 @@ static int paths(const char *project, const char *lane, const char *session,
     int e;
     if (!project || !*project || !lane || !*lane || !safe_session_id(session))
         return EINVAL;
-    if (!realpath(project, resolved)) return errno;
+    e = fo_gremlin_project_identity(project, resolved, 1);
+    if (e) return e;
     if (strlen(resolved) + 1 > canonical_cap) return ENAMETOOLONG;
     strcpy(canonical, resolved);
     hp = fo_fnv1a_text(FO_FNV1A_SEED, resolved);

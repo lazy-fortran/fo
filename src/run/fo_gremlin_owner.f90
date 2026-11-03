@@ -48,7 +48,7 @@ module fo_gremlin_owner
     use fo_gremlin_state, only: gremlin_session_t, gremlin_lease_t, &
         gremlin_lease_group_t, gremlin_session_acquire, gremlin_session_publish, &
         gremlin_session_read, gremlin_session_release, gremlin_session_stop_requested, &
-        gremlin_session_bind_task, &
+        gremlin_session_bind_task, gremlin_owner_trap_term, &
         gremlin_lease_release, gremlin_generation_lease_acquire_at, &
         gremlin_generation_pin_at, gremlin_generation_prune_inactive, &
         GREMLIN_STATE_TEXT_MAX
@@ -140,6 +140,8 @@ contains
             call gremlin_session_stop_requested(o%session, o%stop_requested, ierr, &
                 o%message)
             if (ierr /= 0) call fail(o, o%message)
+            ! A deleted project has nothing left to watch or verify.
+            if (.not. o%stop_requested) o%stop_requested = .not. project_present(o)
             if (o%failed .or. o%stop_requested) exit
             call poll_build(o)
             if (.not. o%failed) call poll_cases(o)
@@ -153,6 +155,12 @@ contains
             call close_stopped(o, response, exitcode)
         end if
     end subroutine run_owner
+
+    logical function project_present(o)
+        type(owner_t), intent(in) :: o
+
+        inquire (file=o%project_dir//'/.', exist=project_present)
+    end function project_present
 
     subroutine fail(o, message)
         type(owner_t), intent(inout) :: o
@@ -203,6 +211,12 @@ contains
                 int_text(ierr))
             if (status /= 0) call refuse('cannot release owner after process '// &
                 'ownership setup failure: '//trim(detail))
+            return
+        end if
+        call gremlin_owner_trap_term(ierr)
+        if (ierr /= 0) then
+            call release_if_owner(o%session)
+            call refuse('cannot trap TERM as a stop request: '//int_text(ierr))
             return
         end if
         if (trim(request%lifetime) == 'task') then
