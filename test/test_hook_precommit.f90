@@ -9,6 +9,7 @@ program test_hook_precommit
     use fo_test_cli, only: resolve_driver, run_fo, run_external
     use fo_project_model, only: project_model_t, model_request_t, model_init, model_finalize
     use fo_hook_evidence, only: hook_prepared_key
+    use fx_string, only: strip
     use, intrinsic :: iso_fortran_env, only: int64
     implicit none
     character(len=*), parameter :: nl = new_line('a')
@@ -496,7 +497,7 @@ program test_hook_precommit
     call git([character(len=64) :: 'add', 'late.inc'])
     call git([character(len=64) :: 'commit', '-qm', 'Synthetic late dependency'])
     call git([character(len=64) :: 'rev-parse', 'HEAD'])
-    tag = trim(result%stdout)
+    tag = strip(result%stdout)
     project = join_path(scratch, 'fetch-linked')
     call write_text(project//'/CMakeLists.txt', read_text(project//'/CMakeLists.txt')// &
         'FetchContent_Declare(latedep GIT_REPOSITORY "'// &
@@ -511,8 +512,8 @@ program test_hook_precommit
     call git([character(len=64) :: 'add', 'CMakeLists.txt', 'app.f90'])
     call git([character(len=64) :: 'rev-parse', '--absolute-git-dir'])
     environment = string_list_t()
-    call list_add(environment, 'GIT_DIR='//trim(result%stdout))
-    call list_add(environment, 'GIT_INDEX_FILE='//trim(result%stdout)//'/index')
+    call list_add(environment, 'GIT_DIR='//strip(result%stdout))
+    call list_add(environment, 'GIT_INDEX_FILE='//strip(result%stdout)//'/index')
     call hook(environment)
     call assert_process_ok(result, 'dependency declared after the reused build is fetched')
     call assert_contains(result%stdout, '"fast_passed":1', 'late dependency test ran')
