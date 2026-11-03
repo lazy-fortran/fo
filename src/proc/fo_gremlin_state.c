@@ -74,6 +74,31 @@ static int cleanup_view_scratch(const char *state_dir) {
     return e;
 }
 
+/* The canonical project path that keys lane state. A deleted project keeps
+   its lane reachable (allow_vanished): its deepest existing ancestor is
+   resolved and the vanished components appended, the path realpath gave
+   while the project existed unless one of them was a link. */
+int fo_gremlin_project_identity(const char *project, char *resolved,
+                                int allow_vanished) {
+    char head[PATH_MAX];
+    if (realpath(project, resolved)) return 0;
+    if (errno != ENOENT || !allow_vanished) return errno;
+    if (strlen(project) >= sizeof(head)) return ENAMETOOLONG;
+    strcpy(head, project);
+    for (;;) {
+        char *slash = strrchr(head, '/');
+        if (!slash || slash == head) return ENOENT;
+        *slash = '\0';
+        if (realpath(head, resolved)) {
+            const char *rest = project + (slash - head);
+            if (strlen(resolved) + strlen(rest) >= PATH_MAX) return ENAMETOOLONG;
+            strcat(resolved, rest);
+            return 0;
+        }
+        if (errno != ENOENT) return errno;
+    }
+}
+
 static int state_path(const char *project, const char *lane, char *out,
                       size_t cap, char *canonical, size_t canonical_cap,
                       int create_dirs) {
@@ -91,7 +116,9 @@ static int state_path(const char *project, const char *lane, char *out,
             return ENAMETOOLONG;
         base = fallback;
     }
-    if (!realpath(project, resolved)) return errno;
+    /* Only an existing project starts a lane. */
+    int e = fo_gremlin_project_identity(project, resolved, !create_dirs);
+    if (e) return e;
     if (strlen(resolved) + 1 > canonical_cap) return ENAMETOOLONG;
     strcpy(canonical, resolved);
     uint64_t hp = fo_fnv1a_text(FO_FNV1A_SEED, resolved);
@@ -459,10 +486,33 @@ int fo_gremlin_session_request_stop(const char *project, const char *lane,
     return atomic_write_file(dir, "stop.request", session, strlen(session));
 }
 
+static volatile sig_atomic_t owner_terminated = 0;
+
+static void owner_terminate(int signal_number) {
+    (void)signal_number;
+    owner_terminated = 1;
+}
+
+/* TERM asks the lane owner to stop as `fo gremlin stop` does, so it cancels
+   and terminalizes its work; a second TERM ends it at once. */
+int fo_gremlin_owner_trap_term(void) {
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    return 0;
+#else
+    struct sigaction action;
+    memset(&action, 0, sizeof(action));
+    action.sa_handler = owner_terminate;
+    action.sa_flags = SA_RESETHAND | SA_RESTART;
+    sigemptyset(&action.sa_mask);
+    return sigaction(SIGTERM, &action, NULL) == 0 ? 0 : errno;
+#endif
+}
+
 int fo_gremlin_session_stop_requested(const char *dir, const char *session,
                                       int lockfd) {
     char path[PATH_MAX], value[128];
     struct stat gone, held;
+    if (owner_terminated) return 1;
     /* A lane whose state directory vanished has nothing left to own: its
        owner is asked to stop exactly as if a stop request had been written. */
     if (stat(dir, &gone) != 0 && errno == ENOENT) return 1;
@@ -817,6 +867,13 @@ static int admission_guard_close_fds(const int *fds, int weight, int ack, int ma
     return 0;
 }
 
+static volatile sig_atomic_t admission_guard_terminated = 0;
+
+static void admission_guard_terminate(int signal_number) {
+    (void)signal_number;
+    admission_guard_terminated = 1;
+}
+
 #endif
 static int admission_guard_start(const char *scope, const int *fds, int weight,
                                   int *guardian) {
@@ -857,8 +914,10 @@ static int admission_guard_start(const char *scope, const int *fds, int weight,
     }
     if (pid == 0) {
         /* Ordinary owner cancellation must drain payloads before dropping their
-           reservation. The guardian is capacity bookkeeping, not payload. */
-        signal(SIGTERM, SIG_IGN); signal(SIGINT, SIG_IGN); signal(SIGHUP, SIG_IGN);
+           reservation. The guardian is capacity bookkeeping, not payload, so
+           only an explicit TERM ends its wait early. */
+        signal(SIGTERM, admission_guard_terminate);
+        signal(SIGINT, SIG_IGN); signal(SIGHUP, SIG_IGN);
         signal(SIGPIPE, SIG_IGN);
         int detached = setsid() >= 0;
         int detach_error = detached ? 0 : errno;
@@ -879,9 +938,14 @@ static int admission_guard_start(const char *scope, const int *fds, int weight,
             if (marker >= 0) { close(marker); unlink(marker_path); }
             _exit(1);
         }
-        struct timespec pause = {0, 20000000};
+        struct timespec pause = {0, 20000000}, backoff = {1, 0};
         for (;;) {
             int alive = fo_gremlin_process_matches((int)owner, owner_start);
+            if (admission_guard_terminated) {
+                if (!alive && *state) (void)fo_c_recover_async_scope(state, (int)owner,
+                                                                    owner_start);
+                break;
+            }
             struct stat st;
             int observed = lstat(authority, &st);
             int observation_error = observed < 0 ? errno : 0;
@@ -915,7 +979,9 @@ static int admission_guard_start(const char *scope, const int *fds, int weight,
                 if (gate >= 0) { fo_sys_unlock(gate); }
                 if (!e) break;
             }
-            nanosleep(&pause, NULL);
+            /* A dead owner's undrained scope is rescanned slowly, not 50 times
+               a second for as long as the failure lasts. */
+            nanosleep(!alive && !payload_drained ? &backoff : &pause, NULL);
         }
         /* Closing copies preserves any other live holder's flock. */
         for (int i = 0; i < weight; ++i) close(fds[i]);
