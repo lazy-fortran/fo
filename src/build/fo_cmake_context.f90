@@ -82,6 +82,8 @@ contains
         if (present(generator)) context%generator = trim(generator)
         if (.not. present(generator)) call env_value('FO_CMAKE_GENERATOR', &
             context%generator)
+        if (len_trim(context%generator) == 0) &
+            call env_value('CMAKE_GENERATOR', context%generator)
         context%configuration = ''
         if (present(configuration)) context%configuration = trim(configuration)
         if (.not. present(configuration)) call env_value('FO_CMAKE_CONFIG', &
