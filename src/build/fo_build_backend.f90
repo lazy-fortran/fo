@@ -2,7 +2,7 @@ module fo_build_backend
     use, intrinsic :: iso_fortran_env, only: error_unit
     use fo_fs, only: fs_make_dir, fs_remove_tree, fs_mkdir_excl, fs_sleep_ms, &
         fs_pid_alive, fs_native_path, fs_is_windows, fs_realpath, &
-        fs_canonical_path, fs_path_is_absolute, fs_parent_path
+        fs_canonical_path, fs_path_is_absolute, fs_parent_path, fs_find_executable
     use fo_process, only: process_detect_nproc, process_getpid, &
         process_getcwd, process_run_argv_logged, argv_push
     use fo_gfortran_build, only: gfortran_build, gfortran_test, &
@@ -804,6 +804,8 @@ contains
         character(:), allocatable :: effective_flags, selected_flags, compiler
         type(compiler_dialect_t) :: dialect
         type(cm_plan_t) :: native_plan
+        character(len=4096) :: ninja_path
+        logical :: ninja_found
         type(cmake_diagnostic_t) :: diagnostic
         character(:), allocatable :: selected_preload
         logical :: has_cache, hint_valid, has_frozen_context
@@ -917,8 +919,11 @@ contains
                 call argv_push(packed, n_args, '-G')
                 call argv_push(packed, n_args, context%generator)
             else if (.not. has_cache) then
-                call argv_push(packed, n_args, '-G')
-                call argv_push(packed, n_args, 'Ninja')
+                call fs_find_executable('ninja', ninja_path, ninja_found)
+                if (ninja_found) then
+                    call argv_push(packed, n_args, '-G')
+                    call argv_push(packed, n_args, 'Ninja')
+                end if
             end if
         end if
         if (len_trim(context%configuration) > 0 .and. &

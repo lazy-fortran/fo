@@ -210,6 +210,9 @@ failure output, named filters, and slow-test label exclusion. fo reads CMake's
 File API and CTest registry as a project model for test selection (see below)
 but does not replace CMake's target model.
 
+Captured CMake trees use Ninja when available, unless the selected generator or
+configure preset specifies otherwise.
+
 ## Gremlin tuning
 
 `FO_GREMLIN_RECEIPT_LIMIT` sets how many campaign receipts a lane retains in
