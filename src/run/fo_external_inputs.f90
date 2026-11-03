@@ -13,7 +13,8 @@ module fo_external_inputs
         selected_compiler_command, COMPILER_GFORTRAN
     use fo_fs, only: fs_find_executable, fs_realpath, fs_path_is_absolute, &
         fs_collect_files
-    use fx_immutable_store, only: immutable_store_hash_file, IMMUTABLE_OK
+    use fo_stat_memo, only: memo_hash_file
+    use fx_immutable_store, only: IMMUTABLE_OK
     use fo_cache, only: HASH_LEN
     implicit none
     private
@@ -387,7 +388,7 @@ contains
             call reason(reasons, kind//' input does not exist: '//name//' at '//path)
             return
         end if
-        call immutable_store_hash_file(trim(resolved), digest, status)
+        call memo_hash_file(trim(resolved), digest, status)
         if (status /= IMMUTABLE_OK .or. len_trim(digest) == 0) then
             call reason(reasons, kind//' input cannot be hashed: '//trim(resolved))
             return
