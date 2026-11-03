@@ -1,5 +1,5 @@
 module fo_scan
-    use, intrinsic :: iso_fortran_env, only: error_unit
+    use, intrinsic :: iso_fortran_env, only: error_unit, int64
     use fo_util, only: make_tmpfile, delete_tmpfile
     use fo_process, only: process_scan_sources, process_run_argv_logged, argv_push
     use fo_scan_types, only: scan_unit_t, MAX_NAME, MAX_PATH, MAX_UNITS, MAX_DEPS
@@ -9,16 +9,19 @@ module fo_scan
         compiler_frontend_result_t, compile_frontend_from_file, &
         query_program_units, query_program_unit, query_use_statements, &
         program_unit_query_t, use_statement_query_t, INPUT_MODE_STANDARD
-    use fx_hash, only: sha256_file
-    use fx_string, only: to_lower
+    use fx_hash, only: sha256_file, fnv1a_string
+    use fx_string, only: to_lower, string_t
     implicit none
     private
 
     public :: scan_unit_t, scan_file, scan_file_regex, scan_dir, scan_dir_regex, &
-        scan_file_preprocessed, &
+        scan_file_preprocessed, scan_file_cached, &
         scan_dir_cached
     public :: is_slow_test, source_defines_module, scan_provides_name
-    public :: MAX_NAME, MAX_PATH, MAX_UNITS
+    public :: MAX_NAME, MAX_PATH, MAX_UNITS, scan_file_parse_count
+
+    integer, save :: parsed_files = 0
+    type(string_t), save :: failed_scans(MAX_UNITS)
 
     character(len=32), dimension(10), parameter :: INTRINSIC_MODULES = [ &
         'iso_fortran_env  ', &
@@ -86,6 +89,8 @@ contains
         character(len=1024) :: ast_diagnostic
         logical :: use_fallback
 
+        !$omp atomic update
+        parsed_files = parsed_files + 1
         ast_diagnostic = ''
         if (present(diagnostic)) diagnostic = ''
         ! The environment policy is also the emergency backend selector for
@@ -110,6 +115,11 @@ contains
             diagnostic = trim(ast_diagnostic)//'; regex fallback failed'
         end if
     end subroutine scan_file
+
+    integer function scan_file_parse_count() result(parsed)
+        !$omp atomic read
+        parsed = parsed_files
+    end function scan_file_parse_count
 
     subroutine scan_file_preprocessed(filename, unit_info, ierr, preprocessor, &
             n_args, allow_regex_fallback)
@@ -148,7 +158,7 @@ contains
             close (funit)
         end if
         if (.not. directives .or. n_args < 1) then
-            call scan_content(filename, unit_info, ierr, allow_regex_fallback)
+            call scan_file_cached(filename, unit_info, ierr, allow_regex_fallback)
             return
         end if
         call make_tmpfile('fo_cpp', scratch)
@@ -166,16 +176,14 @@ contains
             ierr = 1
             return
         end if
-        call scan_content(scratch, unit_info, ierr, allow_regex_fallback)
+        call scan_file_cached(scratch, unit_info, ierr, allow_regex_fallback)
         call delete_tmpfile(scratch)
         unit_info%filename = filename
     end subroutine scan_file_preprocessed
 
-    subroutine scan_content(filename, unit_info, ierr, allow_regex_fallback)
-        !! Cache the parser's dependency facts by exact compiler-visible bytes.
-        !! Preprocessing still runs first, so changed includes and definitions
-        !! invalidate the scan even in a relocated tree. Reuse the bounded scan
-        !! store and its full-key check; filenames/classification are local.
+    subroutine scan_file_cached(filename, unit_info, ierr, allow_regex_fallback)
+        !! Reuse facts only for exact bytes and parser policy. Preprocessed
+        !! callers run the compiler first; paths and classification stay local.
         character(len=*), intent(in) :: filename
         type(scan_unit_t), intent(out) :: unit_info
         integer, intent(out) :: ierr
@@ -194,6 +202,10 @@ contains
             if (dot > index(filename, '/', back=.true.)) &
                 key = key//filename(dot:)
             if (regex_fallback_policy(allow_regex_fallback)) key = key//'/fallback'
+            if (failed_scan_cached(key, .false.)) then
+                ierr = 1
+                return
+            end if
             call scan_cache_load_trusted(key, cached, hit)
             if (hit .and. size(cached) == 1) then
                 unit_info = cached(1)
@@ -204,12 +216,36 @@ contains
             end if
         end if
         call scan_file(filename, unit_info, ierr, allow_regex_fallback)
-        if (ierr == 0 .and. len(key) > 0) then
+        if (len(key) > 0) then
             call sha256_file(filename, after, status)
-            if (status == 0 .and. after == digest) &
-                call scan_cache_save(key, [filename], [unit_info])
+            if (status == 0 .and. after == digest) then
+                if (ierr == 0) then
+                    call scan_cache_save(key, [filename], [unit_info])
+                else
+                    hit = failed_scan_cached(key, .true.)
+                end if
+            end if
         end if
-    end subroutine scan_content
+    end subroutine scan_file_cached
+
+    logical function failed_scan_cached(key, remember) result(hit)
+        character(len=*), intent(in) :: key
+        logical, intent(in) :: remember
+        integer :: slot, probe
+
+        ! Failed facts remain conservative and expire with this parser process.
+        !$omp critical (fo_failed_scan_cache)
+        slot = int(modulo(fnv1a_string(key), int(MAX_UNITS, int64))) + 1
+        do probe = 1, 16
+            if (.not. allocated(failed_scans(slot)%s)) exit
+            if (failed_scans(slot)%s == key .or. probe == 16) exit
+            slot = mod(slot, MAX_UNITS) + 1
+        end do
+        hit = .false.
+        if (allocated(failed_scans(slot)%s)) hit = failed_scans(slot)%s == key
+        if (remember .and. .not. hit) failed_scans(slot)%s = key
+        !$omp end critical (fo_failed_scan_cache)
+    end function failed_scan_cached
 
     subroutine scan_file_ast(filename, unit_info, ierr, diagnostic)
         character(len=*), intent(in) :: filename

@@ -34,7 +34,7 @@ module fo_project_load
     use fo_process, only: argv_push, process_run_argv_logged
     use fo_fs, only: fs_realpath
     use fo_ctest_run, only: ctest_native_select, ctest_native_run, ctest_log_note
-    use fo_scan, only: scan_unit_t, scan_file
+    use fo_scan, only: scan_unit_t, scan_file_cached
     use fo_process, only: process_has_fortran_source_ext
     use fx_json_build, only: json_key_int
     use fo_case_filter, only: case_filter_t, filter_parse
@@ -828,7 +828,7 @@ contains
         n = 0
         do k = 1, size(paths)
             if (.not. process_has_fortran_source_ext(paths(k)%s)) cycle
-            call scan_file(paths(k)%s, scanned, status)
+            call scan_file_cached(paths(k)%s, scanned, status)
             if (status /= 0) then
                 failed(k) = .true.
                 cycle

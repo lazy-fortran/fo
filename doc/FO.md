@@ -320,6 +320,9 @@ fo test --list [--json] [same selection]
   of its manifests, locks, CMake scripts, presets and caches, test and program
   mains, and the set of input paths are unchanged (fpm with source layers:
   every source counts), so a library or CMake source edit reuses it.
+  Dependency scans are reused by source content across paths, so unchanged
+  sources are not parsed again during impact analysis. Failed scans remain
+  unscanned and are remembered only within the running process.
   `gremlin status --detail full` reports `active_model` (model identity) and
   `active_model_generation` (the generation that loaded it). Case receipts
   carry the case `labels` and `layer`, and a label-excluded case runs with
