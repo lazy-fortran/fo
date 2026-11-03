@@ -289,6 +289,8 @@ fo test --list [--json] [same selection]
   generation builds the scope's plan targets. A scope selecting no case, an
   unknown layer or an invalid pattern is an inventory error. The scope is part
   of the lane policy: a start with another scope on a live lane is refused.
+  With `--random 0` and no `--target`, the scope is the lane's gate: each
+  generation runs every scoped case, as the same `fo test` selection would.
   A `reproduce` of a case outside the lane's build builds that case's targets
   in its own view before running it.
 - Gremlin loads the project model once per built generation and takes its

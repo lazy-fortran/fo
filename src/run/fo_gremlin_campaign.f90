@@ -532,7 +532,7 @@ contains
         type(coverage_epoch_t) :: coverage
         character(len=PATH_LEN) :: project_dir, live
         character(len=HASH_LEN) :: generation_id
-        logical :: reproduce_only, focused_targets
+        logical :: reproduce_only, focused_targets, scope_gate
         integer, allocatable :: model_cases(:)
         integer :: capacity, kept, n_model
         type(model_request_t) :: scope_request
@@ -655,6 +655,11 @@ contains
         n_priorities = 0
         ! Zero-random campaigns keep their explicit gate across source edits.
         focused_targets = request%n_targets > 0 .and. request%random_count == 0
+        ! Without targets or random cases a lane scope is the gate, as the
+        ! same -L/-LE/--layer/-E selection of `fo test` runs every case in it.
+        scope_gate = request_scoped(request) .and. request%n_targets == 0 .and. &
+            request%random_count == 0 .and. allocated(generation%model)
+        if (scope_gate) focused_targets = .true.
         ! Recheck durable failures before new affected work without dropping either.
         if (.not. focused_targets) &
             call append_priority_names(history, n_history, priorities, n_priorities)
@@ -664,6 +669,8 @@ contains
                 priorities, n_priorities)
         end if
         call append_priority_names(request%targets, request%n_targets, priorities, &
+            n_priorities)
+        if (scope_gate) call append_priority_names(all_names, n_all, priorities, &
             n_priorities)
         if (.not. focused_targets) then
             call append_priority_names(impacted, n_impacted, priorities, n_priorities)
