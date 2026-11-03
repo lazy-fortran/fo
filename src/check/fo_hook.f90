@@ -11,6 +11,8 @@ module fo_hook
     use fo_exec_service, only: exec_job_t, exec_start, exec_poll, EXEC_UNCANCELLED
     use fo_cmake_generation, only: cmake_stage_git, cmake_populated_dependency_args, &
         cmake_unpopulated_dependency
+    use fo_cmake_context, only: cmake_context_build_path
+    use fo_hook_presets, only: hook_stage_presets
     use fo_hook_evidence, only: hook_input_key, hook_receipt_read, &
         hook_receipt_write, hook_slow_case, hook_prepared_key
     use fo_test_results, only: test_result_entry_t, parse_test_results
@@ -349,6 +351,12 @@ contains
             end if
             if (backend%kind == BACKEND_CMAKE) then
                 backend_name = 'cmake'
+                if (len_trim(backend%cmake%configure_preset) + &
+                    len_trim(backend%cmake%build_preset) + &
+                    len_trim(backend%cmake%test_preset) > 0) then
+                    call hook_stage_presets(snapshot, status, message)
+                    if (status /= 0) exit validation
+                end if
                 ! Always configure/build this index view, even when the caller
                 ! has an absolute FO_CMAKE_BUILD_DIR or a preset binaryDir.
                 backend%cmake%build_root = 'build'
@@ -699,7 +707,8 @@ contains
             backend = detect_backend(root, authority_dir=root)
             if (backend%kind /= BACKEND_CMAKE) return
             call get_environment_variable('FO_CMAKE_BUILD_DIR', length=length, status=status)
-            if (status /= 0 .or. length == 0) then
+            if ((status /= 0 .or. length == 0) .and. &
+                len_trim(backend%cmake%configure_preset) == 0) then
                 backend%cmake%build_root = 'build'
                 backend%cmake%build_root_hint = .true.
             end if
@@ -714,9 +723,8 @@ contains
             call cmake_configure(backend%cmake, '', trim(log_file), exitcode)
             if (exitcode == 0) then
                 call delete_tmpfile(trim(log_file))
-                call hook_cmake_build_dir(root, build_dir, found)
-                if (.not. found) message = 'CMake configured this checkout, but fo finds '// &
-                    'no build directory to reuse; set FO_CMAKE_BUILD_DIR to it'
+                build_dir = cmake_context_build_path(backend%cmake)
+                found = .true.
                 return
             end if
             call read_text_file_alloc(trim(log_file), text, status)
