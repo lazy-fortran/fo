@@ -149,7 +149,7 @@ export TMPDIR="$RUNNER_TEMP/fo-test-preparation-tmp"
 mkdir -p "$TMPDIR"
 # Runtime groups keep separate state while reusing this exact prepared tree.
 focused_tests=(
-  test_project_model test_fpm_project_model test_cmake_project_model
+  test_project_model test_project_scan_reuse test_fpm_project_model test_cmake_project_model
   test_cmake_capture_paths test_cmake_capture_inputs test_cmake_parent_modules
   test_project_selection_cli test_project_layering_cli test_gremlin_case_reuse
   test_gremlin_cmake test_atomic_link_artifacts test_cmake_native_build_cli
@@ -170,7 +170,7 @@ export FO="$FO_DRIVER_A" FO_BIN="$FO_DRIVER_A"
 export FO_DISABLE_SELF_REFRESH=1 FO_SELF_REFRESH=0 FO_JOBS=1
 export TMPDIR="$RUNNER_TEMP/fo-focused-tests"
 mkdir -p "$TMPDIR"
-"$FO_DRIVER_A" test --no-build test_project_model test_fpm_project_model \
+"$FO_DRIVER_A" test --no-build test_project_model test_project_scan_reuse test_fpm_project_model \
   test_cmake_project_model test_cmake_capture_paths test_cmake_capture_inputs \
   test_cmake_parent_modules \
   test_project_selection_cli test_project_layering_cli test_gremlin_case_reuse \
