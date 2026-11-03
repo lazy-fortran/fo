@@ -954,7 +954,7 @@ contains
         call cmake_diagnostic_begin(diagnostic, context%source_root, &
             cmake_context_build_path(context), packed, n_args, log_file, selected_preload)
         call process_run_argv_logged(context%source_root, packed, n_args, &
-            log_file, .false., environment_timeout('FO_BUILD_TIMEOUT', 300), &
+            log_file, .false., environment_timeout('FO_BUILD_TIMEOUT', 3600), &
             exitcode)
         if (exitcode /= 0) then
             call cmake_diagnostic_finish(diagnostic, exitcode, log_file)
@@ -1171,7 +1171,7 @@ contains
         call argv_push(packed, n_args, '-j')
         call argv_push(packed, n_args, jobs_text)
         call process_run_argv_logged(context%source_root, packed, n_args, &
-            log_file, .true., environment_timeout('FO_BUILD_TIMEOUT', 300), &
+            log_file, .true., environment_timeout('FO_BUILD_TIMEOUT', 3600), &
             exitcode)
     end subroutine cmake_delegate_build
 

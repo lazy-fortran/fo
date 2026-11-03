@@ -203,6 +203,9 @@ separate system/environment package manager.
 
 ## CMake contract
 
+Delegated configure and build commands default to a 3600 s wall limit;
+`FO_BUILD_TIMEOUT` overrides that limit.
+
 CMake mode configures `cmake -S . -B build -G Ninja`, forwards `FC`,
 `FO_CMAKE_ARGS`, and effective Fortran flags, then calls
 `cmake --build build -j <FO_JOBS>`. Tests run through CTest with parallelism,
