@@ -4,7 +4,8 @@ module fo_input_inventory
         c_long_long
     use, intrinsic :: iso_fortran_env, only: int64
     use fo_cache, only: HASH_LEN, cache_digest
-    use fx_immutable_store, only: immutable_store_hash_file, IMMUTABLE_OK
+    use fo_stat_memo, only: memo_hash_file
+    use fx_immutable_store, only: IMMUTABLE_OK
     use fo_fpm_config, only: fpm_config_t, fpm_config_parse, fpm_config_allocate, &
         fpm_exe_t, &
         fpm_input_t, dep_kind, DEP_PATH, DEP_GIT, DEP_REGISTRY, &
@@ -95,6 +96,14 @@ module fo_input_inventory
             import :: c_char, c_int
             character(kind=c_char), intent(in) :: root(*), relative(*)
         end function c_project_path_state
+
+        integer(c_int) function c_input_mode(path, sdk_headers, mode) &
+                bind(C, name='fo_c_generation_input_mode')
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: path(*)
+            integer(c_int), value :: sdk_headers
+            integer(c_int), intent(out) :: mode
+        end function c_input_mode
 
         integer(c_int) function c_list_input_tree(root, manifest, &
                 exclude_root_outputs) bind(C, name='fo_c_generation_list_input_tree')
@@ -450,8 +459,8 @@ contains
                             return
                         end if
                         sdk_headers = index(labels(i), 'cmake-include:sdk-') == 1
-                        call cmake_input_digest(trim(sources(i)), header_digest, &
-                            ierr, message, sdk_headers=sdk_headers)
+                        call inventoried_cmake_digest(inventory, labels(i), sources(i), &
+                            header_digest, ierr, message)
                         if (ierr /= 0) return
                         headers = headers//header_digest//' '// &
                             merge('S ', 'R ', sdk_headers)//trim(sources(i))// &
@@ -485,6 +494,35 @@ contains
         if (ierr /= 0) return
         inventory%valid = .true.
     end subroutine input_inventory_discover_cmake
+
+    subroutine inventoried_cmake_digest(inventory, alias, root, digest, ierr, message)
+        !! Fingerprint the same observed closure, without walking headers twice.
+        type(input_inventory_t), intent(in) :: inventory
+        character(len=*), intent(in) :: alias, root
+        character(len=*), intent(out) :: digest, message
+        integer, intent(out) :: ierr
+        type(input_inventory_t) :: headers
+        type(input_entry_t) :: entry
+        integer :: root_index, source_index, i
+
+        allocate(headers%roots(MAX_ROOTS), headers%entries(64), &
+            headers%declarations(0))
+        headers%entry_capacity = 64
+        headers%complete = .true.
+        call add_root(headers, 'headers', root, root_index, ierr, message, 'headers')
+        if (ierr /= 0) return
+        source_index = alias_root(inventory, alias)
+        do i = 1, inventory%entry_count
+            if (alias_root(inventory, inventory%entries(i)%root_alias) /= source_index) cycle
+            entry = inventory%entries(i)
+            entry%root_alias = 'headers'
+            entry%role = 'cmake-header-input'
+            call append_entry(headers, entry, ierr, message)
+            if (ierr /= 0) return
+        end do
+        call canonicalize_inventory(headers, ierr, message)
+        digest = headers%digest
+    end subroutine inventoried_cmake_digest
 
     subroutine cmake_input_digest(root, digest, ierr, message, sdk_headers)
         character(len=*), intent(in) :: root
@@ -1741,7 +1779,7 @@ contains
                 trim(alias)//':'//trim(entry%relative_path)
             return
         end if
-        call immutable_store_hash_file(trim(path), entry%content_digest, &
+        call memo_hash_file(trim(path), entry%content_digest, &
             mode_status)
         if (mode_status /= IMMUTABLE_OK .or. &
             len_trim(entry%content_digest) /= HASH_LEN) then
@@ -1787,11 +1825,11 @@ contains
         integer :: rc, unit, ios, kind, decode_status
         type(input_entry_t) :: entry
         character(kind=c_char, len=:), allocatable :: c_root, c_manifest
-        logical :: whole_root_scan, resolved
+        logical :: whole_root_scan
         logical, intent(in), optional :: cmake_scan, skip_hidden_caches, sdk_headers
         character(len=*), intent(in), optional :: excluded_directory
         character(kind=c_char, len=:), allocatable :: c_excluded
-        integer(c_int) :: exclude_root_outputs
+        integer(c_int) :: exclude_root_outputs, follow_sdk, file_mode
 
         ierr = 1
         message = ''
@@ -1871,11 +1909,6 @@ contains
                         index(relative, '/CMakeCache.txt', back=.true.) == 0) cycle
                 end if
             end if
-            if (present(cmake_scan)) then
-                if (cmake_scan) then
-                    if (inside_cmake_output(physical_root, relative)) cycle
-                end if
-            end if
             if (ignored_input_path(trim(relative), kind == INPUT_DIRECTORY, &
                 whole_root_scan)) cycle
             if (.not. under_prefix(trim(relative), trim(prefix))) cycle
@@ -1891,26 +1924,21 @@ contains
                 entry%mode = 0
             case (INPUT_FILE)
                 file_path = trim(physical_root)//'/'//trim(relative)
+                follow_sdk = 0_c_int
                 if (present(sdk_headers)) then
-                    if (sdk_headers) then
-                        call fs_realpath(trim(file_path), target, resolved)
-                        if (.not. resolved) then
-                            ierr = 1
-                            message = 'SDK header changed during enumeration: '//trim(relative)
-                            exit
-                        end if
-                        file_path = target
-                    end if
+                    if (sdk_headers) follow_sdk = 1_c_int
                 end if
-                call action_result_file_mode(trim(file_path), entry%mode, decode_status)
-                if (decode_status /= ACTION_RESULT_OK) then
+                decode_status = c_input_mode(trim(file_path)//c_null_char, &
+                    follow_sdk, file_mode)
+                if (decode_status /= 0) then
                     ierr = 1
                     message = 'input file changed during enumeration: '// &
                         trim(alias)//':'//trim(relative)
                     exit
                 end if
+                entry%mode = int(file_mode)
                 entry%mode = iand(entry%mode, 511)
-                call immutable_store_hash_file(trim(file_path), hash, decode_status)
+                call memo_hash_file(trim(file_path), hash, decode_status)
                 if (decode_status /= IMMUTABLE_OK .or. &
                     len_trim(hash) /= HASH_LEN) then
                     ierr = 1
@@ -2376,7 +2404,8 @@ contains
         type(input_entry_t) :: value
         character(len=2 * PATH_LEN + ALIAS_LEN + 3 * 64 + HASH_LEN + 64) :: part
         character(len=:), allocatable :: parts(:)
-        integer :: i, j, capacity, root_index, retained, n_parts
+        integer :: i, j, next, capacity, root_index, retained, n_parts
+        integer, allocatable :: order(:)
 
         call reset_entry_index(inventory)
         ierr = 0
@@ -2391,15 +2420,19 @@ contains
             inventory%entries(i)%root_alias = &
                 inventory%roots(root_index)%canonical_alias
         end do
-        do i = 2, inventory%entry_count
+        call inventory_sort_order(inventory%entries(:inventory%entry_count), order)
+        do i = 1, inventory%entry_count
+            if (order(i) == i) cycle
             value = inventory%entries(i)
-            j = i - 1
-            do while (j >= 1)
-                if (.not. entry_after(inventory%entries(j), value)) exit
-                inventory%entries(j + 1) = inventory%entries(j)
-                j = j - 1
+            j = i
+            do
+                next = order(j)
+                order(j) = j
+                if (next == i) exit
+                inventory%entries(j) = inventory%entries(next)
+                j = next
             end do
-            inventory%entries(j + 1) = value
+            inventory%entries(j) = value
         end do
         retained = 0
         do i = 1, inventory%entry_count
@@ -2455,18 +2488,74 @@ contains
                 trim(inventory%entries(i)%content_digest)
             parts(n_parts) = trim(part)
         end do
-        do i = 2, n_parts
+        call inventory_sort_order(inventory%entries(:0), order, parts(:n_parts))
+        do i = 1, n_parts
+            if (order(i) == i) cycle
             part = parts(i)
-            j = i - 1
-            do while (j >= 1)
-                if (.not. llt(trim(part), trim(parts(j)))) exit
-                parts(j + 1) = parts(j)
-                j = j - 1
+            j = i
+            do
+                next = order(j)
+                order(j) = j
+                if (next == i) exit
+                parts(j) = parts(next)
+                j = next
             end do
-            parts(j + 1) = part
+            parts(j) = part
         end do
         inventory%digest = cache_digest(parts(:n_parts), n_parts)
     end subroutine canonicalize_inventory
+
+    subroutine inventory_sort_order(entries, order, parts)
+        !! Sort small indices, then move each large input record only once.
+        type(input_entry_t), intent(in) :: entries(:)
+        integer, allocatable, intent(out) :: order(:)
+        character(len=*), optional, intent(in) :: parts(:)
+        integer, allocatable :: work(:)
+        integer :: n, width, first, middle, last, left, right, dest, i
+        logical :: after
+
+        n = size(entries)
+        if (present(parts)) n = size(parts)
+        allocate (order(n), work(n))
+        do i = 1, n
+            order(i) = i
+        end do
+        width = 1
+        do while (width < n)
+            do first = 1, n, 2*width
+                middle = min(first + width, n + 1)
+                last = min(first + 2*width - 1, n)
+                left = first
+                right = middle
+                do dest = first, last
+                    if (left >= middle) then
+                        work(dest) = order(right)
+                        right = right + 1
+                    else if (right > last) then
+                        work(dest) = order(left)
+                        left = left + 1
+                    else
+                        if (present(parts)) then
+                            after = lgt(trim(parts(order(left))), &
+                                trim(parts(order(right))))
+                        else
+                            after = entry_after(entries(order(left)), &
+                                entries(order(right)))
+                        end if
+                        if (after) then
+                            work(dest) = order(right)
+                            right = right + 1
+                        else
+                            work(dest) = order(left)
+                            left = left + 1
+                        end if
+                    end if
+                end do
+            end do
+            order = work
+            width = 2*width
+        end do
+    end subroutine inventory_sort_order
 
     logical function same_entry_key(left, right)
         type(input_entry_t), intent(in) :: left, right

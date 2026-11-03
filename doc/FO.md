@@ -224,6 +224,13 @@ diagnostic `waiting for a host Gremlin work slot held by other lanes`. Lanes
 without `FO_JOBS` take the whole pool. Lanes that set different pool sizes take
 turns until the holders of the other size are quiescent.
 
+Capture reuses content hashes within the owner only while device, inode, size,
+nanosecond modification time and nanosecond change time all match. Persisted
+observations are hashed once before reuse in a new process. Materialization
+binds each private blob copy to the same verified full stat key before and
+after copying. Unchanged store blobs retain their verification keys while the
+publication lease protects the batch.
+
 ## Test selection
 
 `fo test` selects cases on one project model for both backends: the fpm

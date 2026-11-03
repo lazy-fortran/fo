@@ -3,12 +3,14 @@ module stat_memo_parallel_oracle
     use fo_fs, only: fs_sleep_ms
     implicit none
     private
-    public :: parallel_provider, reset_parallel_oracle, max_parallel_hashes
+    public :: parallel_provider, reset_parallel_oracle, max_parallel_hashes, provider_calls
+    integer, save :: provider_calls = 0
     integer, save :: active_hashes = 0
     integer, save :: peak_hashes = 0
 contains
     subroutine reset_parallel_oracle()
         active_hashes = 0
+        provider_calls = 0
         peak_hashes = 0
     end subroutine reset_parallel_oracle
 
@@ -22,6 +24,8 @@ contains
         integer, intent(out) :: ierr
         integer :: current_active
 
+        !$omp atomic update
+        provider_calls = provider_calls + 1
         !$omp atomic update
         active_hashes = active_hashes + 1
         !$omp atomic read
@@ -51,7 +55,7 @@ program test_stat_memo
     use fo_fs, only: fs_make_dir, fs_remove_file, fs_remove_tree, fs_sleep_ms, &
         fs_stat, fs_collect_files, fs_rename
     use stat_memo_parallel_oracle, only: parallel_provider, reset_parallel_oracle, &
-        max_parallel_hashes
+        max_parallel_hashes, provider_calls
     implicit none
     integer, parameter :: CROSS_FILES = 1024
     integer, parameter :: CRASH_FILES = 16383
@@ -126,6 +130,7 @@ program test_stat_memo
     call set_cache_root(trim(cache_root))
     call memo_reset()
 
+    call test_warm_hash_skips_reader()
     call test_matches_direct_sha256()
     call test_concurrent_cold_misses(trim(temp_root))
     call test_recomputes_on_change()
@@ -161,6 +166,30 @@ contains
             if (n_fail <= 12) write (error_unit, '(a,a)') 'FAIL: ', msg
         end if
     end subroutine assert
+
+    subroutine test_warm_hash_skips_reader()
+        character(len=512) :: f, reference
+        character(len=64) :: first, second, direct
+        integer :: ierr
+
+        call write_file(f, 'unchanged A')
+        call write_file(reference, 'reference')
+        call copy_mtime(trim(f), trim(reference))
+        call reset_parallel_oracle()
+        call memo_hash_file_for_test(trim(f), first, ierr, parallel_provider)
+        call assert(ierr == 0, 'cold content hash succeeds')
+        call memo_hash_file_for_test(trim(f), second, ierr, parallel_provider)
+        call assert(ierr == 0 .and. first == second .and. provider_calls == 1, &
+            'unchanged fingerprint skips the content reader')
+        call write_text(trim(f), 'unchanged B')
+        call copy_mtime(trim(reference), trim(f))
+        call memo_hash_file_for_test(trim(f), second, ierr, parallel_provider)
+        call sha256_file(trim(f), direct, ierr)
+        call assert(first /= second .and. second == direct .and. provider_calls == 2, &
+            'ctime invalidates a same-size edit with restored mtime')
+        call fs_remove_file(trim(f))
+        call fs_remove_file(trim(reference))
+    end subroutine test_warm_hash_skips_reader
 
     subroutine test_matches_direct_sha256()
         character(len=512) :: f

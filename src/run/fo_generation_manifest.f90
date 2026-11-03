@@ -7,10 +7,10 @@ module fo_generation_manifest
         immutable_tree_entry_t, IMMUTABLE_BLOB, &
         immutable_store_init, &
         immutable_store_hash_file, immutable_store_publication_lease_acquire, &
+        immutable_store_blob_path, &
         immutable_store_root_set, immutable_store_reason_release, &
         immutable_store_lease_release, &
         immutable_store_materialize_blob, &
-        immutable_store_materialize_blob_ephemeral, IMMUTABLE_MATERIALIZE_AUTO, &
         IMMUTABLE_MATERIALIZE_COPY, immutable_store_verify_blob, IMMUTABLE_OK
     use fx_immutable_batch, only: immutable_batch_t, immutable_batch_begin, &
         immutable_batch_put_fd, immutable_batch_put_file, immutable_batch_commit, &
@@ -24,6 +24,8 @@ module fo_generation_manifest
         input_entry_t, input_declaration_t, INPUT_FILE, INPUT_DIRECTORY, &
         INPUT_SYMLINK, input_inventory_revalidate, hex_value, &
         safe_relative_path
+    use fo_stat_memo, only: memo_hash_file
+    use fo_process, only: process_detect_nproc
     use fo_fs, only: fs_make_dir
     use fo_util, only: make_tmpfile, delete_tmpfile, int_text
     implicit none
@@ -37,6 +39,12 @@ module fo_generation_manifest
         character(len=:), allocatable :: path
         integer :: entry = 0
     end type materialized_entry_t
+
+    type :: blob_copy_t
+        character(len=:), allocatable :: source, destination
+        integer(c_long_long) :: key(5)
+        integer(c_int) :: mode, cloned, status
+    end type blob_copy_t
 
     type, public :: generation_manifest_metadata_t
         character(len=:), allocatable :: execution_identity
@@ -60,6 +68,22 @@ module fo_generation_manifest
     integer, save :: cloned_blobs = 0, copied_blobs = 0
 
     interface
+        integer(c_int) function content_stat(path, mt, ct, sz, dev, ino) &
+                bind(C, name='fo_c_stat_change_fingerprint')
+            import :: c_char, c_int, c_long_long
+            character(kind=c_char), intent(in) :: path(*)
+            integer(c_long_long), intent(out) :: mt, ct, sz, dev, ino
+        end function content_stat
+
+        integer(c_int) function copy_verified_blob(source, destination, key, &
+                mode, cloned) bind(C, name='fo_c_generation_copy_verified_blob')
+            import :: c_char, c_int, c_long_long
+            character(kind=c_char), intent(in) :: source(*), destination(*)
+            integer(c_long_long), intent(in) :: key(5)
+            integer(c_int), value :: mode
+            integer(c_int), intent(out) :: cloned
+        end function copy_verified_blob
+
         integer(c_int) function fo_c_generation_create_link(path, target, relative) &
                 bind(C, name='fo_c_generation_create_link')
             import :: c_char, c_int
@@ -257,8 +281,8 @@ contains
                     trim(inventory%entries(i)%relative_path)
                 exit
             end if
-            call immutable_batch_put_fd(store, batch, fd, ids(j), status, &
-                publication)
+            ! Leased reuse keeps unchanged blob verification keys stable.
+            call immutable_batch_put_fd(store, batch, fd, ids(j), status, publication)
             if (fo_c_generation_close_fd(fd) /= 0) status = 1
             if (status /= IMMUTABLE_OK) then
                 status = 1
@@ -825,10 +849,12 @@ contains
         character(len=*), intent(out) :: message
         type(immutable_store_t) :: store
         character(len=PATH_LEN) :: destination
-        integer :: status, i, j, root_index
+        integer :: status, i, j, root_index, n_files, task
+        integer, allocatable :: file_entries(:)
+        type(blob_copy_t), allocatable :: files(:)
         integer(int64) :: destinations
         type(materialized_entry_t), allocatable :: materialized(:)
-        logical :: used_clone, already_materialized
+        logical :: already_materialized
 
         ierr = 1
         message = ''
@@ -857,6 +883,8 @@ contains
             return
         end if
         allocate (materialized(2*int(destinations) + 1))
+        allocate (file_entries(int(destinations)), files(int(destinations)))
+        n_files = 0
         do i = 1, inventory%root_count
             do j = 1, inventory%roots(i)%alias_count
                 if (.not. safe_bundle_path( &
@@ -895,19 +923,13 @@ contains
                     call fs_make_dir(trim(destination))
                 case (INPUT_FILE)
                     call fs_make_dir(parent_path(trim(destination)))
-                    call immutable_store_materialize_blob_ephemeral(store, &
-                        trim(inventory%entries(i)%content_digest), &
-                        trim(destination), inventory%entries(i)%mode, &
-                        IMMUTABLE_MATERIALIZE_AUTO, used_clone, status)
-                    if (status == IMMUTABLE_OK) then
-                        if (used_clone) then
-                            cloned_blobs = cloned_blobs + 1
-                        else
-                            copied_blobs = copied_blobs + 1
-                        end if
-                    end if
-                    if (status /= IMMUTABLE_OK) then
-                        message = 'cannot materialize generation input blob: '// &
+                    n_files = n_files + 1
+                    file_entries(n_files) = i
+                    call prepare_blob_copy(store, &
+                        inventory%entries(i)%content_digest, trim(destination), &
+                        inventory%entries(i)%mode, files(n_files), status)
+                    if (status /= 0) then
+                        message = 'cannot verify generation input blob: '// &
                             trim(inventory%entries(i)%root_alias)//':'// &
                             trim(inventory%entries(i)%relative_path)
                         return
@@ -930,8 +952,67 @@ contains
                 end select
             end do
         end do
+        ! Prepare strings serially: deferred-length function results race in gfortran.
+        !$omp parallel do if (n_files > 1) num_threads(max(1, min(n_files, materialize_jobs()))) &
+        !$omp schedule(dynamic)
+        do task = 1, n_files
+            files(task)%status = copy_verified_blob(files(task)%source, &
+                files(task)%destination, files(task)%key, files(task)%mode, &
+                files(task)%cloned)
+        end do
+        !$omp end parallel do
+        do task = 1, n_files
+            if (files(task)%status /= IMMUTABLE_OK) then
+                i = file_entries(task)
+                message = 'cannot materialize generation input blob: '// &
+                    trim(inventory%entries(i)%root_alias)//':'// &
+                    trim(inventory%entries(i)%relative_path)
+                return
+            end if
+            if (files(task)%cloned /= 0) then
+                cloned_blobs = cloned_blobs + 1
+            else
+                copied_blobs = copied_blobs + 1
+            end if
+        end do
         ierr = 0
     end subroutine generation_manifest_materialize
+
+    integer function materialize_jobs() result(jobs)
+        character(len=32) :: value
+        integer :: status
+
+        jobs = process_detect_nproc()
+        call get_environment_variable('FO_JOBS', value, status=status)
+        if (status /= 0 .or. len_trim(value) == 0) return
+        read(value, *, iostat=status) jobs
+        if (status /= 0 .or. jobs < 1) jobs = process_detect_nproc()
+    end function materialize_jobs
+
+    subroutine prepare_blob_copy(store, digest, destination, mode, file, ierr)
+        type(immutable_store_t), intent(in) :: store
+        character(len=*), intent(in) :: digest, destination
+        integer, intent(in) :: mode
+        type(blob_copy_t), intent(out) :: file
+        integer, intent(out) :: ierr
+        character(len=:), allocatable :: source
+        character(len=HASH_LEN) :: actual
+
+        ierr = 1
+        source = immutable_store_blob_path(store, digest)
+        if (content_stat(source//c_null_char, file%key(4), file%key(5), &
+            file%key(3), file%key(1), file%key(2)) /= 0) return
+        call memo_hash_file(source, actual, ierr)
+        if (ierr /= 0) return
+        ierr = 1
+        if (actual /= digest) return
+        ! Native copying checks this complete stat key before and after copying.
+        file%source = source//c_null_char
+        file%destination = destination//c_null_char
+        file%mode = int(mode, c_int)
+        file%cloned = 0
+        ierr = 0
+    end subroutine prepare_blob_copy
 
     !! Native oracle for warm-generation cost: how many bundle blobs the
     !! materializer shared by clone and how many it had to byte-copy.

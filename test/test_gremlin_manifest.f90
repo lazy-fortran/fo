@@ -1,7 +1,7 @@
 program test_gremlin_manifest
     use fo_util, only: temporary_root
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_long, c_null_char, &
-        c_size_t
+        c_size_t, c_long_long
     use, intrinsic :: iso_fortran_env, only: int64, error_unit
     use fo_cache, only: HASH_LEN, cache_file_digest, cache_digest
     use fo_fs, only: fs_make_dir, fs_write_text
@@ -18,11 +18,12 @@ program test_gremlin_manifest
     use fx_immutable_store, only: immutable_store_t, immutable_lease_t, &
         immutable_store_init, immutable_store_graph_read_lease_acquire, &
         immutable_store_lease_release, immutable_store_blob_path, &
-        immutable_store_tree_path, IMMUTABLE_OK, IMMUTABLE_MISSING
+        immutable_store_tree_path, immutable_store_file_info, &
+        IMMUTABLE_OK, IMMUTABLE_MISSING
     use fx_immutable_tree, only: immutable_store_verify_tree
     use fx_immutable_gc, only: immutable_store_collect
     use fo_process, only: process_getpid
-    use fx_hash, only: sha256_string
+    use fx_hash, only: sha256_string, sha256_file
     implicit none
 
     interface
@@ -63,6 +64,17 @@ program test_gremlin_manifest
             import :: c_char, c_int
             character(kind=c_char), intent(in) :: path(*)
         end function remove_tree
+        integer(c_int) function freeze_tree(path) &
+                bind(C, name='fo_c_generation_freeze_tree')
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: path(*)
+        end function freeze_tree
+        integer(c_int) function content_stat(path, mt, ct, sz, dev, ino) &
+                bind(C, name='fo_c_stat_change_fingerprint')
+            import :: c_char, c_int, c_long_long
+            character(kind=c_char), intent(in) :: path(*)
+            integer(c_long_long), intent(out) :: mt, ct, sz, dev, ino
+        end function content_stat
         integer(c_int) function c_unlink(path) bind(C, name='unlink')
             import :: c_char, c_int
             character(kind=c_char), intent(in) :: path(*)
@@ -541,7 +553,8 @@ contains
         type(gremlin_lease_t) :: other_lease
         character(len=512) :: failed_stage
         character(len=512) :: owner_path(1)
-        character(len=HASH_LEN) :: failed_owner
+        character(len=HASH_LEN) :: failed_owner, blob_id
+        integer(int64) :: blob_size, blob_before, blob_after, blob_inode
         integer :: local_status
 
         local_status = c_setenv('FO_CACHE_DIR'//c_null_char, &
@@ -556,11 +569,20 @@ contains
         call assert_generation_root(store, first, .true., &
             'first generation owns durable Fx roots')
 
+        call sha256_file(trim(first%project_root)//'/fixture.dat', blob_id, local_status)
+        call require(local_status == 0, 'hash the captured blob bytes')
+        call immutable_store_file_info(store, blob_id, &
+            blob_size, blob_before, blob_inode, local_status)
+        call require(local_status == IMMUTABLE_OK, 'record unchanged blob timestamp')
         call generation_capture(trim(project), trim(cache_other), context, &
             other_worktree, local_status, message)
         call require(local_status == 0, &
             'second worktree captures same generation: '//trim(message))
         if (local_status /= 0) return
+        call immutable_store_file_info(store, blob_id, &
+            blob_size, blob_after, blob_inode, local_status)
+        call require(local_status == IMMUTABLE_OK .and. blob_before == blob_after, &
+            'capturing another generation preserves unchanged blob verification keys')
         call require(other_worktree%identity == first%identity .and. &
             other_worktree%root /= first%root, &
             'two worktrees have separate materializations of the same version')
@@ -725,6 +747,7 @@ contains
         type(input_inventory_t) :: rebuilt_inventory
         character(len=512) :: bundle_root, payload_path
         integer :: local_status, remove_status
+        integer(c_long_long) :: mt, ct, sz, dev, ino, before_ct
 
         bundle_root = trim(root)//'/rebuildable-bundle'
         payload_path = trim(bundle_root)//'/project/fixture.dat'
@@ -739,6 +762,18 @@ contains
             'rebuilt bundle contains the manifest payload bytes')
         call require(c_access(trim(payload_path)//c_null_char, 1_c_int) == 0, &
             'rebuilt bundle preserves the manifest executable mode')
+        call require(c_access(trim(payload_path)//c_null_char, 2_c_int) /= 0, &
+            'verified payload is born read-only')
+        local_status = content_stat(trim(payload_path)//c_null_char, &
+            mt, ct, sz, dev, ino)
+        call require(local_status == 0, 'stat verified payload before freezing')
+        before_ct = ct
+        local_status = freeze_tree(trim(bundle_root)//c_null_char)
+        call require(local_status == 0, 'freeze verified bundle')
+        local_status = content_stat(trim(payload_path)//c_null_char, &
+            mt, ct, sz, dev, ino)
+        call require(local_status == 0 .and. ct == before_ct, &
+            'freezing a verified payload preserves its content fingerprint')
 
         remove_status = remove_tree(trim(bundle_root)//c_null_char)
         call require(remove_status == 0, 'remove rebuildable bundle')

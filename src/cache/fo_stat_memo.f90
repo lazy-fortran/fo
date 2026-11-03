@@ -1,6 +1,6 @@
 module fo_stat_memo
-    !! Persistent file-hash observations. Stat metadata can collide across
-    !! different contents, so every lookup validates the current bytes.
+    !! File hashes reused within a process under a complete change fingerprint.
+    !! Persisted observations are revalidated once before they can be reused.
     !!
     !! The memo lives under the shared cache root so it survives a project-scoped
     !! `fo clean` and is reused across builds. Access is guarded by a named
@@ -13,7 +13,7 @@ module fo_stat_memo
     public :: memo_hash_file, memo_save, memo_reset
     public :: memo_hash_file_for_test
 
-    integer, parameter :: CAP = 16384 ! power of two, >> any real build
+    integer, parameter :: CAP = 131072 ! bounded metadata, including captured SDK headers
     integer, parameter :: PATH_LEN = 512
     integer, parameter :: HASH_LEN = 64
     integer, parameter :: HASH_ATTEMPTS = 3
@@ -48,11 +48,11 @@ module fo_stat_memo
 
     interface
         integer(c_int) function fo_c_stat_change_fingerprint( &
-                path, mtime_ns, ctime_ns, size) &
+                path, mtime_ns, ctime_ns, size, device, inode) &
                 bind(C, name='fo_c_stat_change_fingerprint')
             import :: c_char, c_int, c_long_long
             character(kind=c_char), intent(in) :: path(*)
-            integer(c_long_long), intent(out) :: mtime_ns, ctime_ns, size
+            integer(c_long_long), intent(out) :: mtime_ns, ctime_ns, size, device, inode
         end function fo_c_stat_change_fingerprint
     end interface
 
@@ -61,6 +61,8 @@ module fo_stat_memo
     integer(c_long_long), save :: t_ctime(CAP) = 0_c_long_long
     integer(c_long_long), save :: t_size(CAP) = 0_c_long_long
     character(len=HASH_LEN), save :: t_hash(CAP)
+    integer(c_long_long), save :: t_device(CAP) = -1_c_long_long
+    integer(c_long_long), save :: t_inode(CAP) = -1_c_long_long
     logical, save :: t_used(CAP) = .false.
     logical, save :: loaded = .false.
     logical, save :: dirty = .false.
@@ -87,7 +89,7 @@ contains
     end subroutine memo_hash_file_for_test
 
     subroutine memo_hash_file_impl(path, hash, ierr, provider)
-        !! sha256 of the current bytes, never inferred from a matching stat key.
+        !! Reuse only a digest observed under the same complete stat key.
         !! ierr is nonzero when hashing fails or a stable snapshot cannot be
         !! established within the bounded retry count.
         character(len=*), intent(in) :: path
@@ -96,41 +98,57 @@ contains
         procedure(sha256_provider), optional :: provider
 
         integer(c_long_long) :: mt, ct, sz, stable_mt, stable_ct, stable_size
+        integer(c_long_long) :: dev, ino, stable_dev, stable_ino
         integer :: slot
         integer(c_int) :: stat_rc
-        logical :: stable
+        logical :: stable, hit
 
         hash = ''
         ierr = 0
+        hit = .false.
 
         !$omp critical (fo_stat_memo)
         if (.not. loaded) call load_impl()
         stat_rc = fo_c_stat_change_fingerprint( &
-            trim(path)//c_null_char, mt, ct, sz)
+            trim(path)//c_null_char, mt, ct, sz, dev, ino)
         if (stat_rc /= 0) then
             ierr = 1
             hash = ''
+        else
+            slot = find_slot(path)
+            if (slot > 0) then
+                if (t_used(slot)) then
+                    hit = t_path(slot) == path .and. &
+                        t_mtime(slot) == mt .and. t_ctime(slot) == ct .and. &
+                        t_size(slot) == sz .and. t_device(slot) == dev .and. &
+                        t_inode(slot) == ino
+                    if (hit) hash = t_hash(slot)
+                end if
+            end if
         end if
         !$omp end critical (fo_stat_memo)
 
-        if (ierr /= 0) return
+        if (ierr /= 0 .or. hit) return
 
         ! Hashing can read a large object file. Keep it outside the table lock
         ! so independent cold misses can make progress concurrently.
-        call hash_with_stable_stat(path, mt, ct, sz, hash, ierr, stable, provider)
+        call hash_with_stable_stat(path, mt, ct, sz, dev, ino, &
+            hash, ierr, stable, provider)
         if (ierr /= 0 .or. .not. stable) return
         stable_mt = mt
         stable_ct = ct
         stable_size = sz
+        stable_dev = dev
+        stable_ino = ino
 
         ! Another thread may have populated or displaced this slot while the
         ! digest was computed. Publish only if the path still has this exact
         ! stable fingerprint, using a freshly located slot.
         !$omp critical (fo_stat_memo)
         stat_rc = fo_c_stat_change_fingerprint( &
-            trim(path)//c_null_char, mt, ct, sz)
+            trim(path)//c_null_char, mt, ct, sz, dev, ino)
         if (stat_rc == 0 .and. mt == stable_mt .and. ct == stable_ct .and. &
-            sz == stable_size) then
+            sz == stable_size .and. dev == stable_dev .and. ino == stable_ino) then
             slot = find_slot(path)
             if (slot > 0) then
                 t_used(slot) = .true.
@@ -138,6 +156,8 @@ contains
                 t_mtime(slot) = mt
                 t_ctime(slot) = ct
                 t_size(slot) = sz
+                t_device(slot) = dev
+                t_inode(slot) = ino
                 t_hash(slot) = hash
                 dirty = .true.
             end if
@@ -145,17 +165,18 @@ contains
         !$omp end critical (fo_stat_memo)
     end subroutine memo_hash_file_impl
 
-    subroutine hash_with_stable_stat(path, mtime_ns, ctime_ns, size, hash, &
+    subroutine hash_with_stable_stat(path, mtime_ns, ctime_ns, size, device, inode, hash, &
             ierr, stable, provider)
         !! Cache only a digest bracketed by matching pre/post stat snapshots.
         character(len=*), intent(in) :: path
-        integer(c_long_long), intent(inout) :: mtime_ns, ctime_ns, size
+        integer(c_long_long), intent(inout) :: mtime_ns, ctime_ns, size, device, inode
         character(len=HASH_LEN), intent(out) :: hash
         integer, intent(out) :: ierr
         logical, intent(out) :: stable
         procedure(sha256_provider), optional :: provider
 
         integer(c_long_long) :: after_mtime, after_ctime, after_size
+        integer(c_long_long) :: after_device, after_inode
         integer(c_int) :: stat_rc
         integer :: attempt
 
@@ -174,14 +195,16 @@ contains
             end if
 
             stat_rc = fo_c_stat_change_fingerprint( &
-                trim(path)//c_null_char, after_mtime, after_ctime, after_size)
+                trim(path)//c_null_char, after_mtime, after_ctime, after_size, &
+                after_device, after_inode)
             if (stat_rc /= 0) then
                 ierr = 1
                 hash = ''
                 return
             end if
             if (mtime_ns == after_mtime .and. ctime_ns == after_ctime .and. &
-                size == after_size) then
+                size == after_size .and. device == after_device .and. &
+                inode == after_inode) then
                 stable = .true.
                 return
             end if
@@ -189,6 +212,8 @@ contains
             mtime_ns = after_mtime
             ctime_ns = after_ctime
             size = after_size
+            device = after_device
+            inode = after_inode
         end do
         ierr = 1
         hash = ''
@@ -196,15 +221,14 @@ contains
 
     integer function find_slot(path) result(slot)
         !! Open-addressed slot for path: the entry matching path, or the first
-        !! empty slot to claim. 0 if the table is full (caller falls back to a
-        !! direct hash without caching).
+        !! empty slot to claim, or a victim when this probe chain is full.
         character(len=*), intent(in) :: path
         integer(8) :: h
         integer :: start, i, idx
 
         h = fnv1a_string(trim(path))
         start = int(modulo(h, int(CAP, 8))) + 1
-        do i = 0, CAP - 1
+        do i = 0, 63
             idx = start + i
             if (idx > CAP) idx = idx - CAP
             if (.not. t_used(idx)) then
@@ -216,7 +240,8 @@ contains
                 return
             end if
         end do
-        slot = 0
+        ! Replace a bounded-probe victim instead of scanning a full table.
+        slot = start
     end function find_slot
 
     subroutine memo_save()
@@ -298,6 +323,8 @@ contains
         !! Drop in-memory state (tests use this to force a reload).
         !$omp critical (fo_stat_memo)
         t_used = .false.
+        t_device = -1_c_long_long
+        t_inode = -1_c_long_long
         loaded = .false.
         dirty = .false.
         !$omp end critical (fo_stat_memo)

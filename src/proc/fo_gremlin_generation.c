@@ -59,6 +59,8 @@ static int excluded_entry(const char *parent_rel, const char *name,
     /* Hidden environment caches are outputs even when tools nest them. */
     if (exclusion_policy >= 2 &&
         (strcmp(name, ".cache") == 0 || strcmp(name, ".venv") == 0)) return 1;
+    if ((exclusion_policy == 3 || exclusion_policy == 5) &&
+        parent_rel[0] == '\0' && strcmp(name, ".fo-cmake") == 0) return 1;
     if (parent_rel[0] != '\0') return 0;
     if (exclusion_policy == 4) return 0;
     /* Build is always excluded at a whole-tree scan root. */
@@ -400,29 +402,48 @@ static int clone_regular_file(int input, const char *target) {
 #endif
 }
 
+static void content_key(const struct stat *st, long long key[5]) {
+    key[0] = (long long)st->st_dev;
+    key[1] = (long long)st->st_ino;
+    key[2] = (long long)st->st_size;
+#if defined(__APPLE__)
+    key[3] = st->st_mtimespec.tv_sec * 1000000000LL + st->st_mtimespec.tv_nsec;
+    key[4] = st->st_ctimespec.tv_sec * 1000000000LL + st->st_ctimespec.tv_nsec;
+#else
+    key[3] = st->st_mtim.tv_sec * 1000000000LL + st->st_mtim.tv_nsec;
+    key[4] = st->st_ctim.tv_sec * 1000000000LL + st->st_ctim.tv_nsec;
+#endif
+}
+
+static int same_content_stat(const struct stat *a, const struct stat *b) {
+    long long ka[5], kb[5];
+    content_key(a, ka);
+    content_key(b, kb);
+    return memcmp(ka, kb, sizeof(ka)) == 0;
+}
+
 static int copy_regular_file(int input, const char *target,
                              const struct stat *before, mode_t output_mode,
-                             int sync_output, int share_blocks) {
+                             int sync_output, int share_blocks, int *cloned) {
     int output;
     char buffer[65536];
     ssize_t n;
     struct stat after;
+    if (cloned != NULL) *cloned = 0;
     /* Rebuildable copies (no durability request) of immutable sources share
      * blocks when possible. A live project input is never cloned: APFS reports
      * the clone as an event on the source, which the change watcher would
      * take for an edit and recapture. */
     if (share_blocks && !sync_output && clone_regular_file(input, target) == 0) {
         if (fstat(input, &after) != 0 ||
-            before->st_size != after.st_size ||
-            before->st_mtime != after.st_mtime ||
-            before->st_ctime != after.st_ctime ||
-            before->st_ino != after.st_ino || before->st_dev != after.st_dev ||
+            !same_content_stat(before, &after) ||
             chmod(target, output_mode & 0777) != 0) {
             int saved = errno == 0 ? EAGAIN : errno;
             unlink(target);
             errno = saved;
             return -1;
         }
+        if (cloned != NULL) *cloned = 1;
         atomic_fetch_add(&generation_clone_count, 1);
         return 0;
     }
@@ -439,9 +460,7 @@ static int copy_regular_file(int input, const char *target,
         }
     }
     if (n < 0 || fstat(input, &after) != 0 ||
-        before->st_size != after.st_size || before->st_mtime != after.st_mtime ||
-        before->st_ctime != after.st_ctime ||
-        before->st_ino != after.st_ino || before->st_dev != after.st_dev) {
+        !same_content_stat(before, &after)) {
         errno = EAGAIN;
         goto fail;
     }
@@ -463,6 +482,37 @@ fail:
         errno = saved;
         return -1;
     }
+}
+
+/* The caller supplies a digest-verified full stat key. Bind the private copy
+ * to that same open inode, including nanosecond change time, across copying. */
+int fo_c_generation_copy_verified_blob(const char *source, const char *target,
+                                       const long long expected[5], int mode,
+                                       int *cloned) {
+    struct stat before;
+    long long actual[5];
+    int input = open(source, O_RDONLY | O_NOFOLLOW);
+    if (input < 0) return -1;
+    int rc = -1;
+    if (fstat(input, &before) == 0 && S_ISREG(before.st_mode)) {
+        content_key(&before, actual);
+        if (memcmp(actual, expected, sizeof(actual)) == 0)
+            rc = copy_regular_file(input, target, &before,
+                                   (mode & 0111) ? 0555 : 0444, 0, 1, cloned);
+    }
+    int saved = errno;
+    close(input);
+    errno = saved;
+    return rc;
+}
+
+/* Hashing and import validate file content; metadata discovery needs no open. */
+int fo_c_generation_input_mode(const char *path, int sdk_headers, int *mode) {
+    struct stat st;
+    int rc = sdk_headers ? stat(path, &st) : lstat(path, &st);
+    if (rc != 0 || !S_ISREG(st.st_mode)) return -1;
+    *mode = st.st_mode & 0777;
+    return 0;
 }
 
 struct input_directory {
@@ -492,6 +542,11 @@ static int walk_directory_at(int root_fd, int dir_fd, const char *rel,
     }
     size_t i;
     if (rel[0] != '\0' && write_path(manifest, 'D', 0, rel) != 0) return -1;
+    /* Match CMake inventory pruning once per directory, not per descendant. */
+    if (rel[0] != '\0' && (exclusion_policy == 3 || exclusion_policy == 5)) {
+        struct stat cache;
+        if (fstatat(dir_fd, "CMakeCache.txt", &cache, 0) == 0) return 0;
+    }
     if (copy_files && rel[0] != '\0') {
         char target[8192];
         if (snprintf(target, sizeof(target), "%s/%s", dest, rel) >=
@@ -577,30 +632,24 @@ static int walk_directory_at(int root_fd, int dir_fd, const char *rel,
                 }
             }
         } else if (S_ISREG(st.st_mode)) {
-            int input = openat(dir_fd, name, O_RDONLY | O_CLOEXEC |
-                (exclusion_policy == 5 ? 0 : O_NOFOLLOW));
-            if (input < 0 || fstat(input, &st) != 0 || !S_ISREG(st.st_mode)) {
-                if (input >= 0) close(input);
-                errno = EINVAL;
-                rc = -1;
-            } else if (write_path(manifest, 'F',
-                                  (st.st_mode & 0111) != 0, child) != 0) {
-                close(input);
+            if (write_path(manifest, 'F', (st.st_mode & 0111) != 0, child) != 0) {
                 rc = -1;
             } else if (copy_files) {
-                if (snprintf(target, sizeof(target), "%s/%s", dest, child) >=
-                    (int)sizeof(target)) {
+                int input = openat(dir_fd, name, O_RDONLY | O_CLOEXEC |
+                    (exclusion_policy == 5 ? 0 : O_NOFOLLOW));
+                if (input < 0 || fstat(input, &st) != 0 || !S_ISREG(st.st_mode)) {
+                    errno = EINVAL;
+                    rc = -1;
+                } else if (snprintf(target, sizeof(target), "%s/%s", dest, child) >=
+                           (int)sizeof(target)) {
                     errno = ENAMETOOLONG;
                     rc = -1;
                 } else if (make_parent(target) != 0 ||
-                           copy_regular_file(input, target, &st,
-                                             st.st_mode & 0777,
-                                             sync_output, 1) != 0) {
+                           copy_regular_file(input, target, &st, st.st_mode & 0777,
+                                             sync_output, 1, NULL) != 0) {
                     rc = -1;
                 }
-                close(input);
-            } else {
-                close(input);
+                if (input >= 0) close(input);
             }
         } else {
             errno = EINVAL;
@@ -747,7 +796,7 @@ int fo_c_generation_copy_declared_file(const char *source, const char *dest,
         errno = saved;
         return errno == 0 ? 1 : errno;
     }
-    rc = copy_regular_file(input, dest, &before, mode, 1, 0);
+    rc = copy_regular_file(input, dest, &before, mode, 1, 0, NULL);
     saved = errno;
     close(input);
     if (rc != 0) {
@@ -910,7 +959,9 @@ static int freeze_tree_at(const char *root, const char *rel) {
         errno = EINVAL;
         return -1;
     }
-    return chmod(path, (st.st_mode & 0111) ? 0555 : 0444);
+    mode_t frozen_mode = (st.st_mode & 0111) ? 0555 : 0444;
+    if ((st.st_mode & 0777) == frozen_mode) return 0;
+    return chmod(path, frozen_mode);
 }
 
 int fo_c_generation_freeze_tree(const char *root) {
