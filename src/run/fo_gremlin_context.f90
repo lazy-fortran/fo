@@ -11,7 +11,7 @@ module fo_gremlin_context
         resolve_dep_srcs, resolve_dev_dep_srcs
     use fo_gremlin_generation, only: generation_context_t, &
         generation_t, generation_capture, generation_load_inventory, &
-        generation_toolchain_key
+        generation_toolchain_key, generation_model_key
     use fo_driver, only: driver_pin_t
     use fo_input_inventory, only: input_declaration_t, input_inventory_t, &
         input_inventory_discover, input_inventory_declarations_from_config
@@ -197,6 +197,8 @@ contains
                 if (ierr == 0) then
                     if (inventory%valid .and. inventory%complete) then
                         if (inventory%digest == previous%digest) return
+                        if (generation_model_key(inventory, '', .false.) == &
+                            generation_model_key(previous, '', .false.)) return
                     end if
                     call cmake_capture_cleanup(inventory, ierr)
                     if (ierr /= 0) then

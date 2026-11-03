@@ -114,12 +114,32 @@ program test_gremlin_retention
         'the small view walk finished inside its budget')
 
     call gremlin_generation_pin_at(trim(first%root), .false., ierr, message)
+    call test_status_budget()
     call test_view_budget()
     call test_orphan_budget()
     call tree_remove(trim(root))
     write (*, '(a)') 'test_gremlin_retention: PASS'
 
 contains
+
+    subroutine test_status_budget()
+        integer :: i
+        character(len=:), allocatable :: large
+
+        large = trim(root)//'/status-budget/generations/large'
+        call fs_make_dir(large)
+        do i = 1, 2100
+            call fs_write_text(trim(root)//'/views/.building-execution-1/project/'// &
+                trim(int_text(i)), 'x')
+            call fs_write_text(large//'/'//trim(int_text(i)), 'x')
+        end do
+        json = gremlin_retention_json(second%root, trim(root)//'/views')
+        call require(index(json, '"view_bytes_exact":false') > 0, &
+            'frequent status walks bound work for large build slots')
+        json = gremlin_retention_json(large, '')
+        call require(index(json, '"bytes_exact":false') > 0, &
+            'cold status walks bound work for retained generations')
+    end subroutine test_status_budget
 
     subroutine test_orphan_budget()
         character(:), allocatable :: state, view, scratch_path

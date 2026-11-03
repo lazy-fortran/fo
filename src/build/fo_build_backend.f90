@@ -17,7 +17,7 @@ module fo_build_backend
         selected_compiler_command, COMPILER_UNKNOWN
     use fo_cmake_context, only: cmake_context_t, cmake_context_init, &
         cmake_context_query, cmake_context_read_reply, &
-        cmake_context_build_path, cmake_context_validate_hint
+        cmake_context_build_path, cmake_context_validate_hint, cmake_context_adopt_query
     use fo_cmake_native_config, only: native_cmake_selected, native_cmake_configure
     use fo_cmake_native_model, only: cm_plan_t
     use fo_cmake_native, only: native_cmake_build, native_cmake_test
@@ -807,6 +807,7 @@ contains
         type(cmake_diagnostic_t) :: diagnostic
         character(:), allocatable :: selected_preload
         logical :: has_cache, hint_valid, has_frozen_context
+        character(len=32) :: reuse_config
         character(len=4096) :: captured_generator
         character(len=4096) :: header_message
         integer :: n_args, i, line_end
@@ -897,6 +898,16 @@ contains
             return
         end if
 
+        call get_environment_variable('FO_GREMLIN_REUSE_CMAKE', reuse_config)
+        if (trim(reuse_config) == '1') then
+            call cmake_context_adopt_query(context)
+            call cmake_context_read_reply(context)
+            if (context%request_seen .and. context%has_codemodel .and. &
+                context%has_cache .and. context%has_toolchains) then
+                exitcode = 0
+                return
+            end if
+        end if
         if (len_trim(context%configure_preset) == 0 .or. &
             context%build_root_hint) &
             call cmake_context_query(context)
