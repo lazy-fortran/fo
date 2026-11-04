@@ -7,6 +7,7 @@ program test_cmake_capture_inputs
     use fo_test_gremlin_oracle, only: gremlin_setup
     use fo_test_cli, only: run_fo
     use fo_build_backend, only: backend_t, detect_backend
+    use fo_cmake_context, only: cmake_context_query
     use fo_cmake_generation, only: cmake_capture_inventory, cmake_capture_cleanup
     use fo_input_inventory, only: input_inventory_t, input_inventory_revalidate, &
         alias_root
@@ -483,6 +484,7 @@ contains
 
     subroutine repeated_compiler_capture()
         type(input_inventory_t) :: repeated
+        type(backend_t) :: fresh
         type(generation_t) :: captured
         character(:), allocatable :: raw_cache, frozen_cache
         integer :: j, metadata_root
@@ -493,6 +495,30 @@ contains
                 '_COMPILER:STRING='//trim(compiler_paths(j)), &
                 'first native configure types the explicit compiler')
         end do
+        fresh = detect_backend(project)
+        call cmake_capture_inventory(fresh, repeated, ierr, message, configured=.true.)
+        call assert_true(ierr == 0, 'recapture already configured native inputs')
+        if (ierr == 0) then
+            call assert_equal_string(repeated%digest, inventory%digest, &
+                'fresh context preserves the configured input identity')
+            call cmake_capture_cleanup(repeated, cleanup_status)
+            call assert_true(cleanup_status == 0, 'comparison metadata cleaned')
+        end if
+        fresh = detect_backend(project)
+        call cmake_context_query(fresh%cmake)
+        call cmake_capture_inventory(fresh, repeated, ierr, message, configured=.true.)
+        call assert_true(ierr == 0, 'capture with an unanswered query remains conservative')
+        if (ierr == 0) then
+            implicit_found = .false.
+            do j = 1, repeated%entry_count
+                if (repeated%entries(j)%relative_path == 'implicit.h') &
+                    implicit_found = .true.
+            end do
+            call assert_true(implicit_found, &
+                'a reply older than the pending query cannot delegate compiler headers')
+            call cmake_capture_cleanup(repeated, cleanup_status)
+            call assert_true(cleanup_status == 0, 'stale-reply metadata cleaned')
+        end if
         call repack_project_git('9', '50')
         call cmake_capture_inventory(backend, repeated, ierr, message)
         cleanup_status = int(setenv('FO_CMAKE_ARGS'//c_null_char, &
