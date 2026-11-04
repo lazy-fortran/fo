@@ -1208,10 +1208,17 @@ static int run_argv(const char *cwd, char *const argv[], const char *log_file,
     if (spawn_error == 0) {
 #if defined(__APPLE__) || defined(__linux__)
         char executable[PATH_MAX];
+#if defined(__linux__)
+        /* The monitor must be this image, which stays runnable here even after
+           a reinstall unlinks its path. */
+        snprintf(executable, sizeof(executable), "/proc/self/exe");
+#else
         if (fo_c_self_executable(executable, sizeof(executable)) != 0)
             spawn_error = ENOENT;
-        else spawn_error = start_command_monitor(cwd, argv, log_file, append, 2,
-            child_env, executable, -1, -1, -1, &pid, &accounted_pid, &report_fd);
+        else
+#endif
+            spawn_error = start_command_monitor(cwd, argv, log_file, append, 2,
+                child_env, executable, -1, -1, -1, &pid, &accounted_pid, &report_fd);
         if (spawn_error == 0) {
             lifeline_monitor = 1;
             target_start = fo_sys_process_start(accounted_pid);
