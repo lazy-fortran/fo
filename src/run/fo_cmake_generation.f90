@@ -3,7 +3,8 @@ module fo_cmake_generation
     !! and registered-test semantics; no FPM manifest or source scanner is used.
     use fo_build_backend, only: backend_t, cmake_configure
     use fo_cmake_context, only: cmake_context_build_path, cmake_context_t, &
-        cmake_context_read_reply, cmake_context_init, CMAKE_EXTERNAL_BUILD_DIR
+        cmake_context_read_reply, cmake_context_init, cmake_context_adopt_query, &
+        CMAKE_EXTERNAL_BUILD_DIR
     use fo_cmake_native_config, only: native_cmake_selected, native_cmake_configure
     use fo_cmake_native_model, only: cm_plan_t
     use fo_cmake_native_snapshot, only: native_snapshot_write
@@ -86,6 +87,7 @@ contains
         end if
         reuse = .false.
         if (present(configured)) reuse = configured
+        if (reuse) call cmake_context_adopt_query(backend%cmake)
         if (.not. reuse) then
             call make_tmpfile('fo-cmake-capture-configure', log_file)
             if (present(flags)) then
