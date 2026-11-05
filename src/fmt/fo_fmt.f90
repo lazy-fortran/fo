@@ -90,6 +90,7 @@ contains
 
         output = ''
         exitcode = 0
+        changed_ok = .false.
         b = detect_backend(trim(dir))
         scan_root = trim(dir)
         if (b%kind /= BACKEND_NONE) scan_root = b%project_dir
@@ -121,20 +122,96 @@ contains
             call fo_fmt_check_list(config_file, list_file, output, exitcode)
         else if (deep) then
             call fo_fmt_deep_list(list_file, exitcode)
+        else if (selection == FMT_SELECT_CHANGED .and. changed_ok) then
+            ! Same scope as the commit check: only the changed lines.
+            call fmt_changed_in_place(scan_root, config_file, list_file, output, &
+                exitcode)
         else
             call fo_fmt_list(config_file, list_file, exitcode)
         end if
         call delete_tmpfile(list_file)
     end subroutine fmt_sources
 
-    subroutine fmt_check_lines(dir, path, changed, output, exitcode)
+    subroutine fmt_changed_in_place(scan_root, config_file, list_file, output, exitcode)
+        !! Format the lines of each listed file that differ from HEAD; a file
+        !! git does not track yet, or a repository without HEAD, is all new.
+        character(len=*), intent(in) :: scan_root, config_file, list_file
+        character(len=*), intent(inout) :: output
+        integer, intent(out) :: exitcode
+
+        character(len=512) :: fpath, difflog, single_list
+        character(len=:), allocatable :: packed, text
+        logical, allocatable :: added(:)
+        integer :: u, ios, n_args, status, ierr, fmt_exit
+
+        exitcode = 0
+        open (newunit=u, file=trim(list_file), status='old', iostat=ios)
+        if (ios /= 0) return
+        do
+            read (u, '(a)', iostat=ios) fpath
+            if (ios /= 0) exit
+            if (len_trim(fpath) == 0) cycle
+            call make_tmpfile('fo_fmt_changed', difflog)
+            n_args = 0
+            packed = ''
+            call argv_push(packed, n_args, 'git')
+            call argv_push(packed, n_args, '-C')
+            call argv_push(packed, n_args, path_dirname(trim(fpath)))
+            call argv_push(packed, n_args, 'ls-files')
+            call argv_push(packed, n_args, '--error-unmatch')
+            call argv_push(packed, n_args, '--')
+            call argv_push(packed, n_args, trim(fpath))
+            call process_run_argv_logged('', packed, n_args, trim(difflog), .false., 0, &
+                status)
+            if (status == 0) then
+                n_args = 0
+                packed = ''
+                call argv_push(packed, n_args, 'git')
+                call argv_push(packed, n_args, '-C')
+                call argv_push(packed, n_args, path_dirname(trim(fpath)))
+                call argv_push(packed, n_args, 'diff')
+                call argv_push(packed, n_args, '--no-color')
+                call argv_push(packed, n_args, '--no-ext-diff')
+                call argv_push(packed, n_args, '-U0')
+                call argv_push(packed, n_args, 'HEAD')
+                call argv_push(packed, n_args, '--')
+                call argv_push(packed, n_args, trim(fpath))
+                call process_run_argv_logged('', packed, n_args, trim(difflog), .false., &
+                    0, status)
+            end if
+            if (status == 0) then
+                call read_text_file_alloc(trim(difflog), text, ierr)
+                call delete_tmpfile(difflog)
+                if (ierr /= 0) then
+                    exitcode = 1
+                    cycle
+                end if
+                call fmt_diff_lines(text, .false., added)
+                call fmt_check_lines(scan_root, trim(fpath), added, output, exitcode, &
+                    apply=.true.)
+            else
+                call delete_tmpfile(difflog)
+                call make_tmpfile('fo_fmt_single', single_list)
+                call fs_write_text(trim(single_list), trim(fpath)//achar(10))
+                call fo_fmt_list(config_file, single_list, fmt_exit)
+                call delete_tmpfile(single_list)
+                if (fmt_exit /= 0) exitcode = 1
+            end if
+        end do
+        close (u)
+    end subroutine fmt_changed_in_place
+
+    subroutine fmt_check_lines(dir, path, changed, output, exitcode, apply)
         !! Check only the lines of dir/path flagged in `changed`, so formatting
         !! the formatter would apply elsewhere in a legacy file never blocks.
         !! Appends a report to `output` and sets `exitcode` to 1 on a violation.
+        !! With `apply`, rewrites exactly those changed lines to the form the
+        !! check accepts, and reports only lines it cannot rewrite in place.
         character(len=*), intent(in) :: dir, path
         logical, intent(in) :: changed(:)
         character(len=*), intent(inout) :: output
         integer, intent(inout) :: exitcode
+        logical, intent(in), optional :: apply
 
         type(backend_t) :: b
         character(len=512) :: scan_root, config_file, fpath, tmpf, difflog
@@ -143,7 +220,9 @@ contains
         integer, allocatable :: map(:)
         character(len=16) :: line_text
         integer :: n_args, status, ierr, pos, eol, n_old, n_new, k, offset
-        integer :: old_first, old_count, new_count
+        integer :: old_first, old_count, new_count, lead, shift
+        logical :: applying, rewritten, has_shift
+        character(len=:), allocatable :: original
 
         fpath = trim(path)
         if (.not. is_fortran_source(fpath)) return
@@ -228,10 +307,30 @@ contains
             k = k + 1
         end do
 
+        applying = .false.
+        if (present(apply)) applying = apply
+        rewritten = .false.
         do k = 1, min(n_old, size(changed))
             if (.not. changed(k)) cycle
             if (changed_line_ok(k)) cycle
             write (line_text, '(i0)') k
+            if (applying) then
+                ! The whitespace-blind alignment maps a line only when the
+                ! formatter changes its whitespace alone; a split, join or
+                ! other rewrite cannot be applied to this line by itself.
+                if (map(k) >= 1 .and. map(k) <= n_new) then
+                    call reference_shift(k, shift, has_shift)
+                    if (.not. has_shift) shift = 0
+                    lead = max(0, verify(new_lines(map(k))%s, ' ') - 1 - shift)
+                    old_lines(k)%s = repeat(' ', lead)//trim(adjustl(new_lines(map(k))%s))
+                    rewritten = .true.
+                else
+                    output = trim(output)//trim(path)//':'//trim(line_text)// &
+                        ': cannot be formatted in place'//achar(10)
+                    exitcode = 1
+                end if
+                cycle
+            end if
             output = trim(output)//trim(path)//':'//trim(line_text)// &
                 ': needs formatting'//achar(10)//'  -'//old_lines(k)%s//achar(10)
             if (map(k) >= 1 .and. map(k) <= n_new) &
@@ -239,7 +338,54 @@ contains
             exitcode = 1
             return
         end do
+        if (rewritten) then
+            call read_text_file_alloc(trim(fpath), original, ierr)
+            text = ''
+            do k = 1, n_old
+                text = text//old_lines(k)%s
+                if (k < n_old) text = text//achar(10)
+            end do
+            if (ierr == 0 .and. len(original) > 0) then
+                if (original(len(original):) == achar(10)) text = text//achar(10)
+            end if
+            ! Stream access keeps the file's own final newline, or its absence.
+            open (newunit=pos, file=trim(fpath), status='replace', access='stream', &
+                form='unformatted', iostat=ierr)
+            if (ierr /= 0) then
+                output = trim(output)//trim(path)//': cannot be written'//achar(10)
+                exitcode = 1
+                return
+            end if
+            write (pos) text
+            close (pos)
+        end if
     contains
+        subroutine reference_shift(k, shift, found)
+            !! Indentation shift the formatter applies to the nearest unchanged
+            !! code line, before k if there is one, else after it.
+            integer, intent(in) :: k
+            integer, intent(out) :: shift
+            logical, intent(out) :: found
+            integer :: j
+
+            shift = 0
+            found = .false.
+            do j = k - 1, 1, -1
+                if (reference_line(j)) then
+                    shift = line_shift(old_lines(j)%s, new_lines(map(j))%s)
+                    found = .true.
+                    return
+                end if
+            end do
+            do j = k + 1, n_old
+                if (reference_line(j)) then
+                    shift = line_shift(old_lines(j)%s, new_lines(map(j))%s)
+                    found = .true.
+                    return
+                end if
+            end do
+        end subroutine reference_shift
+
         logical function changed_line_ok(k)
             !! A changed line passes when the formatter moves it only by the
             !! indentation shift of its nearest unchanged code line, so a file

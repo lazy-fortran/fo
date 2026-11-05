@@ -407,6 +407,11 @@ name = "test_hook_precommit"
 source-dir = "test"
 main = "test_hook_precommit.f90"
 
+[[test]]
+name = "test_hook_format"
+source-dir = "test"
+main = "test_hook_format.f90"
+
 # Process-boundary hook oracle deliberately exercises multi-second budgets.
 [extra.fo.test-groups]
 slow = { tests = ["test_hook_precommit", "test_build_timeout_default_slow"] }

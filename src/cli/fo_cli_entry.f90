@@ -1899,7 +1899,9 @@ contains
                 deep_flag = ' --deep'
             end if
             if (exitcode /= 0) then
-                if (changed_mode) then
+                if (len_trim(fmt_output) > 0) then
+                    write (error_unit, '(a)') trim(fmt_output)
+                else if (changed_mode) then
                     write (error_unit, '(a)') 'fo fmt'//trim(deep_flag)// &
                         ' --changed: no Git worktree'
                 else
