@@ -711,6 +711,38 @@ program test_hook_precommit
     call assert_contains(result%stdout, 'legacy.f90:3: needs formatting', &
         'changed line is reported')
 
+    ! A merge is judged by its own resolutions: lines that arrive unchanged from
+    ! either parent never block it, a line differing from both parents does.
+    project = join_path(scratch, 'merge-format')
+    call write_text(project//'/fpm.toml', 'name = "hook_merge"'//nl)
+    call write_text(project//'/src/merged.f90', 'module merged_mod'//nl// &
+        'implicit none'//nl//'    integer, parameter :: a = 1'//nl// &
+        '    integer, parameter :: b = 2'//nl//'end module merged_mod'//nl)
+    call git([character(len=64) :: 'init', '-q'])
+    call git([character(len=64) :: 'add', 'fpm.toml', 'src/merged.f90'])
+    call git([character(len=64) :: 'commit', '-qm', 'Synthetic merge base'])
+    call git([character(len=64) :: 'checkout', '-q', '-b', 'side'])
+    call write_text(project//'/src/merged.f90', 'module merged_mod'//nl// &
+        'implicit none'//nl//'      integer,parameter::a=1'//nl// &
+        '    integer, parameter :: b = 2'//nl//'end module merged_mod'//nl)
+    call git([character(len=64) :: 'commit', '-qam', 'Side branch with its own formatting'])
+    call git([character(len=64) :: 'checkout', '-q', '-'])
+    call write_text(project//'/src/merged.f90', 'module merged_mod'//nl// &
+        'implicit none'//nl//'    integer, parameter :: a = 1'//nl// &
+        '    integer, parameter :: b = 3'//nl//'end module merged_mod'//nl)
+    call git([character(len=64) :: 'commit', '-qam', 'Main branch change'])
+    call git([character(len=64) :: 'merge', '-q', '--no-ff', '--no-commit', 'side'])
+    call hook()
+    call assert_process_ok(result, 'lines from either merge parent pass')
+    call write_text(project//'/src/merged.f90', 'module merged_mod'//nl// &
+        'implicit none'//nl//'      integer,parameter::a=1'//nl// &
+        '      integer,parameter::b=4'//nl//'end module merged_mod'//nl)
+    call git([character(len=64) :: 'add', 'src/merged.f90'])
+    call hook()
+    call assert_true(result%exit_code /= 0, 'badly formatted merge resolution blocks')
+    call assert_contains(result%stdout, 'merged.f90:4: needs formatting', &
+        'merge resolution is reported')
+
     ! A changed line follows its file's own indentation width.
     project = join_path(scratch, 'legacy-indent')
     call write_text(project//'/src/indent.f90', two_space_module('1', '    '))

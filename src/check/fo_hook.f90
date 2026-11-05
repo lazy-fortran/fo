@@ -309,6 +309,11 @@ contains
                         exit validation
                     end if
                     call fmt_diff_lines(text, .false., added)
+                    call merge_parent_lines(root, tree, trim(files(i)), added, j)
+                    if (j /= 0) then
+                        message = 'cannot diff staged '//trim(files(i))//' against MERGE_HEAD'
+                        exit validation
+                    end if
                     call fmt_check_lines(snapshot, trim(files(i)), added, formatting, status)
                 end do
             else
@@ -908,6 +913,41 @@ contains
         call process_run_argv_logged(root, packed, n, log, .false., cap, status, &
             env_extra=env, heartbeat_s=0)
     end subroutine git_run
+
+    subroutine merge_parent_lines(root, tree, path, added, status)
+        !! A merge commit owns only the lines that differ from every parent, its
+        !! conflict resolutions; lines arriving unchanged from a merged branch
+        !! carry that branch's formatting and were judged by its own commits.
+        character(len=*), intent(in) :: root, tree, path
+        logical, intent(inout) :: added(:)
+        integer, intent(out) :: status
+        character(len=:), allocatable :: text, heads, merge_head
+        logical, allocatable :: other(:)
+        integer :: pos, eol, k, ierr
+
+        status = 0
+        call git_text(root, git_words('rev-parse', '--git-path', 'MERGE_HEAD'), merge_head, k)
+        if (k /= 0 .or. len(merge_head) == 0) return
+        if (merge_head(1:1) /= '/') merge_head = root//'/'//merge_head
+        call read_text_file_alloc(merge_head, heads, ierr)
+        if (ierr /= 0) return
+        pos = 1
+        do while (pos <= len(heads))
+            eol = index(heads(pos:), achar(10))
+            if (eol == 0) eol = len(heads) - pos + 2
+            if (eol > 1) then
+                call git_text(root, git_words('diff-tree', '-p', '-U0', heads(pos:pos + eol - 2), &
+                    tree, '--', ':(literal)'//path), text, status, strip=.false.)
+                if (status /= 0) return
+                call fmt_diff_lines(text, .false., other)
+                do k = 1, size(added)
+                    added(k) = added(k) .and. k <= size(other)
+                    if (added(k)) added(k) = other(k)
+                end do
+            end if
+            pos = pos + eol
+        end do
+    end subroutine merge_parent_lines
 
     subroutine git_text(root, args, text, status, strip)
         character(len=*), intent(in) :: root, args
