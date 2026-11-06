@@ -1546,6 +1546,47 @@ void fo_c_setenv_default(const char *name, const char *value) {
     setenv(name, value, 1);
 }
 
+/* Homebrew installs OpenBLAS and LAPACK keg-only, so their pkg-config files
+   are outside pkg-config's default path and a `blas` dependency would not
+   resolve without a hand-set PKG_CONFIG_PATH. Append the existing keg
+   directories after anything the user set, so explicit choices still win. */
+void fo_c_configure_pkg_config(void) {
+    const char *prefixes[] = {getenv("HOMEBREW_PREFIX"), "/opt/homebrew", "/usr/local",
+                              "/home/linuxbrew/.linuxbrew"};
+    const char *kegs[] = {"openblas", "lapack"};
+    const char *current = getenv("PKG_CONFIG_PATH");
+    char value[16384], directory[PATH_MAX];
+    struct stat st;
+    size_t used;
+    int changed = 0;
+
+    snprintf(value, sizeof(value), "%s", current ? current : "");
+    for (size_t i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); ++i) {
+        if (prefixes[i] == NULL || prefixes[i][0] == '\0') continue;
+        for (size_t k = 0; k < sizeof(kegs) / sizeof(kegs[0]); ++k) {
+            if (snprintf(directory, sizeof(directory), "%s/opt/%s/lib/pkgconfig",
+                         prefixes[i], kegs[k]) >= (int)sizeof(directory)) continue;
+            if (stat(directory, &st) != 0 || !S_ISDIR(st.st_mode)) continue;
+            /* Skip a directory already listed as a whole component. */
+            size_t length = strlen(directory);
+            const char *at = value;
+            int listed = 0;
+            while ((at = strstr(at, directory)) != NULL) {
+                if ((at == value || at[-1] == ':') &&
+                    (at[length] == '\0' || at[length] == ':')) { listed = 1; break; }
+                at += length;
+            }
+            if (listed) continue;
+            used = strlen(value);
+            if (used + length + 2 > sizeof(value)) continue;
+            if (used > 0) value[used++] = ':';
+            memcpy(value + used, directory, length + 1);
+            changed = 1;
+        }
+    }
+    if (changed) setenv("PKG_CONFIG_PATH", value, 1);
+}
+
 /* Absolute path of the running fo image. Test children receive it as FO so
    they exercise this driver, not whichever fo PATH would find. */
 int fo_c_self_executable(char *out, int capacity) {

@@ -35,6 +35,13 @@ configuration file (absolute path). A registry package lives under
 `v` the latest numeric version is chosen. Remote registries, authentication
 and publishing are not supported and fail with an explicit message.
 
+The `blas`, `hdf5` and `netcdf` metapackages resolve through pkg-config, in
+fpm's provider order. Homebrew installs OpenBLAS and LAPACK keg-only, outside
+pkg-config's default search path; fo appends their `opt/*/lib/pkgconfig`
+directories under `HOMEBREW_PREFIX`, `/opt/homebrew`, `/usr/local` and
+`/home/linuxbrew/.linuxbrew` to `PKG_CONFIG_PATH` after any directories already
+set there, for itself and the commands it starts.
+
 ### Installation
 
 `fo install` builds the applications with the release profile and installs

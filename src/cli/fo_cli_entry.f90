@@ -31,7 +31,8 @@ module fo_cli_entry
     use fo_fmt, only: fmt_sources, FMT_SELECT_ALL, FMT_SELECT_FILES, FMT_SELECT_CHANGED, &
         write_git_changed_source_list
     use fo_process, only: process_exit, process_run_argv_logged, argv_push, &
-        process_configure_openmp, process_export_self_driver
+        process_configure_openmp, process_export_self_driver, &
+        process_configure_pkg_config
     use fo_ffc_cli, only: ffc_cmd_build, ffc_cmd_run, ffc_native_requested
     use fo_hook, only: hook_cli
     use fo_gremlin_cli, only: gremlin_cli_run
@@ -75,6 +76,7 @@ contains
         if (nargs == 0 .or. (trim(action) /= 'exec' .and. trim(action) /= 'run')) then
             call process_configure_openmp()
         end if
+        call process_configure_pkg_config()
         if (nargs == 0) then
             call gremlin_cli_run()
             stop

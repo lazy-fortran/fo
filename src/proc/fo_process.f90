@@ -3,7 +3,7 @@ module fo_process
         c_ptr, c_null_ptr
     implicit none
     private
-    public :: process_detect_nproc, process_configure_openmp
+    public :: process_detect_nproc, process_configure_openmp, process_configure_pkg_config
     public :: process_setenv_default, process_export_self_driver, process_self_executable
     public :: process_scan_sources
     public :: process_has_fortran_source_ext
@@ -66,6 +66,9 @@ module fo_process
 
         subroutine fo_c_configure_openmp() bind(C, name='fo_c_configure_openmp')
         end subroutine fo_c_configure_openmp
+
+        subroutine fo_c_configure_pkg_config() bind(C, name='fo_c_configure_pkg_config')
+        end subroutine fo_c_configure_pkg_config
 
         subroutine fo_c_setenv_default(name, value) &
                 bind(C, name='fo_c_setenv_default')
@@ -274,6 +277,10 @@ contains
     subroutine process_configure_openmp()
         call fo_c_configure_openmp()
     end subroutine process_configure_openmp
+
+    subroutine process_configure_pkg_config()
+        call fo_c_configure_pkg_config()
+    end subroutine process_configure_pkg_config
 
     subroutine process_suppress_heartbeats(suppress)
         logical, intent(in) :: suppress
