@@ -1,5 +1,6 @@
 #define _XOPEN_SOURCE 700
 #define _POSIX_C_SOURCE 200809L
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -235,4 +236,43 @@ int fo_gremlin_terminal_read(const char *project, const char *lane,
     if (strlen(stored_journal) + 1 > (size_t)journal_cap) return ENAMETOOLONG;
     strcpy(journal, stored_journal);
     return 0;
+}
+
+/* Session ids are <pid>-<seconds>-<nanoseconds> of the owner start. */
+static int session_start(const char *session, long long *sec, long long *nsec) {
+    const char *first = strchr(session, '-');
+    if (!first) return 0;
+    char *end = NULL;
+    *sec = strtoll(first + 1, &end, 10);
+    if (end == first + 1 || *end != '-') return 0;
+    const char *third = end + 1;
+    *nsec = strtoll(third, &end, 10);
+    return end != third && *end == '\0';
+}
+
+int fo_gremlin_terminal_latest(const char *project, const char *lane,
+        char *session, int session_cap) {
+    char canonical[PATH_MAX], parent[PATH_MAX], terminal[PATH_MAX], journal[PATH_MAX];
+    long long best_sec = -1, best_nsec = -1, sec, nsec;
+    struct dirent *entry;
+    DIR *dir;
+    if (session_cap <= 0) return EINVAL;
+    session[0] = '\0';
+    int e = paths(project, lane, "x", canonical, sizeof(canonical),
+                  parent, sizeof(parent), terminal, sizeof(terminal),
+                  journal, sizeof(journal), 0);
+    if (e) return e;
+    dir = opendir(parent);
+    if (!dir) return errno == ENOENT ? ENOENT : errno;
+    while ((entry = readdir(dir)) != NULL) {
+        const char *name = entry->d_name;
+        if (!safe_session_id(name) || !session_start(name, &sec, &nsec)) continue;
+        if (sec < best_sec || (sec == best_sec && nsec <= best_nsec)) continue;
+        if (strlen(name) + 1 > (size_t)session_cap) continue;
+        best_sec = sec;
+        best_nsec = nsec;
+        strcpy(session, name);
+    }
+    closedir(dir);
+    return best_sec < 0 ? ENOENT : 0;
 }
