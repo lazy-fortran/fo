@@ -140,7 +140,7 @@ contains
         integer, intent(out) :: exitcode
 
         character(len=512) :: fpath, difflog, single_list
-        character(len=:), allocatable :: packed, text
+        character(len=:), allocatable :: packed, text, report
         logical, allocatable :: added(:)
         integer :: u, ios, n_args, status, ierr, fmt_exit
 
@@ -169,9 +169,10 @@ contains
                 call argv_push(packed, n_args, 'git')
                 call argv_push(packed, n_args, '-C')
                 call argv_push(packed, n_args, path_dirname(trim(fpath)))
-                call argv_push(packed, n_args, 'diff')
-                call argv_push(packed, n_args, '--no-color')
-                call argv_push(packed, n_args, '--no-ext-diff')
+                ! Plumbing ignores diff.algorithm and similar user settings, as
+                ! the hook's diff-tree does, so both see the same changed lines.
+                call argv_push(packed, n_args, 'diff-index')
+                call argv_push(packed, n_args, '-p')
                 call argv_push(packed, n_args, '-U0')
                 call argv_push(packed, n_args, 'HEAD')
                 call argv_push(packed, n_args, '--')
@@ -187,8 +188,10 @@ contains
                     cycle
                 end if
                 call fmt_diff_lines(text, .false., added)
-                call fmt_check_lines(scan_root, trim(fpath), added, output, exitcode, &
+                report = ''
+                call fmt_check_lines(scan_root, trim(fpath), added, report, exitcode, &
                     apply=.true.)
+                output = trim(output)//report
             else
                 call delete_tmpfile(difflog)
                 call make_tmpfile('fo_fmt_single', single_list)
@@ -209,7 +212,7 @@ contains
         !! check accepts, and reports only lines it cannot rewrite in place.
         character(len=*), intent(in) :: dir, path
         logical, intent(in) :: changed(:)
-        character(len=*), intent(inout) :: output
+        character(len=:), allocatable, intent(inout) :: output
         integer, intent(inout) :: exitcode
         logical, intent(in), optional :: apply
 
@@ -336,7 +339,6 @@ contains
             if (map(k) >= 1 .and. map(k) <= n_new) &
                 output = trim(output)//'  +'//new_lines(map(k))%s//achar(10)
             exitcode = 1
-            return
         end do
         if (rewritten) then
             call read_text_file_alloc(trim(fpath), original, ierr)

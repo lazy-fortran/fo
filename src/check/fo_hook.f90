@@ -201,7 +201,7 @@ contains
         character(len=:), allocatable :: reuse, populated, backend_name, refresh_message
         type(string_t), allocatable :: excluded(:), included(:)
         character(len=4096), allocatable :: files(:)
-        character(len=16384) :: formatting
+        character(len=:), allocatable :: formatting
         integer :: status, n, i, j, fast, passed, nfiles, timeout_kind, cap, budget
         integer :: cleanup, attempts, nresults, r, test_cap
         real :: seconds
@@ -358,11 +358,14 @@ contains
                     call fmt_check_lines(snapshot, trim(files(i)), added, formatting, status)
                 end do
             else
+                formatting = repeat(' ', 16384)
                 call fmt_sources(snapshot, FMT_SELECT_FILES, .true., .false., files, &
                     nfiles, formatting, status)
             end if
             if (status /= 0) then
                 message = trim(formatting)
+                if (index(message, ': needs formatting') > 0) message = message// &
+                    'run: fo fmt --changed, then stage the reformatted files'
                 exit validation
             end if
             ! A project already configured with CMake keeps its populated

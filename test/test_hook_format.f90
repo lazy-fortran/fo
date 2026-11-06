@@ -57,6 +57,38 @@ program test_hook_format
     call hook()
     call assert_process_ok(result, 'hook accepts what fmt --changed wrote')
 
+    ! One run reports every badly formatted changed line and the remedy, and
+    ! the remedy leaves nothing for the hook to report.
+    project = join_path(scratch, 'two-lines')
+    call write_text(project//'/fpm.toml', 'name = "hook_two_lines"'//nl)
+    call write_text(project//'/src/two.f90', 'module two_mod'//nl// &
+        '    implicit none'//nl//'    integer, parameter :: a = 1'//nl// &
+        '    integer, parameter :: b = 2'//nl//'    integer, parameter :: c = 3'//nl// &
+        'end module two_mod'//nl)
+    call git([character(len=64) :: 'init', '-q'])
+    call git([character(len=64) :: 'add', 'fpm.toml', 'src/two.f90'])
+    call git([character(len=64) :: 'commit', '-qm', 'Synthetic two-line source'])
+    call write_text(project//'/src/two.f90', 'module two_mod'//nl// &
+        '    implicit none'//nl//'      integer,parameter::a=4'//nl// &
+        '    integer, parameter :: b = 2'//nl//'      integer,parameter::c=5'//nl// &
+        'end module two_mod'//nl)
+    call git([character(len=64) :: 'add', 'src/two.f90'])
+    call hook()
+    call assert_true(result%exit_code /= 0, 'two badly formatted changed lines block')
+    call assert_contains(result%stdout, 'two.f90:3: needs formatting', &
+        'first bad changed line is reported')
+    call assert_contains(result%stdout, 'two.f90:5: needs formatting', &
+        'second bad changed line is reported in the same run')
+    call assert_contains(result%stdout, 'run: fo fmt --changed', 'remedy is printed')
+    args = string_list_t()
+    call list_add(args, 'fmt')
+    call list_add(args, '--changed')
+    call run_fo(driver, args, project, scratch//'/cache', result, timeout_ms=60000)
+    call assert_process_ok(result, 'fmt --changed formats both changed lines')
+    call git([character(len=64) :: 'add', 'src/two.f90'])
+    call hook()
+    call assert_process_ok(result, 'hook accepts both lines fmt --changed wrote')
+
     ! A merge is judged by its own resolutions: lines that arrive unchanged from
     ! either parent never block it, a line differing from both parents does.
     project = join_path(scratch, 'merge-format')
