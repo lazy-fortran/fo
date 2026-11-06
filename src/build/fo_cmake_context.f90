@@ -3,6 +3,8 @@ module fo_cmake_context
     use, intrinsic :: iso_c_binding, only: c_long_long
     use fo_fs, only: fs_make_dir, fs_collect_files, fs_write_text, fs_identity, &
         fs_realpath
+    use fo_process, only: process_run_argv_logged, process_setenv_default, argv_push
+    use fo_util, only: make_tmpfile, delete_tmpfile, read_text_file_alloc
     use fx_json_parse, only: json_parser_t, json_event_t, &
         json_parser_init_strict, json_parser_next, JSON_OBJECT_START, &
         JSON_OBJECT_END, JSON_ARRAY_START, JSON_ARRAY_END, JSON_KEY, &
@@ -57,7 +59,7 @@ contains
         character(len=*), intent(in), optional :: configure_preset, build_preset
         character(len=*), intent(in), optional :: extra_args
         character(len=*), intent(in), optional :: test_preset, argv(:), build_targets
-        character(:), allocatable :: raw_args, target_error
+        character(:), allocatable :: raw_args, target_error, project_args
         integer :: i, env_length, env_status
         integer(int64) :: clock_tick
         character(len=40) :: token_text
@@ -112,6 +114,8 @@ contains
         raw_args = ''
         if (present(extra_args)) raw_args = extra_args
         if (.not. present(extra_args)) call env_value('FO_CMAKE_ARGS', raw_args)
+        project_args = project_cmake_args(context%source_root)
+        if (len_trim(project_args) > 0) raw_args = project_args//' '//raw_args
         call parse_argv(raw_args, context%extra_args, context%error)
         if (present(argv)) then
             do i = 1, size(argv)
@@ -407,6 +411,48 @@ contains
         close (unit)
         if (ios /= 0) deallocate (text)
     end subroutine cmake_context_read_file
+
+    function project_cmake_args(source_root) result(args)
+        !! Configure arguments persisted for the checkout as Git config
+        !! `fo.cmakeArgs`, which all its worktrees share. The first lookup is
+        !! exported as FO_CMAKE_PROJECT_ARGS, so child processes, frozen views
+        !! and the commit hook's own configure use the same value.
+        character(len=*), intent(in) :: source_root
+        character(:), allocatable :: args
+        character(len=1024) :: log
+        character(:), allocatable :: packed
+        integer :: length, status, n
+
+        args = ''
+        call get_environment_variable('FO_CMAKE_PROJECT_ARGS', length=length, &
+            status=status)
+        if (status == 0) then
+            call env_value('FO_CMAKE_PROJECT_ARGS', args)
+            return
+        end if
+        packed = ''
+        n = 0
+        call argv_push(packed, n, 'git')
+        call argv_push(packed, n, '-C')
+        call argv_push(packed, n, source_root)
+        call argv_push(packed, n, 'config')
+        call argv_push(packed, n, '--local')
+        call argv_push(packed, n, '--get')
+        call argv_push(packed, n, 'fo.cmakeArgs')
+        call make_tmpfile('fo-cmake-project-args', log)
+        call process_run_argv_logged(source_root, packed, n, trim(log), .false., 10, &
+            status)
+        ! Exit 1 is an unset key inside a repository; anything else (no
+        ! repository, no git) leaves the lookup to a later context.
+        if (status == 0) then
+            call read_text_file_alloc(trim(log), args, length)
+            if (length /= 0) args = ''
+            if (index(args, new_line('a')) > 0) args = args(:index(args, new_line('a')) - 1)
+        end if
+        call delete_tmpfile(trim(log))
+        if (status == 0 .or. status == 1) &
+            call process_setenv_default('FO_CMAKE_PROJECT_ARGS', trim(args))
+    end function project_cmake_args
 
     subroutine adopt_generation_build(context)
         !! A frozen generation view builds in the directory its capture

@@ -446,6 +446,7 @@ contains
             call append_environment_value(context%environment, 'FO_CMAKE_CONFIG')
             call append_environment_value(context%environment, 'FO_CMAKE_GENERATOR')
             call append_environment_value(context%environment, 'FO_CMAKE_ARGS')
+            call append_environment_value(context%environment, 'FO_CMAKE_PROJECT_ARGS')
             call append_environment_value(context%environment, 'FO_CMAKE_CONFIGURE_PRESET')
             call append_environment_value(context%environment, 'FO_CMAKE_BUILD_PRESET')
             call append_environment_value(context%environment, 'FO_CMAKE_BUILD_TARGETS')

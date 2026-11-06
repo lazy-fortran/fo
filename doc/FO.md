@@ -206,8 +206,8 @@ separate system/environment package manager.
 Delegated configure and build commands default to a 3600 s wall limit;
 `FO_BUILD_TIMEOUT` overrides that limit.
 
-CMake mode configures `cmake -S . -B build -G Ninja`, forwards `FC`,
-`FO_CMAKE_ARGS`, and effective Fortran flags, then calls
+CMake mode configures `cmake -S . -B build -G Ninja`, forwards `FC`, the
+checkout's Git config `fo.cmakeArgs`, `FO_CMAKE_ARGS`, and effective Fortran flags, then calls
 `cmake --build build -j <FO_JOBS>`. Tests run through CTest with parallelism,
 failure output, named filters, and slow-test label exclusion. fo reads CMake's
 File API and CTest registry as a project model for test selection (see below)
