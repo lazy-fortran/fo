@@ -2,7 +2,9 @@ program test_gremlin_cmake_fetch_header
     !! A header-only FetchContent dependency is consumed only through an
     !! include directory under FETCHCONTENT_BASE_DIR. The frozen generation
     !! must carry the populated source, because its disconnected replay
-    !! cannot download it again.
+    !! cannot download it again. A fetched dependency may itself fetch a
+    !! nested one whose project() name differs from its declared name; the
+    !! replay must override the declared name to find that nested source.
     use fo_test_harness, only: string_list_t, process_result_t, list_add
     use fo_test_harness, only: write_text, assert_true, finish_assertions, &
         make_directory
@@ -27,6 +29,23 @@ program test_gremlin_cmake_fetch_header
     call make_directory(scratch//'/upstream')
     header = scratch//'/upstream/header_value.inc'
     call write_text(header, 'integer, parameter :: header_value = 13'//nl)
+    call write_text(scratch//'/outer/CMakeLists.txt', &
+        'project(outer_dep LANGUAGES Fortran)'//nl// &
+        'include(FetchContent)'//nl// &
+        'FetchContent_Declare(nested-lib DOWNLOAD_COMMAND "${CMAKE_COMMAND}" -E '// &
+        'copy_directory "'//scratch//'/nested" <SOURCE_DIR>)'//nl// &
+        'FetchContent_MakeAvailable(nested-lib)'//nl// &
+        'add_library(outer_value INTERFACE)'//nl// &
+        'target_link_libraries(outer_value INTERFACE nested::value)'//nl)
+    call write_text(scratch//'/nested/CMakeLists.txt', &
+        'project(nested LANGUAGES Fortran)'//nl// &
+        'add_library(nested_value nested_value.f90)'//nl// &
+        'target_include_directories(nested_value PUBLIC "${CMAKE_CURRENT_BINARY_DIR}")'//nl// &
+        'add_library(nested::value ALIAS nested_value)'//nl)
+    call write_text(scratch//'/nested/nested_value.f90', &
+        'module nested_value_m'//nl//'implicit none'//nl// &
+        'integer, parameter :: nested_value = 29'//nl// &
+        'end module nested_value_m'//nl)
     call write_text(project//'/fpm.toml', 'name = "cmake_fetch_header_probe"'//nl)
     call write_text(project//'/CMakeLists.txt', &
         'cmake_minimum_required(VERSION 3.22)'//nl// &
@@ -34,15 +53,19 @@ program test_gremlin_cmake_fetch_header
         'include(FetchContent)'//nl// &
         'FetchContent_Declare(header_dep URL "file://'//header//'" '// &
         'DOWNLOAD_NO_EXTRACT TRUE)'//nl// &
-        'FetchContent_MakeAvailable(header_dep)'//nl// &
+        'FetchContent_Declare(outer_dep DOWNLOAD_COMMAND "${CMAKE_COMMAND}" -E '// &
+        'copy_directory "'//scratch//'/outer" <SOURCE_DIR>)'//nl// &
+        'FetchContent_MakeAvailable(header_dep outer_dep)'//nl// &
         'enable_testing()'//nl// &
         'add_executable(marker test/marker.f90)'//nl// &
         'target_include_directories(marker PRIVATE "${header_dep_SOURCE_DIR}")'//nl// &
+        'target_link_libraries(marker PRIVATE outer_value)'//nl// &
         'add_test(NAME registered_marker COMMAND marker)'//nl)
     call write_text(project//'/test/marker.f90', &
-        'program header_marker'//nl//'implicit none'//nl// &
-        'include "header_value.inc"'//nl// &
+        'program header_marker'//nl//'use nested_value_m, only: nested_value'//nl// &
+        'implicit none'//nl//'include "header_value.inc"'//nl// &
         'if (header_value /= 13) error stop "wrong header"'//nl// &
+        'if (nested_value /= 29) error stop "wrong nested dependency"'//nl// &
         'print *, "registered marker passed"'//nl// &
         'end program header_marker'//nl)
     call list_add(args, 'gremlin')
@@ -59,7 +82,8 @@ program test_gremlin_cmake_fetch_header
 
     call wait_verified(generation, found)
     call assert_true(found, &
-        'frozen generation builds against the populated header-only dependency')
+        'frozen generation builds against the populated header-only and '// &
+        'nested dependencies')
     call gremlin_stop_lane(driver, project, cache, state, lane, session, &
         allow_terminal_error=.true.)
     call finish_assertions(retain_failed_scratch=.true.)

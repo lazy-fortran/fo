@@ -62,7 +62,7 @@ contains
         type(path_alias_t), allocatable :: aliases(:)
         type(cmake_plan_t) :: link_plan
         type(string_t), allocatable :: implicit_link_dirs(:)
-        integer :: n_roots, cursor, i, cleanup_status
+        integer :: n_roots, cursor, i, cleanup_status, pass
         logical :: exists, source_key, provider, physical
         logical :: reuse, library_hint, ninja_found, generator_changed
         character(len=PATH_LEN) :: ninja_path
@@ -132,34 +132,47 @@ contains
             if (key == 'FETCHCONTENT_BASE_DIR') &
                 call canonical_directory(value, fetchcontent_base)
             if (key == 'CMAKE_GENERATOR') generator = value
-            if (len(key) == 0 .or. len(value) == 0) cycle
-            provider = .false.
-            if (len(key) > 6) then
-                if (key(len(key) - 5:) == '_BUILD') then
-                    inquire(file=value//'/CMakeCache.txt', exist=provider)
+        end do
+        ! The replay overrides FETCHCONTENT_SOURCE_DIR_<declared name>. A
+        ! dependency's project() may cache <other>_SOURCE_DIR for the same
+        ! root (abseil-cpp as absl), so declared names claim roots first.
+        do pass = 1, 2
+            cursor = 1
+            do while (next_cache_line(cache_text, cursor, line))
+                call cache_entry(line, key, kind, value)
+                if (len(key) == 0) cycle
+                if ((index(key, 'FETCHCONTENT_SOURCE_DIR_') == 1) .neqv. (pass == 1)) cycle
+                if (pass == 1 .and. len(value) == 0 .and. len(key) > 24) &
+                    value = trim(fetchcontent_base)//'/'//lower(key(25:))//'-src'
+                if (len(value) == 0) cycle
+                provider = .false.
+                if (len(key) > 6) then
+                    if (key(len(key) - 5:) == '_BUILD') then
+                        inquire(file=value//'/CMakeCache.txt', exist=provider)
+                    end if
                 end if
-            end if
-            source_key = index(key, 'FETCHCONTENT_SOURCE_DIR_') == 1 .or. provider
-            if (len(key) > 11) then
-                if (key(len(key) - 10:) == '_SOURCE_DIR') source_key = .true.
-            end if
-            if (.not. source_key) cycle
-            call canonical_directory(value, normalized)
-            if (trim(normalized) == trim(project_path)) cycle
-            inquire (file=trim(normalized)//'/CMakeLists.txt', exist=exists)
-            ! Populated FetchContent sources may be consumed without a subproject.
-            if (.not. exists) inquire (file=trim(normalized), exist=exists)
-            if (.not. exists) cycle
-            if (provider) then
-                key = 'provider-'//key
-            else if (index(key, 'FETCHCONTENT_SOURCE_DIR_') == 1) then
-                key = key(25:)
-            else
-                key = key(:len(key) - 11)
-            end if
-            call add_source(normalized, key, n_roots, roots, bundles, labels, &
-                names, ierr, message, provider)
-            if (ierr /= 0) return
+                source_key = index(key, 'FETCHCONTENT_SOURCE_DIR_') == 1 .or. provider
+                if (len(key) > 11) then
+                    if (key(len(key) - 10:) == '_SOURCE_DIR') source_key = .true.
+                end if
+                if (.not. source_key) cycle
+                call canonical_directory(value, normalized)
+                if (trim(normalized) == trim(project_path)) cycle
+                inquire (file=trim(normalized)//'/CMakeLists.txt', exist=exists)
+                ! Populated FetchContent sources may be consumed without a subproject.
+                if (.not. exists) inquire (file=trim(normalized), exist=exists)
+                if (.not. exists) cycle
+                if (provider) then
+                    key = 'provider-'//key
+                else if (index(key, 'FETCHCONTENT_SOURCE_DIR_') == 1) then
+                    key = key(25:)
+                else
+                    key = key(:len(key) - 11)
+                end if
+                call add_source(normalized, key, n_roots, roots, bundles, labels, &
+                    names, ierr, message, provider)
+                if (ierr /= 0) return
+            end do
         end do
         ! Populate without add_subdirectory does not create a cached
         ! <name>_SOURCE_DIR. Freeze the populated roots actually used by targets.
