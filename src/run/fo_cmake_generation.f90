@@ -36,7 +36,7 @@ module fo_cmake_generation
     end type path_alias_t
     public :: cmake_capture_inventory, cmake_registered_names, cmake_capture_cleanup
     public :: cmake_stage_git, cmake_populated_dependency_args
-    public :: cmake_unpopulated_dependency
+    public :: cmake_unpopulated_dependency, cmake_cache_compiler_args
 contains
     subroutine cmake_capture_inventory(backend, inventory, ierr, message, flags, &
             configured)
@@ -657,8 +657,22 @@ contains
                 '='//value//'"'
         end do
         if (n > 0) args = ' "-DFETCHCONTENT_BASE_DIR='//trim(target_base)//'"'//args
-        ! A fresh configure would rerun CMake's compiler search, which can pick a
-        ! different compiler than the one this project was configured with.
+        args = args//cmake_cache_compiler_args(populated_build)
+    end subroutine cmake_populated_dependency_args
+
+    function cmake_cache_compiler_args(build_dir) result(args)
+        !! A fresh configure would rerun CMake's compiler search, which can pick a
+        !! different compiler than the one this project was configured with. The
+        !! CC, CXX and FC environment, when set, keeps precedence.
+        character(len=*), intent(in) :: build_dir
+        character(len=:), allocatable :: args
+        character(len=:), allocatable :: cache, line, key, kind, value, name
+        integer :: cursor, i, ierr
+        logical :: exists
+
+        args = ''
+        call read_text_file_alloc(trim(build_dir)//'/CMakeCache.txt', cache, ierr)
+        if (ierr /= 0) return
         cursor = 1
         do while (next_cache_line(cache, cursor, line))
             call cache_entry(line, key, kind, value)
@@ -681,7 +695,7 @@ contains
             if (.not. exists) cycle
             args = args//' "-D'//key//'='//trim(value)//'"'
         end do
-    end subroutine cmake_populated_dependency_args
+    end function cmake_cache_compiler_args
 
     subroutine capture_project_git(source, metadata, script, ierr, message)
         character(len=*), intent(in) :: source, metadata

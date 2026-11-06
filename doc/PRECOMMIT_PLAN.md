@@ -89,6 +89,11 @@ changed. A lock in the common Git directory serializes commits of different
 worktrees. Changing the compilers or dependency roots reconfigures that build
 as CMake itself does. The bounded hook keeps its owned temporary views.
 
+The staged configure takes its compilers from `CC`, `CXX` and `FC` when set,
+otherwise from the reused build's cache, otherwise from the project's presets
+and CMake's own search; a configure that fetches a missing dependency follows
+the same order. The hook prints the chosen toolchain in one line.
+
 A CMake project without `fpm.toml` whose configured build enables no Fortran
 (its cache records no `CMAKE_Fortran_COMPILER`) keeps its Fortran files as data,
 for example a compiler's test inputs. The hook then reports that and checks

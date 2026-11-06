@@ -52,6 +52,8 @@ program test_hook_reuse
     call git('add', 'a.f90')
     call hook()
     call assert_process_ok(result, 'first staged build passes')
+    call assert_contains(result%stderr, 'fo hook: toolchain Fortran', 'toolchain is reported')
+    call assert_contains(result%stderr, '(FC)', 'FC from the environment selects Fortran')
     log = read_text(scratch//'/.fo-staged-repo/build/.ninja_log')
     a_before = record(log, 'a.f90.o')
     b_before = record(log, 'b.f90.o')

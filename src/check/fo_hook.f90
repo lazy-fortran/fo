@@ -10,7 +10,7 @@ module fo_hook
     use fo_gremlin_request, only: gremlin_json_text_valid
     use fo_exec_service, only: exec_job_t, exec_start, exec_poll, EXEC_UNCANCELLED
     use fo_cmake_generation, only: cmake_stage_git, cmake_populated_dependency_args, &
-        cmake_unpopulated_dependency
+        cmake_unpopulated_dependency, cmake_cache_compiler_args
     use fo_cmake_context, only: cmake_context_build_path
     use fo_hook_presets, only: hook_stage_presets
     use fo_hook_evidence, only: hook_input_key, hook_receipt_read, &
@@ -209,7 +209,7 @@ contains
         logical :: fortran, refreshed, has_fpm, shared
         logical, allocatable :: added(:)
         integer(c_int) :: lock_fd
-        character(len=:), allocatable :: state
+        character(len=:), allocatable :: state, previous
 
         code = 1
         message = ''
@@ -442,8 +442,9 @@ contains
                 refresh_message = cmake_unpopulated_dependency(snapshot//'/build')
                 if (len(refresh_message) == 0) exit
                 refreshed = .true.
+                previous = populated
                 call populate_cmake_dependencies(root, populated, populated_found, &
-                    refresh_message, refresh=.true.)
+                    refresh_message, refresh=.true., compilers_from=previous)
                 if (len(refresh_message) > 0 .or. .not. populated_found) then
                     status = 1
                     message = 'cannot fetch a dependency the reused CMake build '// &
@@ -469,6 +470,8 @@ contains
                 backend%cmake%build_root = 'build'
                 backend%cmake%build_root_hint = .true.
             end do
+            if (backend%kind == BACKEND_CMAKE .and. .not. json) &
+                write(error_unit, '(a)') toolchain_line(snapshot//'/build', reuse)
             if (status /= 0) then
                 if (status == 124) message = &
                     'staged build exceeded hard cap during CMake configure'
@@ -687,6 +690,41 @@ contains
         end do
     end subroutine checkout_tree
 
+    function toolchain_line(build_dir, reuse) result(line)
+        !! The compilers the staged build uses and where each choice came from.
+        character(len=*), intent(in) :: build_dir, reuse
+        character(len=:), allocatable :: line
+        character(len=*), parameter :: languages(3) = [character(len=7) :: &
+            'Fortran', 'C', 'CXX']
+        character(len=*), parameter :: variables(3) = [character(len=3) :: 'FC', 'CC', 'CXX']
+        character(len=:), allocatable :: cache, entry, origin
+        integer :: k, at, finish, length, ierr
+
+        line = 'fo hook: toolchain'
+        call read_text_file_alloc(build_dir//'/CMakeCache.txt', cache, ierr)
+        if (ierr /= 0) cache = ''
+        do k = 1, 3
+            ! Position p of the newline in the prefixed text is where the entry
+            ! starts in the cache itself.
+            at = index(new_line('a')//cache, new_line('a')//'CMAKE_'// &
+                trim(languages(k))//'_COMPILER:')
+            if (at == 0) cycle
+            finish = index(cache(at:), new_line('a'))
+            if (finish == 0) finish = len(cache) - at + 2
+            entry = cache(at:at + finish - 2)
+            call get_environment_variable(trim(variables(k)), length=length)
+            if (length > 0) then
+                origin = trim(variables(k))
+            else if (index(reuse, '-DCMAKE_'//trim(languages(k))//'_COMPILER=') > 0) then
+                origin = 'reused build'
+            else
+                origin = 'CMake'
+            end if
+            line = line//' '//trim(languages(k))//' '//entry(index(entry, '=') + 1:)// &
+                ' ('//origin//')'
+        end do
+    end function toolchain_line
+
     logical function inert_paths(root, tree, paths) result(inert)
         !! Documentation and images are inert unless a file other than
         !! documentation names them, as a build script installing a page would.
@@ -826,7 +864,8 @@ contains
         call cmake_configured_build_dir(path_dirname(common), build_dir, found, fortran)
     end subroutine hook_cmake_build_dir
 
-    subroutine populate_cmake_dependencies(root, build_dir, found, message, refresh)
+    subroutine populate_cmake_dependencies(root, build_dir, found, message, refresh, &
+            compilers_from)
         !! A fresh CMake checkout has never fetched what it fetches at configure
         !! time (FetchContent, ExternalProject), and the staged configure is
         !! offline. Configure the checkout's own build directory once, with
@@ -836,6 +875,8 @@ contains
         character(len=:), allocatable, intent(out) :: build_dir, message
         logical, intent(out) :: found
         logical, intent(in), optional :: refresh
+        !! A configured build whose compilers this configure keeps.
+        character(len=*), intent(in), optional :: compilers_from
         type(backend_t) :: backend
         character(len=1024) :: log_file
         character(len=:), allocatable :: text, names
@@ -867,7 +908,12 @@ contains
                 saved(i)%text)
             status = c_unsetenv(trim(git_context(i))//c_null_char)
         end do
+        if (present(compilers_from)) then
+            call process_setenv_default('FO_CMAKE_ARGS', &
+                cmake_cache_compiler_args(compilers_from))
+        end if
         call populate()
+        status = c_unsetenv('FO_CMAKE_ARGS'//c_null_char)
         do i = 1, size(git_context)
             if (kept(i)) call process_setenv_default(trim(git_context(i)), saved(i)%text)
         end do
