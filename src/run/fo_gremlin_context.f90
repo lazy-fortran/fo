@@ -109,6 +109,12 @@ contains
         if (backend%kind == BACKEND_CMAKE) then
             call capture_cmake_inventory(backend, input_inventory, ierr, message, &
                 previous_inventory)
+            ! A failed configure is a project input failure, reported like a
+            ! failed build and retried on the next change.
+            if (ierr /= 0) then
+                ok = .false.
+                return
+            end if
         else
             call input_inventory_declarations_from_config(project_dir, declarations, &
                 ierr, message)

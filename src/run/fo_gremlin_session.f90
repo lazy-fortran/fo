@@ -53,6 +53,14 @@ module fo_gremlin_session
             integer(c_int), value :: status_cap, journal_cap
             integer(c_int) :: ierr
         end function c_terminal_read
+        function c_terminal_latest(project, lane, session, session_cap) &
+                bind(C, name='fo_gremlin_terminal_latest') result(ierr)
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: project(*), lane(*)
+            character(kind=c_char), intent(out) :: session(*)
+            integer(c_int), value :: session_cap
+            integer(c_int) :: ierr
+        end function c_terminal_latest
     end interface
 
 contains
@@ -78,7 +86,12 @@ contains
             owner_pid, owner_start, live_status, ierr, live_message)
         if (len_trim(request%session_id) == 0) then
             if (ierr /= 0) then
-                message = trim(live_message)
+                ! An exited owner leaves its last state as a terminal snapshot.
+                if (ierr == 2) then
+                    call load_latest_terminal(ierr)
+                else
+                    message = trim(live_message)
+                end if
                 return
             end if
             call fill_read_session(project_dir, request%lane_id, trim(live_id), &
@@ -107,6 +120,27 @@ contains
                 message = 'no live or terminal Gremlin session matches session_id'
             end if
         end if
+
+    contains
+
+        subroutine load_latest_terminal(live_error)
+            integer, intent(in) :: live_error
+            character(kind=c_char) :: c_session(129)
+            integer :: latest_error
+
+            c_session = c_null_char
+            latest_error = int(c_terminal_latest(trim(project_dir)//c_null_char, &
+                trim(request%lane_id)//c_null_char, c_session, &
+                int(size(c_session), c_int)))
+            if (latest_error == 0) then
+                call gremlin_load_terminal_session(project_dir, request%lane_id, &
+                    c_buffer_text(c_session), session, status_text, ierr, message)
+                if (ierr == 0) return
+            end if
+            ierr = live_error
+            message = trim(live_message)
+        end subroutine load_latest_terminal
+
     end subroutine gremlin_resolve_read_session
 
     subroutine fill_read_session(project_dir, lane_id, session_id, session, ierr, message)

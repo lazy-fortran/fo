@@ -93,10 +93,29 @@ program test_gremlin_cmake_configure_events
         call gremlin_wait_ms(50)
     end do
     call assert_true(rejected, 'changed configuration reaches the native CMake oracle')
+    call assert_true(gremlin_field(reply, 'state') == 'capture_failed', &
+        'a failed configuration keeps the owner watching instead of ending it')
     call assert_true(.not. json_boolean_value(json_member(reply, 'local_gate_green')), &
         'a failed changed configuration cannot reuse the previous green gate')
+
+    ! Repairing the configuration lets the same owner recover.
+    call write_text(project//'/CMakeLists.txt', cmake_source)
+    call wait_green()
     call gremlin_stop_lane(driver, project, cache, state, lane, session, &
         allow_terminal_error=.true.)
+
+    ! Without a session, status reports the exited owner's last state.
+    args = string_list_t()
+    call list_add(args, 'gremlin')
+    call list_add(args, 'status')
+    call list_add(args, '--dir')
+    call list_add(args, project)
+    call list_add(args, '--lane')
+    call list_add(args, lane)
+    call gremlin_json(driver, project, cache, state, args, reply, process, 10000)
+    call assert_true(gremlin_field(reply, 'session_id') == session .and. &
+        gremlin_field(reply, 'state') == 'stopped', &
+        'status without a session reports the exited owner')
     call finish_assertions(retain_failed_scratch=.true.)
 
 contains
