@@ -21,14 +21,16 @@ static int append_once(char *dst, size_t size, const char *addition) {
     return 0;
 }
 
-/* Hook-local policy; the process exits after checking the snapshot. */
+/* Hook-local policy; the process exits after checking the snapshot. An
+   offline view builds against reused dependency roots and fetches nothing; the
+   shared CMake view fetches what the staged commit pins. */
 int fo_c_hook_prepare(const char *root, const char *view, int build_cap,
-                      const char *reuse) {
+                      const char *reuse, int offline_view) {
     char source[8192], destination[8192], seconds[32];
     struct stat st;
     const char *prior = getenv("FO_CMAKE_ARGS");
-    const char *offline = " -DFETCHCONTENT_FULLY_DISCONNECTED=ON"
-                          " -DFETCHCONTENT_UPDATES_DISCONNECTED=ON";
+    const char *offline = offline_view ? " -DFETCHCONTENT_FULLY_DISCONNECTED=ON"
+                          " -DFETCHCONTENT_UPDATES_DISCONNECTED=ON" : "";
     size_t size = (prior ? strlen(prior) : 0) + strlen(offline) +
                   (reuse ? strlen(reuse) : 0) + 1;
     char *arguments = malloc(size);
@@ -64,11 +66,11 @@ int fo_c_hook_prepare(const char *root, const char *view, int build_cap,
 #if defined(_WIN32) && !defined(__CYGWIN__)
     if (_putenv_s("FO_CACHE_RELOCATABLE", "1") ||
         _putenv_s("FO_BUILD_TIMEOUT", seconds) ||
-        _putenv_s("GIT_ALLOW_PROTOCOL", "file")) return EINVAL;
+        (offline_view && _putenv_s("GIT_ALLOW_PROTOCOL", "file"))) return EINVAL;
 #else
     if (setenv("FO_CACHE_RELOCATABLE", "1", 1) ||
         setenv("FO_BUILD_TIMEOUT", seconds, 1) ||
-        setenv("GIT_ALLOW_PROTOCOL", "file", 1)) return errno;
+        (offline_view && setenv("GIT_ALLOW_PROTOCOL", "file", 1))) return errno;
 #endif
     if (snprintf(source, sizeof(source), "%s/build/dependencies", root) >= (int)sizeof(source) ||
         snprintf(destination, sizeof(destination), "%s/build", view) >= (int)sizeof(destination))

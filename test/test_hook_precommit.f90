@@ -150,6 +150,10 @@ program test_hook_precommit
     call assert_process_ok(result, 'slow fast-tier test only warns')
     call assert_contains(result%stdout, '"slow_fast_tests":["wait"]', 'slow warning names test')
     call assert_contains(result%stdout, '"fast_passed":1', 'completed fast tier recorded')
+    ! The ordinary hook builds in the shared online view; the bounded hook reuses
+    ! the evidence of explicit preparation in its offline view.
+    call hook(prepare=.true.)
+    call assert_process_ok(result, 'prepare CMake evidence for the bounded hook')
     call bounded_hook()
     call assert_process_ok(result, 'bounded CMake reuses prepared evidence')
     call assert_contains(result%stdout, '"cache_hit":true', 'bounded CMake receipt hit')
@@ -159,7 +163,7 @@ program test_hook_precommit
     ! unbounded hook verifies each cold key, so a loaded machine cannot turn
     ! the eight-second commit deadline into a false failure.
     call git([character(len=64) :: 'symbolic-ref', 'HEAD', 'refs/heads/alternate'])
-    call hook()
+    call hook(prepare=.true.)
     call assert_process_ok(result, 'verify changed unborn Git ref')
     call assert_contains(result%stdout, '"cache_hit":false', 'unborn ref invalidates proof')
     ! The bounded hook keys proof by the current ref: it reuses the evidence
@@ -309,8 +313,9 @@ program test_hook_precommit
     call gremlin_stop_lane(driver, project, scratch//'/cache', scratch//'/state', &
         'hook-proof', session)
     ! A cold configure, build and fast test must finish here, which the bounded
-    ! commit deadline cannot guarantee on a loaded machine.
-    call hook()
+    ! commit deadline cannot guarantee on a loaded machine. Preparation runs in
+    ! the offline view the bounded hook uses.
+    call hook(prepare=.true.)
     call assert_true(result%exit_code /= 0, 'offline configure cannot reuse online PASS')
     call assert_contains(result%stdout, '"cache_hit":false', 'different effective context misses')
     call assert_contains(result%stdout, 'fast test failed: context_probe', &
@@ -523,8 +528,8 @@ program test_hook_precommit
     call hook()
     call assert_process_ok(result, 'fresh clone fetches its CMake dependencies once')
     call assert_contains(result%stdout, '"fast_passed":1', 'fresh clone test ran')
-    call assert_true(file_exists(project//'/build/CMakeCache.txt'), &
-        'fresh clone keeps the configured build for later commits')
+    call assert_true(file_exists(join_path(scratch, '.fo-staged-fetch-clone')// &
+        '/build/CMakeCache.txt'), 'fresh clone keeps the configured build for later commits')
     project = join_path(scratch, 'fetch-lost')
     call write_text(project//'/CMakeLists.txt', 'cmake_minimum_required(VERSION 3.20)'//nl// &
         'project(hook_lost LANGUAGES Fortran)'//nl//'include(FetchContent)'//nl// &

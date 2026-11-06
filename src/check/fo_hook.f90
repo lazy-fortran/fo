@@ -35,10 +35,11 @@ module fo_hook
     public :: hook_cli
     real(dp), save :: commit_deadline = 0.0_dp
     interface
-        integer(c_int) function c_prepare(root, view, cap, reuse) bind(C, name='fo_c_hook_prepare')
+        integer(c_int) function c_prepare(root, view, cap, reuse, offline) &
+                bind(C, name='fo_c_hook_prepare')
             import :: c_char, c_int
             character(kind=c_char), intent(in) :: root(*), view(*), reuse(*)
-            integer(c_int), value :: cap
+            integer(c_int), value :: cap, offline
         end function c_prepare
         ! A blocking close-on-exec flock: it ends with the process, so a
         ! killed commit never blocks the next one.
@@ -291,9 +292,12 @@ contains
                     exit validation
                 end if
                 snapshot = owned_view
-            else if (.not. has_fpm .and. shared_view(root, snapshot, state)) then
+            else if (.not. has_fpm .and. .not. prepare .and. &
+                    shared_view(root, snapshot, state)) then
                 ! A CMake build is not relocatable, so incremental reuse needs one
                 ! fixed staged view per repository, shared by its worktrees.
+                ! Preparation keeps the offline view whose receipts the bounded
+                ! hook reuses.
                 call fs_make_dir(state, status)
                 if (status == 0) lock_fd = c_hook_lock(state//'/lock'//c_null_char)
                 if (lock_fd < 0) then
@@ -366,13 +370,21 @@ contains
             ! configure is offline. This runs before the backend
             ! is initialized so the effective configure arguments include it.
             call hook_cmake_build_dir(root, populated, populated_found)
-            ! The bounded hook keeps its deadline and never acquires anything.
-            if (.not. populated_found .and. len(owned_view) == 0) then
+            if (shared) then
+                ! The shared build fetches what the staged commit pins into its own
+                ! _deps and keeps it across commits; FetchContent updates a
+                ! dependency exactly when its pinned reference changes. Roots of
+                ! a developer build may hold other revisions, so only its
+                ! compilers are reused.
+                if (populated_found) reuse = cmake_cache_compiler_args(populated)
+                call reset_offline_build(snapshot//'/build')
+            else if (.not. populated_found .and. len(owned_view) == 0) then
+                ! The bounded hook keeps its deadline and never acquires anything.
                 call populate_cmake_dependencies(root, populated, populated_found, &
                     message)
                 if (len(message) > 0) exit validation
             end if
-            if (populated_found) then
+            if (populated_found .and. .not. shared) then
                 call cmake_populated_dependency_args(populated, &
                     'build/_deps', reuse, status, dependency_message)
                 if (status /= 0) then
@@ -381,7 +393,7 @@ contains
                 end if
             end if
             status = c_prepare(root//c_null_char, snapshot//c_null_char, int(cap, c_int), &
-                reuse//c_null_char)
+                reuse//c_null_char, merge(0_c_int, 1_c_int, shared))
             if (status /= 0) then
                 message = 'cannot prepare private build/dependency view'
                 exit validation
@@ -425,7 +437,7 @@ contains
             if (size(excluded) > 0) request%exclude_labels = excluded
             if (size(included) > 0) request%include_labels = included
             refreshed = .not. populated_found .or. len(owned_view) > 0 .or. &
-                backend%kind /= BACKEND_CMAKE
+                backend%kind /= BACKEND_CMAKE .or. shared
             do
                 if (prepare) then
                     call project_resolve(backend, '', request, model, selection, status, &
@@ -460,7 +472,7 @@ contains
                 ! The shared build reconfigures onto the new roots in place.
                 if (.not. shared) call fs_remove_tree(snapshot//'/build', status)
                 status = c_prepare(root//c_null_char, snapshot//c_null_char, &
-                    int(cap, c_int), reuse//c_null_char)
+                    int(cap, c_int), reuse//c_null_char, 1_c_int)
                 if (status /= 0) then
                     message = 'cannot prepare private build/dependency view'
                     exit
@@ -475,6 +487,18 @@ contains
             if (status /= 0) then
                 if (status == 124) message = &
                     'staged build exceeded hard cap during CMake configure'
+                if (shared .and. status /= 124 .and. index(message, 'FetchContent') > 0) then
+                    ! FetchContent reports a failed population as "Build step for
+                    ! <name> failed"; older layouts name the _deps directory.
+                    text = dependency_names(message)
+                    j = index(message, 'Build step for ')
+                    if (j > 0) then
+                        i = index(message(j + 15:), ' failed')
+                        if (i > 1) text = message(j + 15:j + 13 + i)
+                    end if
+                    if (len(text) > 0) message = 'cannot fetch the CMake dependencies '// &
+                        'this commit pins; missing dependency: '//text//new_line('a')//message
+                end if
                 ! The hook allows no network fetch, so say how to populate them.
                 if (trim(message) == 'cannot acquire dependencies') then
                     inquire(file=root//'/CMakeLists.txt', exist=found)
@@ -689,6 +713,19 @@ contains
             if (status /= 0) return
         end do
     end subroutine checkout_tree
+
+    subroutine reset_offline_build(build_dir)
+        !! A shared build configured offline against a developer build's
+        !! dependency roots keeps those roots in its cache; start it afresh.
+        character(len=*), intent(in) :: build_dir
+        character(len=:), allocatable :: cache
+        integer :: ierr
+
+        call read_text_file_alloc(build_dir//'/CMakeCache.txt', cache, ierr)
+        if (ierr /= 0) return
+        if (index(cache, 'FETCHCONTENT_FULLY_DISCONNECTED:BOOL=ON') > 0) &
+            call fs_remove_tree(build_dir)
+    end subroutine reset_offline_build
 
     function toolchain_line(build_dir, reuse) result(line)
         !! The compilers the staged build uses and where each choice came from.

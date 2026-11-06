@@ -9,7 +9,7 @@ program test_hook_reuse
     character(len=*), parameter :: nl = new_line('a')
     character(:), allocatable :: driver, scratch, project, log
     type(process_result_t) :: result
-    character(:), allocatable :: a_before, b_before
+    character(:), allocatable :: a_before, b_before, first, second
 
     call resolve_driver(driver)
     call make_scratch('fo-hook-reuse', scratch)
@@ -71,6 +71,40 @@ program test_hook_reuse
     ! Ninja keeps one record per output, holding the output's build time.
     call assert_true(record(log, 'a.f90.o') /= a_before, 'changed unit recompiled')
     call assert_true(record(log, 'b.f90.o') == b_before, 'unchanged unit reused')
+
+    ! A commit that moves a FetchContent pin builds the newly pinned revision.
+    project = scratch//'/dep'
+    call write_text(project//'/CMakeLists.txt', 'cmake_minimum_required(VERSION 3.20)'//nl// &
+        'project(dep LANGUAGES Fortran)'//nl//'add_library(dep dep.f90)'//nl// &
+        'target_include_directories(dep PUBLIC ${CMAKE_CURRENT_BINARY_DIR})'//nl)
+    call write_text(project//'/dep.f90', module_text('dep', 1))
+    call git('init', '-q')
+    call git('add', '.')
+    call git('commit', '-qm', 'one')
+    call git('rev-parse', 'HEAD')
+    first = trim(result%stdout)
+    call write_text(project//'/dep.f90', module_text('dep', 2))
+    call git('commit', '-qam', 'two')
+    call git('rev-parse', 'HEAD')
+    second = trim(result%stdout)
+    project = scratch//'/pinned'
+    call write_text(project//'/CMakeLists.txt', pinned_cmake(first))
+    call write_text(project//'/main.f90', pinned_main(1))
+    call git('init', '-q')
+    call git('config', 'fo.hookBudget', '120')
+    call git('add', '.')
+    call git('commit', '-qm', 'base')
+    call write_text(project//'/main.f90', pinned_main(1)//'! first pin'//nl)
+    call git('add', 'main.f90')
+    call hook()
+    call assert_process_ok(result, 'first pinned revision builds and passes')
+    call git('commit', '-qm', 'touch')
+    call write_text(project//'/CMakeLists.txt', pinned_cmake(second))
+    call write_text(project//'/main.f90', pinned_main(2))
+    call git('add', 'CMakeLists.txt', 'main.f90')
+    call hook()
+    call assert_process_ok(result, 'moved pin builds the new revision')
+    call assert_contains(result%stdout, 'fast PASS 1', 'pinned revision test ran')
     call remove_tree(scratch)
     call finish_assertions()
 contains
@@ -86,6 +120,29 @@ contains
             '        '//name//'_value = '//digit//nl// &
             '    end function '//name//'_value'//nl//'end module '//name//nl
     end function module_text
+
+    function pinned_cmake(revision) result(text)
+        character(len=*), intent(in) :: revision
+        character(:), allocatable :: text
+
+        text = 'cmake_minimum_required(VERSION 3.20)'//nl// &
+            'project(pinned LANGUAGES Fortran)'//nl//'include(FetchContent)'//nl// &
+            'FetchContent_Declare(dep GIT_REPOSITORY "file://'//scratch//'/dep" '// &
+            'GIT_TAG '//revision//')'//nl//'FetchContent_MakeAvailable(dep)'//nl// &
+            'enable_testing()'//nl//'add_executable(answer main.f90)'//nl// &
+            'target_link_libraries(answer dep)'//nl//'add_test(NAME answer COMMAND answer)'//nl
+    end function pinned_cmake
+
+    function pinned_main(expected) result(text)
+        integer, intent(in) :: expected
+        character(:), allocatable :: text
+        character(len=1) :: digit
+
+        write(digit, '(i1)') expected
+        text = 'program main'//nl//'    use dep, only: dep_value'//nl// &
+            '    implicit none'//nl//'    if (dep_value() /= '//digit//') error stop 1'//nl// &
+            'end program main'//nl
+    end function pinned_main
 
     function record(text, object) result(line)
         character(len=*), intent(in) :: text, object

@@ -33,11 +33,13 @@ input inventory and shared store. No new scheduler or test registry:
    excluded cases are **DEFERRED to merge_group CI**. A killed or unrun fast
    case is never PASS and blocks the bounded commit command. No wait for active Gremlin work,
    graph ranking, sampling or full suite in the hook. Fo Git acquisition is
-   restricted to local files; acquire dependencies before committing. Both hook modes add the disconnected flags to the existing CMake configuration
-   identity and disable FetchContent downloads and updates. A project that is
+   restricted to local files; acquire dependencies before committing. The
+   bounded hook and explicit preparation add the disconnected flags to the existing CMake configuration
+   identity and disables FetchContent downloads and updates. A project that is
    already configured contributes its populated dependency source roots to that
-   identity, so the staged copy builds against the dependencies the project holds
-   instead of acquiring new ones. Acquire prerequisites
+   identity, so the bounded staged copy builds against the dependencies the
+   project holds instead of acquiring new ones. The ordinary CMake hook instead
+   fetches what the staged commit pins (see below). Acquire prerequisites
    with normal `fo build` before explicit hook preparation;
    arbitrary project configure scripts retain responsibility for their own network contract.
 
@@ -48,8 +50,9 @@ its PASS index; a scoped lane is insufficient by itself. A hook's affected subse
 cannot create a full-tier receipt. This deliberately conservative reuse may miss
 when CMake inputs cannot be relocated; correctness takes precedence over a hit.
 Explicit preparation stores a distinct receipt in the same store, keyed by the
-same input identity and the complete policy-selected fast case names. Ordinary
-and bounded hook checks can reuse this receipt; changing label policy to select different fast
+same input identity and the complete policy-selected fast case names. Bounded
+hook checks can reuse this receipt; the ordinary CMake hook builds in its shared
+online view, whose identity differs. Changing label policy to select different fast
 cases invalidates it. Excluded tests are never recorded as passed.
 The snapshot itself and native model loading still cost time on a receipt hit;
 millisecond latency is a target to measure, not a promised constant.
@@ -86,13 +89,19 @@ by all its worktrees. Its private index lives in the common Git directory, and
 each commit rewrites only the files whose staged content differs, so CMake and
 Ninja recompile exactly what changed and reconfigure only when a build input
 changed. A lock in the common Git directory serializes commits of different
-worktrees. Changing the compilers or dependency roots reconfigures that build
-as CMake itself does. The bounded hook keeps its owned temporary views.
+worktrees. Changing the compilers reconfigures that build as CMake itself does.
+The bounded hook keeps its owned temporary views.
+
+That shared build populates FetchContent dependencies itself, into its own
+`build/_deps`, at the revisions the staged commit pins; CMake fetches a
+dependency once and updates it exactly when its pinned reference changes. It
+never builds against the dependency checkouts of a developer's own build tree,
+which may hold other revisions, unless the project's CMake code points there.
 
 The staged configure takes its compilers from `CC`, `CXX` and `FC` when set,
-otherwise from the reused build's cache, otherwise from the project's presets
-and CMake's own search; a configure that fetches a missing dependency follows
-the same order. The hook prints the chosen toolchain in one line.
+otherwise from the cache of the checkout's configured build, otherwise from the
+project's presets and CMake's own search; a configure that fetches a missing
+dependency follows the same order. The hook prints the chosen toolchain in one line.
 
 A CMake project without `fpm.toml` whose configured build enables no Fortran
 (its cache records no `CMAKE_Fortran_COMPILER`) keeps its Fortran files as data,
