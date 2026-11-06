@@ -20,12 +20,13 @@ module fo_hook
     use fo_process, only: process_run_argv_logged, argv_push, process_self_executable, &
         process_setenv_default, &
         process_getpid, process_exit, process_has_fortran_source_ext, TIMEOUT_WALL
-    use fo_fs, only: fs_mkdir_excl, fs_remove_tree, fs_canonical_path, fs_sleep_ms
+    use fo_fs, only: fs_mkdir_excl, fs_remove_tree, fs_canonical_path, fs_sleep_ms, &
+        fs_make_dir, fs_remove_file
     use fo_util, only: make_tmpfile, delete_tmpfile, read_text_file_alloc, &
         wall_time_seconds, int_text
-    use fx_hash, only: sha256_file
+    use fx_hash, only: sha256_file, sha256_string
     use fx_string, only: string_t
-    use fx_path, only: path_dirname
+    use fx_path, only: path_dirname, path_basename
     use fx_json_build, only: json_builder_t, json_new, json_object_start, &
         json_object_end, json_key_string, json_key_int, json_key_bool, &
         json_key, json_array_start, json_array_end, json_value_string, json_to_string
@@ -39,6 +40,16 @@ module fo_hook
             character(kind=c_char), intent(in) :: root(*), view(*), reuse(*)
             integer(c_int), value :: cap
         end function c_prepare
+        ! A blocking close-on-exec flock: it ends with the process, so a
+        ! killed commit never blocks the next one.
+        integer(c_int) function c_hook_lock(path) bind(C, name='fo_sys_lock_fixture')
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: path(*)
+        end function c_hook_lock
+        subroutine c_hook_unlock(fd) bind(C, name='fo_sys_unlock')
+            import :: c_int
+            integer(c_int), value :: fd
+        end subroutine c_hook_unlock
         integer(c_int) function c_unsetenv(name) bind(C, name='fo_c_unsetenv')
             import :: c_char, c_int
             character(kind=c_char), intent(in) :: name(*)
@@ -195,8 +206,10 @@ contains
         real :: seconds
         real(dp) :: started, elapsed, threshold
         logical :: found, snapshot_owned, hit, built, identity_ok, populated_found, has_base
-        logical :: fortran, refreshed
+        logical :: fortran, refreshed, has_fpm, shared
         logical, allocatable :: added(:)
+        integer(c_int) :: lock_fd
+        character(len=:), allocatable :: state
 
         code = 1
         message = ''
@@ -206,6 +219,8 @@ contains
         hit = .false.
         built = .false.
         snapshot_owned = .false.
+        shared = .false.
+        lock_fd = -1
         fast = 0
         passed = 0
         allocate(deferred(0), warnings(0), changed(0))
@@ -237,6 +252,7 @@ contains
             ! its build is not one Fo can stage. A linked worktree without its
             ! own build stands on the configuration of its main checkout.
             call git_text(root, git_words('cat-file', '-e', ':fpm.toml'), text, status)
+            has_fpm = status == 0
             if (status /= 0) then
                 call hook_cmake_build_dir(root, populated, populated_found, fortran)
                 if (populated_found .and. .not. fortran) then
@@ -245,36 +261,6 @@ contains
                     code = 0
                     exit validation
                 end if
-            end if
-            budget = config_seconds(root, 'fo.hookBudget', 10)
-            ! A cold build in a fresh checkout routinely exceeds a minute; incremental
-            ! builds reuse the shared cache, so the cap only stops runaway builds.
-            cap = config_seconds(root, 'fo.hookBuildCap', 900)
-            threshold = real(config_seconds(root, 'fo.hookFastThreshold', 1), dp)
-            if (len(owned_view) > 0) then
-                if (index(owned_view, path_dirname(root)//'/.fo-hook-') /= 1) then
-                    message = 'invalid owned staged view'
-                    exit validation
-                end if
-                snapshot = owned_view
-            else
-                do attempts = 1, 100
-                    snapshot = path_dirname(root)//'/.fo-hook-'//int_text(process_getpid())// &
-                        '-'//int_text(attempts)
-                    if (fs_mkdir_excl(snapshot) == 0) then
-                        snapshot_owned = .true.
-                        exit
-                    end if
-                end do
-            end if
-            if (.not. snapshot_owned .and. len(owned_view) == 0) then
-                message = 'cannot create an isolated staged view beside the repository'
-                exit validation
-            end if
-            call checkout_tree(root, snapshot, tree, status)
-            if (status /= 0) then
-                message = 'cannot materialize staged tree or pinned submodule (initialize it first)'
-                exit validation
             end if
             call git_text(root, git_words('diff-tree', '--no-commit-id', &
                 '--name-only', '-r', '-z', 'HEAD', tree), text, status, strip=.false.)
@@ -287,6 +273,57 @@ contains
             end if
             deallocate(changed)
             call split_paths(text, changed)
+            ! Documentation that no build script or source names cannot change
+            ! what is built or tested, so such a commit needs no build.
+            if (has_base .and. inert_paths(root, tree, changed)) then
+                message = 'fo hook: only documentation staged; nothing to build or test'
+                code = 0
+                exit validation
+            end if
+            budget = config_seconds(root, 'fo.hookBudget', 10)
+            ! A cold build in a fresh checkout routinely exceeds a minute; incremental
+            ! builds reuse the shared cache, so the cap only stops runaway builds.
+            cap = config_seconds(root, 'fo.hookBuildCap', 900)
+            threshold = real(config_seconds(root, 'fo.hookFastThreshold', 1), dp)
+            if (len(owned_view) > 0) then
+                if (index(owned_view, path_dirname(root)//'/.fo-hook-') /= 1) then
+                    message = 'invalid owned staged view'
+                    exit validation
+                end if
+                snapshot = owned_view
+            else if (.not. has_fpm .and. shared_view(root, snapshot, state)) then
+                ! A CMake build is not relocatable, so incremental reuse needs one
+                ! fixed staged view per repository, shared by its worktrees.
+                call fs_make_dir(state, status)
+                if (status == 0) lock_fd = c_hook_lock(state//'/lock'//c_null_char)
+                if (lock_fd < 0) then
+                    message = 'cannot lock the shared staged build in '//state
+                    exit validation
+                end if
+                shared = .true.
+            else
+                do attempts = 1, 100
+                    snapshot = path_dirname(root)//'/.fo-hook-'//int_text(process_getpid())// &
+                        '-'//int_text(attempts)
+                    if (fs_mkdir_excl(snapshot) == 0) then
+                        snapshot_owned = .true.
+                        exit
+                    end if
+                end do
+            end if
+            if (.not. snapshot_owned .and. .not. shared .and. len(owned_view) == 0) then
+                message = 'cannot create an isolated staged view beside the repository'
+                exit validation
+            end if
+            if (shared) then
+                call update_view(root, snapshot, tree, state//'/index', status)
+            else
+                call checkout_tree(root, snapshot, tree, status)
+            end if
+            if (status /= 0) then
+                message = 'cannot materialize staged tree or pinned submodule (initialize it first)'
+                exit validation
+            end if
             allocate(files(size(changed)))
             nfiles = 0
             do i = 1, size(changed)
@@ -368,6 +405,11 @@ contains
                 backend%cmake%build_root_hint = .true.
                 ! Preserve the project's CMake build rules in the staged view.
                 child_env = 'FO_CMAKE_BUILD_DIR=build;FO_CMAKE_DELEGATE_BUILD=1'
+                if (shared) then
+                    ! Provenance of the previous commit; this one is captured anew.
+                    call fs_remove_file(snapshot//'/.git')
+                    call fs_remove_tree(snapshot//'/.fo-cmake/project-git')
+                end if
                 call cmake_stage_git(root, snapshot, status, message)
                 if (status /= 0) exit validation
             end if
@@ -414,7 +456,8 @@ contains
                     message = trim(dependency_message)
                     exit
                 end if
-                call fs_remove_tree(snapshot//'/build', status)
+                ! The shared build reconfigures onto the new roots in place.
+                if (.not. shared) call fs_remove_tree(snapshot//'/build', status)
                 status = c_prepare(root//c_null_char, snapshot//c_null_char, &
                     int(cap, c_int), reuse//c_null_char)
                 if (status /= 0) then
@@ -580,6 +623,7 @@ contains
                 message = 'cannot remove owned staged view: '//snapshot
             end if
         end if
+        if (lock_fd >= 0) call c_hook_unlock(lock_fd)
         if (code /= 0) then
             call read_text_file_alloc(trim(logfile), text, status)
             if (status == 0) then
@@ -642,6 +686,126 @@ contains
             if (status /= 0) return
         end do
     end subroutine checkout_tree
+
+    logical function inert_paths(root, tree, paths) result(inert)
+        !! Documentation and images are inert unless a file other than
+        !! documentation names them, as a build script installing a page would.
+        character(len=*), intent(in) :: root, tree
+        type(string_t), intent(in) :: paths(:)
+        character(len=*), parameter :: documents(*) = [character(len=9) :: &
+            'md', 'markdown', 'rst', 'adoc', 'png', 'jpg', 'jpeg', 'gif', 'svg', 'pdf']
+        character(len=:), allocatable :: packed, text, extension
+        integer :: i, k, n, dot, status
+
+        inert = .false.
+        if (size(paths) > 256) return
+        packed = ''
+        n = 0
+        call argv_push(packed, n, 'grep')
+        call argv_push(packed, n, '-q')
+        call argv_push(packed, n, '-F')
+        do i = 1, size(paths)
+            dot = index(paths(i)%s, '.', back=.true.)
+            if (dot == 0 .or. dot < index(paths(i)%s, '/', back=.true.)) return
+            extension = paths(i)%s(dot + 1:)
+            do k = 1, len(extension)
+                if (extension(k:k) >= 'A' .and. extension(k:k) <= 'Z') &
+                    extension(k:k) = achar(iachar(extension(k:k)) + 32)
+            end do
+            if (.not. any(documents == extension)) return
+            call argv_push(packed, n, '-e')
+            call argv_push(packed, n, path_basename(paths(i)%s))
+        end do
+        call argv_push(packed, n, tree)
+        call argv_push(packed, n, '--')
+        call argv_push(packed, n, '.')
+        do k = 1, size(documents)
+            call argv_push(packed, n, ':(exclude)*.'//trim(documents(k)))
+            call argv_push(packed, n, ':(exclude)*.'//upper(trim(documents(k))))
+        end do
+        ! git grep exits 1 when nothing matches and higher on errors.
+        call git_text(root, packed, text, status)
+        inert = status == 1
+    contains
+        function upper(word) result(out)
+            character(len=*), intent(in) :: word
+            character(len=len(word)) :: out
+            integer :: j
+            out = word
+            do j = 1, len(word)
+                if (word(j:j) >= 'a' .and. word(j:j) <= 'z') &
+                    out(j:j) = achar(iachar(word(j:j)) - 32)
+            end do
+        end function upper
+    end function inert_paths
+
+    logical function shared_view(root, view, state) result(found)
+        !! One staged view per repository, beside its main checkout so that
+        !! relative sibling paths keep their meaning, and its private index and
+        !! lock in the common Git directory.
+        character(len=*), intent(in) :: root
+        character(len=:), allocatable, intent(out) :: view, state
+        character(len=:), allocatable :: common, main
+        integer :: status
+
+        found = .false.
+        view = ''
+        state = ''
+        call git_text(root, git_words('rev-parse', '--path-format=absolute', &
+            '--git-common-dir'), common, status)
+        if (status /= 0 .or. len(common) <= 5) return
+        if (common(len(common) - 4:) /= '/.git') return
+        common = fs_canonical_path(common)
+        main = path_dirname(common)
+        view = path_dirname(main)//'/.fo-staged-'//path_basename(main)
+        state = common//'/fo-hook'
+        found = .true.
+    end function shared_view
+
+    recursive subroutine update_view(source, view, tree, index_file, status)
+        !! Bring a persistent view to `tree`, rewriting only files whose content
+        !! differs so the build tool recompiles exactly what changed. Initialized
+        !! submodules follow their staged gitlinks, as in checkout_tree.
+        character(len=*), intent(in) :: source, view, tree, index_file
+        integer, intent(out) :: status
+        character(len=4096) :: log
+        character(len=:), allocatable :: text, entry, path, commit
+        type(string_t), allocatable :: entries(:)
+        integer :: i, tab
+        logical :: known
+
+        ! Without its index the view's content is unknown; start it afresh.
+        inquire(file=index_file, exist=known)
+        if (.not. known) call fs_remove_tree(view)
+        call fs_make_dir(view, status)
+        if (status /= 0) return
+        call make_tmpfile('fo-hook-view', log)
+        call git_run(source, git_words('--work-tree='//view, 'read-tree', '--reset', &
+            '-u', tree), log, status, 'GIT_INDEX_FILE='//index_file)
+        call delete_tmpfile(trim(log))
+        if (status /= 0) then
+            call fs_remove_file(index_file)
+            return
+        end if
+        call git_text(source, git_words('ls-tree', '-r', '-z', tree), &
+            text, status, strip=.false.)
+        if (status /= 0) return
+        call split_paths(text, entries)
+        do i = 1, size(entries)
+            entry = entries(i)%s
+            if (index(entry, '160000 commit ') /= 1) cycle
+            tab = index(entry, achar(9))
+            if (tab == 0) then
+                status = 1
+                return
+            end if
+            commit = entry(15:tab - 1)
+            path = entry(tab + 1:)
+            call update_view(source//'/'//path, view//'/'//path, commit, &
+                index_file//'-'//sha256_string(path), status)
+            if (status /= 0) return
+        end do
+    end subroutine update_view
 
     subroutine hook_cmake_build_dir(root, build_dir, found, fortran)
         !! The configured build of `root`, else that of its main checkout: a

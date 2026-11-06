@@ -8,6 +8,11 @@ substituted for staged files. The working tree and real index are unchanged.
 Relative sibling dependencies retain their normal paths. Temporary execution
 uses the caller's private TMPDIR under `/var/tmp`; owned views are removed.
 
+A commit that stages only documentation or images (`.md`, `.markdown`, `.rst`,
+`.adoc`, `.png`, `.jpg`, `.jpeg`, `.gif`, `.svg`, `.pdf`) builds and tests
+nothing, provided no other tracked file, such as a build script that installs
+a page, names one of them. Such a commit changes no build or test input.
+
 The small MVP reuses the native formatter, backend, project impact selection,
 input inventory and shared store. No new scheduler or test registry:
 
@@ -74,6 +79,15 @@ by its File API metadata. Set `FO_CMAKE_BUILD_DIR` for a nondefault build direct
 staged build outputs remain private. The CMake hook invokes the project's own
 CMake build rules, including compile launchers. Native fpm hook builds enable
 Fo's relocatable object cache across successive staged views.
+
+A CMake build tree is not relocatable, so the ordinary CMake hook keeps one
+staged view per repository, `.fo-staged-<name>` beside its main checkout, shared
+by all its worktrees. Its private index lives in the common Git directory, and
+each commit rewrites only the files whose staged content differs, so CMake and
+Ninja recompile exactly what changed and reconfigure only when a build input
+changed. A lock in the common Git directory serializes commits of different
+worktrees. Changing the compilers or dependency roots reconfigures that build
+as CMake itself does. The bounded hook keeps its owned temporary views.
 
 A CMake project without `fpm.toml` whose configured build enables no Fortran
 (its cache records no `CMAKE_Fortran_COMPILER`) keeps its Fortran files as data,
