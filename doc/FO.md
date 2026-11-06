@@ -218,6 +218,9 @@ configure preset specifies otherwise.
 
 ## Gremlin tuning
 
+Each lane configures its captures in a private build tree in its state
+directory, unless `FO_CMAKE_BUILD_DIR` or a configure preset names one, so lanes
+of one checkout never reconfigure each other's tree or the caller's `build`.
 Gremlin keeps two private build slots for each running lane. The first
 successful generation warms both fixed paths; CMake embeds absolute paths in
 its generated rules, so a configured build tree is not relocated between slots.

@@ -63,7 +63,7 @@ contains
     end function missing_path_dependency
 
     subroutine capture_candidate(project_dir, driver_pin, generation, lease, ok, &
-            registration_error, message, change_watch, previous_inventory)
+            registration_error, message, change_watch, previous_inventory, build_root)
         character(len=*), intent(in) :: project_dir
         type(driver_pin_t), intent(in) :: driver_pin
         type(generation_t), intent(out) :: generation
@@ -73,6 +73,8 @@ contains
         character(len=*), intent(out) :: message
         type(change_watch_t), intent(inout), optional :: change_watch
         type(input_inventory_t), intent(in), optional :: previous_inventory
+        !! The lane's private CMake build tree, used unless the user chose one.
+        character(len=*), intent(in), optional :: build_root
 
         type(backend_t) :: backend
         type(generation_context_t) :: context
@@ -107,6 +109,10 @@ contains
             return
         end if
         if (backend%kind == BACKEND_CMAKE) then
+            ! Lanes of one checkout must not reconfigure each other's tree.
+            if (present(build_root) .and. .not. backend%cmake%build_root_hint .and. &
+                len_trim(backend%cmake%configure_preset) == 0) &
+                backend%cmake%build_root = build_root
             call capture_cmake_inventory(backend, input_inventory, ierr, message, &
                 previous_inventory)
             ! A failed configure is a project input failure, reported like a

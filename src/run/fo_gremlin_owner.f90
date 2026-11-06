@@ -162,6 +162,13 @@ contains
         end if
     end subroutine run_owner
 
+    function lane_build_root(o) result(path)
+        type(owner_t), intent(in) :: o
+        character(len=:), allocatable :: path
+
+        path = o%session%state_dir//'/cmake-build'
+    end function lane_build_root
+
     logical function project_present(o)
         type(owner_t), intent(in) :: o
 
@@ -319,7 +326,8 @@ contains
         logical :: ok
 
         call capture_candidate(o%project_dir, o%pin, o%candidate, o%candidate_lease, &
-            ok, registration_error, o%message, change_watch=o%watch)
+            ok, registration_error, o%message, change_watch=o%watch, &
+            build_root=lane_build_root(o))
         if (registration_error /= 0) then
             call fail(o, 'cannot register captured generation: '//trim(o%message))
         else if (.not. ok) then
@@ -667,13 +675,15 @@ contains
         o%debounce_ms = 0_int64
         if (o%have_candidate) then
             call capture_candidate(o%project_dir, o%pin, current, current_lease, ok, &
-                ierr, o%message, o%watch, o%candidate%input_inventory)
+                ierr, o%message, o%watch, o%candidate%input_inventory, &
+                build_root=lane_build_root(o))
         else if (o%have_active) then
             call capture_candidate(o%project_dir, o%pin, current, current_lease, ok, &
-                ierr, o%message, o%watch, o%active%input_inventory)
+                ierr, o%message, o%watch, o%active%input_inventory, &
+                build_root=lane_build_root(o))
         else
             call capture_candidate(o%project_dir, o%pin, current, current_lease, ok, &
-                ierr, o%message, o%watch)
+                ierr, o%message, o%watch, build_root=lane_build_root(o))
         end if
         if (ierr /= 0) then
             o%message = 'cannot register captured generation: '//trim(o%message)
