@@ -61,6 +61,18 @@ If no `fpm.toml` is found, fo searches parent directories for
 runs tests with CTest. `FO_CMAKE_ARGS` passes extra configure arguments and
 `FO_JOBS` sets build and test parallelism.
 
+Configure arguments that a checkout always needs, such as a compiler or Python
+interpreter path, persist in its Git configuration, which its linked worktrees
+share:
+
+```bash
+git config fo.cmakeArgs "-DPython3_EXECUTABLE=/usr/bin/python3"
+```
+
+Builds, tests, Gremlin lanes and the commit hook pass them before
+`FO_CMAKE_ARGS`, so the environment can still add to or override them. A
+running Gremlin lane reads them when it starts.
+
 A directory that contains both files uses CMake if the top-level
 `CMakeLists.txt` unconditionally enables testing with `include(CTest)` or
 `enable_testing()`; a call inside `if()`, `foreach()` or a function does not
