@@ -2,8 +2,9 @@ program test_cmake_capture_paths
     use fo_build_backend, only: backend_t
     use fo_cmake_context, only: cmake_context_init
     use fo_cmake_generation, only: cmake_capture_inventory, cmake_capture_cleanup
-    use fo_input_inventory, only: input_inventory_t
-    use fo_test_harness, only: make_scratch, make_directory, write_text, remove_tree
+    use fo_input_inventory, only: input_inventory_t, alias_root
+    use fo_test_harness, only: make_scratch, make_directory, write_text, remove_tree, &
+        read_text
     use fo_test_harness, only: assert_true, assert_contains, assert_equal_integer, &
                                finish_assertions
     implicit none
@@ -76,6 +77,51 @@ program test_cmake_capture_paths
     call assert_true(ierr /= 0, 'authored CMake input after a system input is rejected')
     call assert_contains(message, '/opt/toolchain/custom.cmake', &
                          'CMake ownership never leaks to sibling inputs')
+    call check_sdk_framework()
     call remove_tree(scratch)
     call finish_assertions()
+
+contains
+
+    subroutine check_sdk_framework()
+        !! FindBLAS on macOS links Accelerate from the SDK as a framework.
+        character(:), allocatable :: sdk, framework, loose, digest
+        integer :: metadata
+
+        call make_scratch('fo-cmake-capture-sdk', sdk)
+        framework = sdk//'/MacOSX.sdk/System/Library/Frameworks/Accelerate.framework'
+        call make_directory(framework//'/Headers')
+        call write_text(sdk//'/MacOSX.sdk/SDKSettings.json', '{"Version":"26.5"}')
+        call write_text(reply//'/cmakeFiles-fixture.json', '{"inputs":[]}')
+        call write_text(reply//'/target-fixture.json', &
+            '{"compileGroups":[{"frameworks":[{"path":"'// &
+            framework//'"}]}]}')
+        call cmake_capture_inventory(backend, inventory, ierr, message, &
+            configured=.true.)
+        call assert_equal_integer(ierr, 0, 'SDK framework delegated: '//trim(message))
+        if (ierr /= 0) return
+        metadata = alias_root(inventory, 'cmake-context')
+        call assert_contains(read_text(trim(inventory%roots(metadata)%physical_path)// &
+            '/sdk-frameworks.txt'), '26.5', 'SDK version is recorded')
+        digest = inventory%digest
+        call cmake_capture_cleanup(inventory, cleanup_status)
+        call write_text(sdk//'/MacOSX.sdk/SDKSettings.json', '{"Version":"26.6"}')
+        call cmake_capture_inventory(backend, inventory, ierr, message, &
+            configured=.true.)
+        call assert_equal_integer(ierr, 0, 'updated SDK framework: '//trim(message))
+        if (ierr /= 0) return
+        call assert_true(inventory%digest /= digest, 'SDK version changes the generation')
+        call cmake_capture_cleanup(inventory, cleanup_status)
+
+        ! A framework outside an SDK is an authored input, not a system library.
+        loose = sdk//'/Frameworks/Local.framework'
+        call make_directory(loose)
+        call write_text(reply//'/target-fixture.json', &
+            '{"compileGroups":[{"frameworks":[{"path":"'//loose//'"}]}]}')
+        call cmake_capture_inventory(backend, inventory, ierr, message, &
+            configured=.true.)
+        call assert_true(ierr /= 0, 'framework outside an SDK is rejected')
+        call assert_contains(message, 'Local.framework', 'rejected framework is named')
+        call remove_tree(sdk)
+    end subroutine check_sdk_framework
 end program test_cmake_capture_paths

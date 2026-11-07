@@ -67,7 +67,7 @@ contains
         logical :: reuse, library_hint, ninja_found, generator_changed
         character(len=PATH_LEN) :: ninja_path
         character(len=PATH_LEN) :: project_path, build_path, fetchcontent_base
-        character(:), allocatable :: recorded_build
+        character(:), allocatable :: recorded_build, sdk_frameworks
 
         ierr = 1
         message = ''
@@ -179,8 +179,10 @@ contains
         call capture_populated_sources(backend, fetchcontent_base, n_roots, &
             roots, bundles, labels, names, ierr, message)
         if (ierr /= 0) return
+        sdk_frameworks = ''
         call validate_cmake_paths(backend, roots, ierr, message, &
-            n_roots=n_roots, bundles=bundles, labels=labels, names=names)
+            n_roots=n_roots, bundles=bundles, labels=labels, names=names, &
+            sdk_frameworks=sdk_frameworks)
         if (ierr /= 0) return
         ! Authored modules and declared source roots can be siblings
         ! of a standalone subproject. Preserve their relative source paths.
@@ -343,6 +345,8 @@ contains
         call fs_write_text(trim(metadata_dir)//'/cache.cmake', script)
         call fs_write_text(trim(metadata_dir)//'/generator.txt', generator)
         call fs_write_text(trim(metadata_dir)//'/build-directory.txt', recorded_build)
+        if (len(sdk_frameworks) > 0) &
+            call fs_write_text(trim(metadata_dir)//'/sdk-frameworks.txt', sdk_frameworks)
         call input_inventory_discover_cmake(backend%project_dir, roots(:n_roots), &
             bundles(:n_roots), labels(:n_roots), trim(metadata_dir), inventory, &
             ierr, message, freeze_inputs=.true.)
@@ -1444,7 +1448,7 @@ contains
     end subroutine mpi_compiler_includes
 
     subroutine validate_cmake_paths(backend, roots, ierr, message, inventory, &
-            n_roots, bundles, labels, names)
+            n_roots, bundles, labels, names, sdk_frameworks)
         type(backend_t), intent(in) :: backend
         character(len=*), intent(inout) :: roots(:)
         integer, intent(out) :: ierr
@@ -1452,8 +1456,11 @@ contains
         type(input_inventory_t), intent(inout), optional :: inventory
         integer, intent(inout), optional :: n_roots
         character(len=*), intent(inout), optional :: bundles(:), labels(:), names(:)
+        !! Identity lines of the delegated SDK frameworks, one per framework.
+        character(:), allocatable, intent(inout), optional :: sdk_frameworks
         character(len=PATH_LEN), allocatable :: files(:)
         type(string_t), allocatable :: implicit_includes(:)
+        character(:), allocatable :: sdk_identity
         character(len=PATH_LEN) :: normalized, authored, project, build, physical
         character(len=PATH_LEN) :: cmake_root, toolchain
         character(len=PATH_LEN) :: digest_parts(1)
@@ -1648,6 +1655,17 @@ contains
                                         delegated = .true.
                                 end if
                             end if
+                            ! An SDK framework is a system library: its SDK
+                            ! path and version identify it, not its bytes.
+                            if (.not. captured .and. .not. delegated .and. &
+                                any(ancestors(:depth) == 'frameworks')) then
+                                call sdk_framework_identity(trim(normalized), &
+                                    sdk_identity, delegated)
+                                if (delegated .and. present(sdk_frameworks)) then
+                                    if (index(sdk_frameworks, sdk_identity) == 0) &
+                                        sdk_frameworks = sdk_frameworks//sdk_identity
+                                end if
+                            end if
                             if (delegated) captured = .true.
                             ! Configure inputs declare authored module roots,
                             ! independently of target header/source directories.
@@ -1750,6 +1768,60 @@ contains
             end do
         end do
     end function inventory_has_path
+
+    subroutine sdk_framework_identity(path, identity, sdk)
+        !! <sdk>/System/Library/Frameworks/<name>.framework of an SDK whose
+        !! SDKSettings.json names its version, as "<framework> <sdk> <version>".
+        character(len=*), intent(in) :: path
+        character(:), allocatable, intent(out) :: identity
+        logical, intent(out) :: sdk
+        character(len=*), parameter :: frameworks = '/System/Library/Frameworks/'
+        character(len=PATH_LEN) :: physical
+        character(:), allocatable :: root, name, text, key, version
+        type(json_parser_t) :: parser
+        type(json_event_t) :: event
+        integer :: at, status, depth
+        logical :: resolved
+
+        sdk = .false.
+        identity = ''
+        call fs_realpath(path, physical, resolved)
+        if (.not. resolved) return
+        at = index(trim(physical), frameworks, back=.true.)
+        if (at <= 5) return
+        root = physical(:at - 1)
+        name = trim(physical(at + len(frameworks):))
+        if (root(len(root) - 3:) /= '.sdk') return
+        if (len(name) <= 10 .or. index(name, '/') > 0) return
+        if (name(len(name) - 9:) /= '.framework') return
+        call read_text_file_alloc(root//'/SDKSettings.json', text, status)
+        if (status /= 0) return
+        call json_parser_init_strict(parser, text)
+        key = ''
+        version = ''
+        depth = 0
+        do
+            call json_parser_next(parser, event)
+            select case (event%event_type)
+            case (JSON_END_OF_INPUT, JSON_ERROR)
+                exit
+            case (JSON_OBJECT_START, JSON_ARRAY_START)
+                depth = depth + 1
+            case (JSON_OBJECT_END, JSON_ARRAY_END)
+                depth = depth - 1
+            case (JSON_KEY)
+                key = event%string_val
+                cycle
+            case (JSON_STRING)
+                if (depth == 1 .and. key == 'Version') version = event%string_val
+            end select
+            key = ''
+        end do
+        if (event%event_type == JSON_ERROR .or. len(version) == 0) return
+        if (index(version, new_line('a')) > 0) return
+        identity = trim(physical)//' '//root//' '//version//new_line('a')
+        sdk = .true.
+    end subroutine sdk_framework_identity
 
     subroutine canonical_authored_path(path)
         character(len=*), intent(inout) :: path
