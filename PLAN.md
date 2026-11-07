@@ -7,6 +7,14 @@ Issues define observable success and this plan orders delivery. Apply
 smallest complete change, and preserve supported behaviour and independent
 failure detection. The workspace master plan, when present, owns delivery order.
 
+## Gremlin completed epochs and receipt replay
+
+- Completed epochs, including epochs with failing tests, become quiescent until
+  a watched project input changes. Failure status remains visible and does not
+  count as successful verification.
+- Replaying an unchanged test receipt leaves the coverage ledger unchanged;
+  campaign reconciliation skips outcomes already recorded in the loaded ledger.
+
 ## Gremlin client cleanup and idle reaping (2026-10-30)
 
 - MCP starts default to task ownership; explicit persistence and CLI defaults

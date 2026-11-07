@@ -5,7 +5,8 @@ program test_gremlin_coverage
         COVERAGE_OK, COVERAGE_INVALID
     use fo_gremlin_coverage_view, only: gremlin_coverage_view_t
     use fo_gremlin_policy, only: shuffle_gremlin_tests, GREMLIN_POLICY_OK
-    use fo_fs, only: fs_remove_file
+    use, intrinsic :: iso_c_binding, only: c_long_long
+    use fo_fs, only: fs_remove_file, fs_stat, fs_sleep_ms
     implicit none
 
     integer, parameter :: n_cases = 40, chunk = 4
@@ -18,6 +19,7 @@ program test_gremlin_coverage
     character(len=32) :: path
     integer :: i, n_selected, status, runs
 
+    call test_receipt_replay_is_read_only()
     call test_timeout_requalification()
 
     path = 'gremlin-coverage-test.state'
@@ -112,6 +114,32 @@ program test_gremlin_coverage
     write(*, '(a)') 'Gremlin coverage behavioral oracle: PASS'
 
 contains
+
+    subroutine test_receipt_replay_is_read_only()
+        type(coverage_epoch_t) :: ledger
+        character(len=16) :: cases(1)
+        character(len=256) :: detail
+        integer(c_long_long) :: before, after, bytes
+        integer :: rc
+        logical :: ok
+
+        cases = 'replayed'
+        call fs_remove_file('gremlin-replay-idempotent.state')
+        call coverage_open('gremlin-replay-idempotent.state', repeat('b', 64), &
+            cases, 1, 1, ledger, rc, detail)
+        call check(rc == COVERAGE_OK, 'creates receipt replay ledger')
+        call coverage_record(ledger, cases(1), 'FAIL', rc, detail)
+        call check(rc == COVERAGE_OK, 'records failed terminal outcome')
+        call fs_stat(ledger%path, before, bytes, ok)
+        call check(ok, 'stats completed ledger')
+        call fs_sleep_ms(20)
+        call coverage_record(ledger, cases(1), 'FAIL', rc, detail)
+        call fs_stat(ledger%path, after, bytes, ok)
+        call check(rc == COVERAGE_OK .and. ok .and. before == after, &
+            'replaying an unchanged receipt does not rewrite the coverage ledger')
+        call fs_remove_file(ledger%path)
+        call fs_remove_file(ledger%path//'.lock')
+    end subroutine test_receipt_replay_is_read_only
 
     subroutine test_timeout_requalification()
         character(len=*), parameter :: policy_path = 'gremlin-coverage-policy.state'

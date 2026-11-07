@@ -934,7 +934,7 @@ contains
 
     subroutine idle_state(o, ierr, note)
         !! The state of a lane with nothing selected: quiescent once its gate
-        !! is required (and green under random cases), idle otherwise. A lane
+        !! is attempted, including a failed finite epoch. A lane
         !! that can never select a case sleeps too, and `note` says why, so a
         !! deliberate empty selection is not read as a failure (#271).
         type(owner_t), intent(inout) :: o
@@ -950,7 +950,8 @@ contains
         call coverage_read_view_path(coverage_state_path(o%session, o%active%identity), &
             o%active%identity, view, ierr, o%message)
         if (ierr == COVERAGE_OK) then
-            if (view%green .and. o%request%gate_required_count > 0) o%state = 'quiescent'
+            ! Terminal failures remain failures, but cannot create more epoch work.
+            if (view%remaining_count == 0) o%state = 'quiescent'
         else if (ierr == COVERAGE_NOT_FOUND) then
             ierr = 0
         end if

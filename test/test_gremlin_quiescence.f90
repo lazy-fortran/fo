@@ -78,6 +78,21 @@ program test_gremlin_quiescence
     call assert_true(ok, 'a source edit wakes the lane and it verifies again')
     if (ok) call assert_true(count_receipts(second, 'test_alpha') >= 1, &
         'the affected case runs in the new generation')
+    call write_module(0)
+    call wait_quiescent(second, first, ok, expect_failure=.true.)
+    call assert_true(ok, 'a completed failed epoch sleeps without claiming verification')
+    if (.not. ok) call stop_and_finish()
+    call status_view(reply)
+    call assert_true(gremlin_field(reply, 'health') == 'failure' .and. &
+        .not. json_boolean_value(json_member(reply, 'local_gate_green')), &
+        'quiescence preserves the failed gate')
+    events_before = event_count()
+    call gremlin_wait_ms(1200)
+    call assert_true(event_count() == events_before, &
+        'an unchanged failed generation does not rerun cases')
+    call write_module(4)
+    call wait_quiescent(first, second, ok)
+    call assert_true(ok, 'a source correction wakes a failed epoch and verifies again')
     call gremlin_stop_lane(driver, project, cache, state, lane, session, &
         allow_terminal_error=.true.)
     call finish_assertions(retain_failed_scratch=.true.)
@@ -125,29 +140,33 @@ contains
         call gremlin_json(driver, project, cache, state, query, view, observed, 10000)
     end subroutine status_view
 
-    subroutine wait_quiescent(previous, generation, found, expect_same)
+    subroutine wait_quiescent(previous, generation, found, expect_same, expect_failure)
         !! Wait for a fully verified quiescent lane. Default: a generation
         !! other than previous. expect_same: the one generation `previous`,
         !! confirmed by a status handshake after the edit.
         character(len=*), intent(in) :: previous
         character(:), allocatable, intent(out) :: generation
         logical, intent(out) :: found
-        logical, intent(in), optional :: expect_same
+        logical, intent(in), optional :: expect_same, expect_failure
         type(json_value_t) :: view
-        integer :: poll
-        logical :: same
+        integer :: poll, poll_limit
+        logical :: same, failed_epoch
 
         same = .false.
         if (present(expect_same)) same = expect_same
+        failed_epoch = .false.
+        if (present(expect_failure)) failed_epoch = expect_failure
         found = .false.
         generation = ''
-        do poll = 1, 500
+        poll_limit = 500
+        if (failed_epoch) poll_limit = 80
+        do poll = 1, poll_limit
             call status_view(view)
             generation = gremlin_field(view, 'active_generation')
             if (gremlin_field(view, 'state') == 'error') return
             if (len(generation) == 64 .and. (generation /= previous .or. same) .and. &
                     gremlin_field(view, 'phase') == 'quiescent' .and. &
-                    json_boolean_value(json_member(view, 'fully_verified'))) then
+                    (json_boolean_value(json_member(view, 'fully_verified')) .neqv. failed_epoch)) then
                 found = .true.
                 if (.not. same) return
                 if (poll >= 3) return

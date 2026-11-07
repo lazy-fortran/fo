@@ -922,6 +922,9 @@ contains
             if (ios /= 0) cycle
             if (receipt_epoch /= coverage%epoch .or. &
                 trim(inventory_digest) /= trim(coverage%inventory_digest)) cycle
+            ! The loaded ledger already includes receipts from completed children.
+            if (any(coverage%inventory == case_name .and. &
+                coverage%outcome == outcome)) cycle
             call coverage_record(coverage, case_name, outcome, ierr, message)
             if (ierr /= COVERAGE_OK) return
         end do

@@ -429,6 +429,12 @@ contains
             message = 'coverage outcome label is invalid'
             return
         end if
+        ! Journal reconciliation replays terminal receipts on every campaign.
+        if (state%outcome(at) == outcome) then
+            status = COVERAGE_OK
+            message = ''
+            return
+        end if
         state%outcome(at) = outcome
         call skip_seen(state)
         call coverage_save(state, status, message)
