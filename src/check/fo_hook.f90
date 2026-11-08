@@ -4,7 +4,9 @@ module fo_hook
     use fo_build_backend, only: backend_t, detect_backend, BACKEND_NONE, BACKEND_CMAKE, &
         cmake_configured_build_dir, cmake_configure
     use fo_project_model, only: project_model_t, model_request_t, model_selection_t
-    use fo_project_load, only: project_affected, project_resolve, configure_error_excerpt
+    use fo_project_load, only: project_affected, project_resolve, configure_error_excerpt, &
+        project_cmake_delta
+    use fo_cmake_delta, only: cmake_delta_t
     use fo_gremlin_context, only: case_identity_capture
     use fo_gremlin_generation, only: generation_t
     use fo_gremlin_request, only: gremlin_json_text_valid
@@ -193,6 +195,7 @@ contains
         type(model_request_t) :: request
         type(model_selection_t) :: selection
         type(generation_t) :: generation
+        type(cmake_delta_t) :: delta
         type(test_result_entry_t), allocatable :: results(:)
         type(string_t), allocatable :: changed(:), reasons(:), deferred(:), warnings(:)
         character(len=4096) :: driver, logfile, resultfile, dependency_message
@@ -439,6 +442,12 @@ contains
             call config_labels(root, 'fo.hookIncludeLabels', included)
             if (size(excluded) > 0) request%exclude_labels = excluded
             if (size(included) > 0) request%include_labels = included
+            ! A listfile edit that only registers tests runs those tests, not all.
+            if (has_base) then
+                call project_cmake_delta(root, 'HEAD', snapshot, changed, delta)
+            else
+                call project_cmake_delta(root, '', snapshot, [string_t ::], delta)
+            end if
             refreshed = .not. populated_found .or. len(owned_view) > 0 .or. &
                 backend%kind /= BACKEND_CMAKE .or. shared
             do
@@ -447,7 +456,7 @@ contains
                         message)
                 else
                     call project_affected(backend, '', request, changed, model, selection, &
-                        reasons, status, message)
+                        reasons, status, message, delta=delta)
                 end if
                 if (refreshed .or. status == 124) exit
                 ! The reused build may predate a dependency this commit declares:

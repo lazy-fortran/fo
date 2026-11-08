@@ -25,6 +25,7 @@ module fo_project_model
     use fo_util, only: int_text
     use fo_test_cases, only: CASE_SEP, case_filter_add
     use fo_case_filter, only: case_filter_t, filter_parse, filter_eval
+    use fo_cmake_delta, only: cmake_delta_t, cmake_template_matches
     implicit none
     private
 
@@ -1362,7 +1363,7 @@ contains
 end subroutine model_layering
 
 subroutine model_affected(model, units, roots, changed, selection, widen_reasons, &
-        force_reason)
+        force_reason, delta)
     !! Restrict a selection to the cases affected by changed project files,
     !! the same for every backend (#189, #197). changed holds paths relative
     !! to the project root; model and unit paths are made relative by
@@ -1388,15 +1389,25 @@ subroutine model_affected(model, units, roots, changed, selection, widen_reasons
     !! (documentation, undeclared data) affect nothing. Unselected cases stay
     !! unselected; the affected subset keeps the selection order.
     !! model_case_digests hashes exactly these per-case file sets.
+    !!
+    !! delta lists the build descriptions whose edits only register tests
+    !! and targets (fo_cmake_delta). They do not widen; they affect the
+    !! cases they may create (by name, or through a created target in the
+    !! case's link closure), the cases without a known command target, and
+    !! the cases whose command or attributes name the build tree, because
+    !! configure-time enumerations of all targets or tests reach a case only
+    !! through a script or a generated file.
     type(project_model_t), intent(in) :: model
     type(model_unit_t), intent(in) :: units(:)
     type(string_t), intent(in) :: roots(:), changed(:)
     type(model_selection_t), intent(inout) :: selection
     type(string_t), allocatable, intent(out) :: widen_reasons(:)
     character(len=*), intent(in), optional :: force_reason
+    type(cmake_delta_t), intent(in), optional :: delta
     type(affect_graph_t) :: g
     integer, allocatable :: kinds(:), change_unit(:), change_source(:), kept(:)
     type(string_t), allocatable :: cause(:)
+    character(len=:), allocatable :: registered
     integer :: n_kept, k, c, i, ci
     logical :: relevant, hit, declared
 
@@ -1412,12 +1423,20 @@ subroutine model_affected(model, units, roots, changed, selection, widen_reasons
         cause(i)%s = ''
     end do
     relevant = .false.
+    registered = ''
     if (present(force_reason)) call widen(force_reason)
     do i = 1, size(changed)
         call graph_classify(g, changed(i)%s, kinds(i), change_unit(i), &
             change_source(i))
         select case (kinds(i))
         case (FILE_BUILD_DESCRIPTION)
+            if (present(delta)) then
+                if (any_text(delta%paths, changed(i)%s)) then
+                    if (len(registered) == 0) registered = changed(i)%s
+                    relevant = .true.
+                    cycle
+                end if
+            end if
             call widen('build description changed: '//changed(i)%s)
             cycle
         case (FILE_UNOWNED_SOURCE)
@@ -1460,7 +1479,24 @@ subroutine model_affected(model, units, roots, changed, selection, widen_reasons
             call keep(c, 'affected: no known command target')
             cycle
         end if
+        if (len(registered) > 0) then
+            if (any_template(delta%tests, model%cases(c)%name)) then
+                call keep(c, 'affected: registered by '//registered)
+                cycle
+            end if
+            if (names_build_tree(c)) then
+                call keep(c, 'affected: reads the build tree, which '// &
+                    registered//' extends')
+                cycle
+            end if
+        end if
         call graph_closure(g, model, units, c)
+        if (len(registered) > 0) then
+            if (closure_created(c)) then
+                call keep(c, 'affected: links a target registered by '//registered)
+                cycle
+            end if
+        end if
         hit = .false.
         do i = 1, size(changed)
             if (kinds(i) /= FILE_CLOSURE) cycle
@@ -1503,7 +1539,67 @@ contains
         selection%reasons(ci)%s = 'not affected by the changes'
     end subroutine drop
 
+    logical function closure_created(ci) result(found)
+        !! A target of the last graph_closure matches a created target.
+        integer, intent(in) :: ci
+        integer :: t
+
+        found = .false.
+        if (ci < 1) return
+        do t = 1, model%n_targets
+            if (g%tstamp(t) /= g%token) cycle
+            if (.not. any_template(delta%targets, model%targets(t)%name)) cycle
+            found = .true.
+            return
+        end do
+    end function closure_created
+
+    logical function names_build_tree(ci) result(found)
+        integer, intent(in) :: ci
+        integer :: a
+
+        found = .false.
+        if (len(model%build_dir) == 0) return
+        ! Built executables and the working directory are the build tree too.
+        if (allocated(model%cases(ci)%command)) then
+            do a = 1, size(model%cases(ci)%command)
+                if (index(model%cases(ci)%command(a)%s, model%build_dir) == 0) cycle
+                if (model_find_artifact(model, model%cases(ci)%command(a)%s) > 0) cycle
+                found = .true.
+            end do
+        end if
+        if (allocated(model%cases(ci)%attrs)) then
+            do a = 1, size(model%cases(ci)%attrs)
+                if (model%cases(ci)%attrs(a)%key == 'WORKING_DIRECTORY') cycle
+                if (index(model%cases(ci)%attrs(a)%value, model%build_dir) > 0) &
+                    found = .true.
+            end do
+        end if
+    end function names_build_tree
+
 end subroutine model_affected
+
+logical function any_text(items, text) result(found)
+    type(string_t), intent(in) :: items(:)
+    character(len=*), intent(in) :: text
+    integer :: k
+
+    found = .false.
+    do k = 1, size(items)
+        if (items(k)%s == text) found = .true.
+    end do
+end function any_text
+
+logical function any_template(templates, name) result(found)
+    type(string_t), intent(in) :: templates(:)
+    character(len=*), intent(in) :: name
+    integer :: k
+
+    found = .false.
+    do k = 1, size(templates)
+        if (cmake_template_matches(templates(k)%s, name)) found = .true.
+    end do
+end function any_template
 
 subroutine model_expand_cases(model, listings, ierr, message)
     !! Add the listed cases of executable cases (#217): each parent keeps

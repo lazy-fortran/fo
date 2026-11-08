@@ -40,6 +40,7 @@ module fo_project_load
     use fo_case_filter, only: case_filter_t, filter_parse
     use fo_test_index, only: test_index_t, test_index_dir, test_index_load, &
         test_index_find
+    use fo_cmake_delta, only: cmake_delta_t, cmake_registration_delta
     implicit none
     private
 
@@ -50,7 +51,7 @@ module fo_project_load
     public :: project_model_units, project_affected_cases
     public :: project_list_text, project_list_json
     public :: project_layering, project_layering_text, project_layering_json
-    public :: configure_error_excerpt
+    public :: configure_error_excerpt, project_cmake_delta
 
 contains
 
@@ -391,6 +392,7 @@ contains
         logical, intent(in), optional :: configured
         type(string_t), allocatable :: changed(:)
         character(len=:), allocatable :: reason
+        type(cmake_delta_t) :: delta
         logical :: git_ok, uses_affected, uses_failed
 
         call filter_flags(request, uses_affected, uses_failed)
@@ -402,9 +404,11 @@ contains
         end if
         call project_changed_files(trim(b%project_dir), changed, git_ok, reason)
         if (git_ok) then
+            call project_cmake_delta(trim(b%project_dir), 'HEAD', &
+                trim(b%project_dir), changed, delta)
             call project_affected(b, flags, request, changed, model, selection, &
                 widen_reasons, ierr, message, restrict=only_changed, &
-                configured=configured)
+                configured=configured, delta=delta)
         else
             call project_affected(b, flags, request, changed, model, selection, &
                 widen_reasons, ierr, message, force_reason=reason, &
@@ -413,7 +417,7 @@ contains
     end subroutine project_select
 
     subroutine project_affected(b, flags, request, changed, model, selection, &
-            widen_reasons, ierr, message, force_reason, restrict, configured)
+            widen_reasons, ierr, message, force_reason, restrict, configured, delta)
         !! project_resolve restricted by model_affected to the cases the
         !! changed files affect (`fo test --only-changed`, MCP only_changed,
         !! `fo check`). changed: paths below the project root (relative, or
@@ -435,6 +439,8 @@ contains
         !! sees the delta, through affected()). Default .true.
         logical, intent(in), optional :: restrict
         logical, intent(in), optional :: configured
+        !! Build descriptions whose edits only register tests (project_cmake_delta).
+        type(cmake_delta_t), intent(in), optional :: delta
         type(model_request_t) :: local
         integer, allocatable :: project_cases(:), hit(:)
         type(string_t), allocatable :: more(:)
@@ -481,7 +487,7 @@ contains
             project_cases = pack([(k, k=1, model%n_cases)], &
                 [(model%cases(k)%origin == ORIGIN_PROJECT, k=1, model%n_cases)])
             call project_affected_cases(model, units, roots, project_cases, &
-                kept(1:n), hit, widen_reasons, force_reason)
+                kept(1:n), hit, widen_reasons, force_reason, delta)
             allocate (local%affected(model%n_cases))
             local%affected = .false.
             local%affected(hit) = .true.
@@ -492,7 +498,7 @@ contains
             if (.not. restrict) return
         end if
         call model_affected(model, units, roots, kept(1:n), selection, &
-            more, force_reason)
+            more, force_reason, delta)
         widen_reasons = [widen_reasons, more]
     end subroutine project_affected
 
@@ -523,7 +529,7 @@ contains
     end subroutine project_model_units
 
     subroutine project_affected_cases(model, units, roots, cases, changed, &
-            affected, widen_reasons, force_reason)
+            affected, widen_reasons, force_reason, delta)
         !! model_affected on an already loaded model and scanned units:
         !! affected = the cases (model indices, in the given order) that the
         !! changed files (relative to the project root, which roots spell)
@@ -535,6 +541,7 @@ contains
         integer, allocatable, intent(out) :: affected(:)
         type(string_t), allocatable, intent(out) :: widen_reasons(:)
         character(len=*), intent(in), optional :: force_reason
+        type(cmake_delta_t), intent(in), optional :: delta
         type(model_selection_t) :: selection
         integer :: k
 
@@ -553,7 +560,7 @@ contains
             return
         end if
         call model_affected(model, units, roots, changed, selection, &
-            widen_reasons, force_reason)
+            widen_reasons, force_reason, delta)
         affected = selection%cases
     end subroutine project_affected_cases
 
@@ -746,6 +753,132 @@ contains
         call split_nul(text, changed)
         ok = .true.
     end subroutine git_changed_files
+
+    subroutine project_cmake_delta(repo_dir, base, new_dir, changed, delta)
+        !! The changed CMake listfiles (paths relative to repo_dir and new_dir)
+        !! whose edit from revision base of repo_dir to the file below new_dir
+        !! only registers tests and targets (fo_cmake_delta). Git config
+        !! fo.cmakeTestCommands names project commands that only label or
+        !! configure the test their first argument names (comma-separated).
+        character(len=*), intent(in) :: repo_dir, base, new_dir
+        type(string_t), intent(in) :: changed(:)
+        type(cmake_delta_t), intent(out) :: delta
+        type(string_t), allocatable :: commands(:), listfiles(:), context(:), &
+            tests(:), targets(:)
+        character(len=:), allocatable :: text, old_text, new_text, reason, path
+        integer :: k, j, status, n
+        logical :: ok, exists, any_cmake
+
+        allocate(delta%paths(0), delta%tests(0), delta%targets(0))
+        any_cmake = .false.
+        do k = 1, size(changed)
+            if (cmake_listfile(changed(k)%s)) any_cmake = .true.
+        end do
+        if (.not. any_cmake) return
+        call git_capture(repo_dir, [string_t('config'), string_t('--get'), &
+            string_t('fo.cmakeTestCommands')], text, status)
+        allocate(commands(0))
+        if (status == 0) call split_list(text, commands)
+        call git_capture(repo_dir, [string_t('ls-files'), string_t('-z'), &
+            string_t('--'), string_t(':(glob)**/CMakeLists.txt'), &
+            string_t(':(glob)**/*.cmake')], text, status)
+        allocate(listfiles(0))
+        if (status /= 0) return
+        call split_nul(text, listfiles)
+        do k = 1, size(changed)
+            path = changed(k)%s
+            if (.not. cmake_listfile(path)) cycle
+            inquire(file=new_dir//'/'//path, exist=exists)
+            if (.not. exists) cycle
+            call read_text_file_alloc(new_dir//'/'//path, new_text, status)
+            if (status /= 0) cycle
+            call git_capture(repo_dir, [string_t('cat-file'), string_t('-e'), &
+                string_t(base//':./'//path)], old_text, status)
+            if (status == 0) then
+                call git_capture(repo_dir, [string_t('show'), &
+                    string_t(base//':./'//path)], old_text, status)
+                if (status /= 0) cycle
+            else
+                old_text = ''
+            end if
+            if (allocated(context)) deallocate(context)
+            allocate(context(size(listfiles)))
+            n = 0
+            do j = 1, size(listfiles)
+                if (listfiles(j)%s == path) cycle
+                inquire(file=new_dir//'/'//listfiles(j)%s, exist=exists)
+                if (.not. exists) cycle
+                n = n + 1
+                call read_text_file_alloc(new_dir//'/'//listfiles(j)%s, &
+                    context(n)%s, status)
+                if (status /= 0) context(n)%s = ''
+            end do
+            call cmake_registration_delta(old_text, new_text, commands, tests, &
+                targets, ok, reason, context(1:n))
+            if (.not. ok) cycle
+            delta%paths = [delta%paths, string_t(path)]
+            delta%tests = [delta%tests, tests]
+            delta%targets = [delta%targets, targets]
+        end do
+    end subroutine project_cmake_delta
+
+    logical function cmake_listfile(path) result(yes)
+        character(len=*), intent(in) :: path
+        character(len=:), allocatable :: base
+
+        base = path(index(path, '/', back=.true.) + 1:)
+        yes = base == 'CMakeLists.txt'
+        if (.not. yes .and. len(base) > 6) yes = base(len(base) - 5:) == '.cmake'
+    end function cmake_listfile
+
+    subroutine git_capture(directory, args, text, status)
+        character(len=*), intent(in) :: directory
+        type(string_t), intent(in) :: args(:)
+        character(len=:), allocatable, intent(out) :: text
+        integer, intent(out) :: status
+        character(len=1024) :: out_file
+        character(len=:), allocatable :: packed
+        integer :: n_args, k, ios
+
+        call make_tmpfile('fo-git', out_file)
+        n_args = 0
+        packed = ''
+        call argv_push(packed, n_args, 'git')
+        call argv_push(packed, n_args, '-C')
+        call argv_push(packed, n_args, directory)
+        do k = 1, size(args)
+            call argv_push(packed, n_args, args(k)%s)
+        end do
+        call process_run_argv_logged('', packed, n_args, trim(out_file), .false., &
+            0, status)
+        text = ''
+        if (status == 0) then
+            call read_text_file_alloc(trim(out_file), text, ios)
+            if (ios /= 0) status = 1
+        end if
+        call delete_tmpfile(trim(out_file))
+    end subroutine git_capture
+
+    subroutine split_list(text, items)
+        !! Comma- or whitespace-separated words.
+        character(len=*), intent(in) :: text
+        type(string_t), allocatable, intent(inout) :: items(:)
+        integer :: i, start
+
+        i = 1
+        do while (i <= len(text))
+            if (scan(text(i:i), ', '//achar(9)//achar(10)//achar(13)) > 0) then
+                i = i + 1
+                cycle
+            end if
+            start = i
+            do while (i <= len(text))
+                if (scan(text(i:i), ', '//achar(9)//achar(10)//achar(13)) > 0) exit
+                i = i + 1
+            end do
+            items = [items, string_t(text(start:i - 1))]
+        end do
+    end subroutine split_list
 
     subroutine split_nul(text, items)
         !! NUL-terminated items of text, each once.
