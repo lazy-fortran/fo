@@ -204,7 +204,10 @@ separate system/environment package manager.
 ## CMake contract
 
 Delegated configure and build commands default to a 3600 s wall limit;
-`FO_BUILD_TIMEOUT` overrides that limit.
+`FO_BUILD_TIMEOUT` overrides that limit. On Linux, a bounded command stops
+earlier, with a `fo: STALLED:` diagnosis, when one of its processes stays in
+uninterruptible I/O (state D) for `FO_IO_STALL_TIMEOUT` seconds (default 300,
+0 disables), as a dependency clone does on a hung network file system.
 
 CMake mode configures `cmake -S . -B build -G Ninja`, forwards `FC`, the
 checkout's Git config `fo.cmakeArgs`, `FO_CMAKE_ARGS`, and effective Fortran flags, then calls

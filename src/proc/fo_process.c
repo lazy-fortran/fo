@@ -1149,6 +1149,84 @@ static int stop_lifeline_monitor(pid_t monitor, pid_t target, uint64_t target_st
 }
 #endif
 
+#ifdef __linux__
+/* FO_IO_STALL_TIMEOUT: seconds one process of a bounded command may stay in
+   uninterruptible sleep (state D) before the command is stopped; 0 disables. */
+static int io_stall_seconds(void) {
+    const char *value = getenv("FO_IO_STALL_TIMEOUT");
+    int seconds;
+
+    if (!value || !value[0]) return 300;
+    seconds = atoi(value);
+    return seconds >= 0 ? seconds : 300;
+}
+
+static void read_small_file(const char *path, char *text, size_t size) {
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    ssize_t n = fd >= 0 ? read(fd, text, size - 1) : -1;
+
+    if (fd >= 0) close(fd);
+    if (n < 0) n = 0;
+    text[n] = '\0';
+    while (n > 0 && (text[n - 1] == '\n' || text[n - 1] == ' ')) text[--n] = '\0';
+}
+
+/* The first process of process group `group` in uninterruptible sleep. */
+static pid_t blocked_group_member(pid_t group) {
+    DIR *proc = opendir("/proc");
+    struct dirent *entry;
+    pid_t found = 0;
+
+    if (!proc) return 0;
+    while (found == 0 && (entry = readdir(proc)) != NULL) {
+        char path[64], stat_text[512];
+        const char *after_name;
+        char state = 0;
+        int parent = 0;
+        long member_group = 0;
+
+        if (entry->d_name[0] < '1' || entry->d_name[0] > '9') continue;
+        snprintf(path, sizeof(path), "/proc/%.32s/stat", entry->d_name);
+        read_small_file(path, stat_text, sizeof(stat_text));
+        after_name = strrchr(stat_text, ')');
+        if (!after_name || !after_name[1]) continue;
+        if (sscanf(after_name + 2, "%c %d %ld", &state, &parent,
+                   &member_group) != 3)
+            continue;
+        if (state == 'D' && member_group == (long)group)
+            found = (pid_t)atol(entry->d_name);
+    }
+    closedir(proc);
+    return found;
+}
+
+static void report_io_stall(const char *log_file, pid_t blocked, int seconds) {
+    char path[64], name[64], wait_channel[128], directory[PATH_MAX];
+    char message[PATH_MAX + 768];
+    ssize_t n;
+    int length;
+
+    snprintf(path, sizeof(path), "/proc/%ld/comm", (long)blocked);
+    read_small_file(path, name, sizeof(name));
+    snprintf(path, sizeof(path), "/proc/%ld/wchan", (long)blocked);
+    read_small_file(path, wait_channel, sizeof(wait_channel));
+    snprintf(path, sizeof(path), "/proc/%ld/cwd", (long)blocked);
+    n = readlink(path, directory, sizeof(directory) - 1);
+    if (n < 0) n = 0;
+    directory[n] = '\0';
+    length = snprintf(message, sizeof(message),
+        "fo: STALLED: %s (pid %ld) has been blocked in uninterruptible I/O for %ds "
+        "(kernel wait %s, working directory %s). The file system it uses is not "
+        "responding, so fo stops the command instead of waiting for its timeout; "
+        "the blocked process may survive until that I/O returns. "
+        "FO_IO_STALL_TIMEOUT sets this limit in seconds (0 disables it).\n",
+        name[0] ? name : "?", (long)blocked, seconds,
+        wait_channel[0] ? wait_channel : "?", directory[0] ? directory : "?");
+    if (length > 0 && length < (int)sizeof(message))
+        emit_heartbeat_text(log_file, message, (size_t)length);
+}
+#endif
+
 static int run_argv(const char *cwd, char *const argv[], const char *log_file,
                     int append, int jobs, int timeout_s, int heartbeat_s,
                     const char *env_extra, struct run_budget *budget) {
@@ -1279,6 +1357,20 @@ static int run_argv(const char *cwd, char *const argv[], const char *log_file,
             cpu_check = start;
             add_seconds(&cpu_check, cpu_s);
         }
+#ifdef __linux__
+        /* A process blocked on a hung file system (a network or parallel
+           file system, typically during a dependency clone) makes no
+           progress and uses no CPU: report it long before the wall cap. */
+        int stall_s = io_stall_seconds();
+        struct timespec stall_check = deadline, stalled_since = start;
+        pid_t stalled = 0;
+        if (stall_s > 0 && stall_s < timeout_s) {
+            stall_check = start;
+            add_seconds(&stall_check, stall_s < 5 ? stall_s : 5);
+        } else {
+            stall_s = 0;
+        }
+#endif
 
         for (;;) {
             siginfo_t info;
@@ -1364,6 +1456,32 @@ static int run_argv(const char *cwd, char *const argv[], const char *log_file,
                 cpu_check = now;
                 add_milliseconds(&cpu_check, CPU_POLL_MS);
             }
+#ifdef __linux__
+            if (stall_s > 0 && timespec_at_or_after(&now, &stall_check)) {
+                pid_t group = getpgid(accounted_pid);
+                pid_t blocked = blocked_group_member(group > 0 ? group : pid);
+
+                if (blocked == 0 || blocked != stalled) {
+                    stalled = blocked;
+                    stalled_since = now;
+                } else if (now.tv_sec - stalled_since.tv_sec >= stall_s) {
+                    report_io_stall(log_file, blocked, stall_s);
+                    record_timeout(budget, 2, child_cpu_ms(accounted_pid), &start,
+                                   &now);
+                    int cleanup_error = 0;
+                    if (lifeline_monitor)
+                        cleanup_error = stop_lifeline_monitor(pid, accounted_pid,
+                                                              target_start, &status);
+                    else
+                        kill_group_and_reap(pid, &status, isolated_group);
+                    if (pid_fd >= 0) close(pid_fd);
+                    if (report_fd >= 0) close(report_fd);
+                    return cleanup_error == 0 ? 124 : 126;
+                }
+                stall_check = now;
+                add_seconds(&stall_check, stall_s < 5 ? stall_s : 5);
+            }
+#endif
             if (heartbeat_s > 0 &&
                 timespec_at_or_after(&now, &next_heartbeat)) {
                 if (budget != NULL && has_text(budget->slow_label)) {
@@ -1399,6 +1517,12 @@ static int run_argv(const char *cwd, char *const argv[], const char *log_file,
                     int cpu_ms = milliseconds_until(&now, &cpu_check);
                     if (cpu_ms < wait_ms) wait_ms = cpu_ms;
                 }
+#ifdef __linux__
+                if (stall_s > 0) {
+                    int stall_ms = milliseconds_until(&now, &stall_check);
+                    if (stall_ms < wait_ms) wait_ms = stall_ms;
+                }
+#endif
                 poll_result = poll(&child, 1, wait_ms);
                 if (poll_result < 0 && errno == EINTR) continue;
                 if (poll_result < 0) {
