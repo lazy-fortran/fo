@@ -688,3 +688,18 @@ int fo_test_silence_output(void) {
 #endif
     return result;
 }
+
+/* Block in uninterruptible sleep (state D) until killed: a vfork parent
+   waits for its child, which pauses. Stands in for a hung file system. */
+int fo_test_block_uninterruptibly(void) {
+#if defined(__linux__)
+    pid_t child = vfork();
+    if (child == 0) {
+        pause();
+        _exit(0);
+    }
+    return child < 0 ? -1 : 0;
+#else
+    return -1;
+#endif
+}

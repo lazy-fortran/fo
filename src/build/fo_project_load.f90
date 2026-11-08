@@ -80,7 +80,7 @@ contains
         type(string_t), allocatable, intent(out), optional :: scanned(:)
         character(len=1024) :: log_file
         character(len=:), allocatable :: text
-        integer :: exitcode, status
+        integer :: exitcode, status, stalled
 
         ierr = 0
         message = ''
@@ -104,8 +104,17 @@ contains
             if (exitcode == 124) &
                 message = 'CMake configure timed out (FO_BUILD_TIMEOUT exceeded)'
             call read_text_file_alloc(trim(log_file), text, status)
-            if (status == 0) message = message//new_line('a')// &
-                trim(configure_error_excerpt(text))
+            if (status == 0) then
+                stalled = index(text, 'fo: STALLED:')
+                if (stalled > 0) then
+                    message = 'CMake configure stalled in file-system I/O'// &
+                        new_line('a')//text(stalled:stalled - 1 + &
+                        max(1, index(text(stalled:)//new_line('a'), new_line('a')) - 1))
+                else
+                    message = message//new_line('a')// &
+                        trim(configure_error_excerpt(text))
+                end if
+            end if
             call delete_tmpfile(trim(log_file))
             return
         end if
