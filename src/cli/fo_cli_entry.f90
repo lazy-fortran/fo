@@ -35,7 +35,7 @@ module fo_cli_entry
         process_configure_pkg_config
     use fo_ffc_cli, only: ffc_cmd_build, ffc_cmd_run, ffc_native_requested
     use fo_hook, only: hook_cli
-    use fo_gremlin_cli, only: gremlin_cli_run
+    use fo_gremlin_cli, only: gremlin_cli_run, print_gremlin_usage
     use fo_commands, only: command_graph, command_info, command_changed, &
         command_clean, command_install, command_check, command_lint, &
         failed_tests_text
@@ -423,6 +423,8 @@ contains
                 return
             end if
             if (command == 'format') return
+            ! fo gremlin renders per-action help from its option table.
+            if (command == 'gremlin') return
             if (command == 'exec' .or. command == 'run') then
                 i = 2
                 do while (i <= argument_count)
@@ -488,6 +490,8 @@ contains
             case ('check')
                 write (output_unit, '(a)') &
                     'usage: fo check [--json=compact|--json=full]'
+            case ('gremlin')
+                call print_gremlin_usage(output_unit, 'help')
             case ('fmt')
                 write (output_unit, '(a)') 'usage: fo fmt [--changed] [--check] [paths...]'
                 write (output_unit, '(a)') '  -h, --help  show this help without formatting files'

@@ -1,7 +1,8 @@
 module fo_gremlin_cli
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
     use fo_gremlin_request, only: GREMLIN_OPTIONS, N_GREMLIN_OPTIONS, &
-        gremlin_option_index, gremlin_apply_adapter_defaults
+        gremlin_option_index, gremlin_apply_adapter_defaults, gremlin_option_t, &
+        gremlin_request_t, gremlin_action_bit, GA_OTHER, GA_WAIT, GA_UNBOUNDED
     use fo_fs, only: fs_canonical_path
     use fo_gremlin_supervisor, only: gremlin_handle
     use fo_json_object, only: json_value_raw
@@ -13,7 +14,7 @@ module fo_gremlin_cli
     use fx_string, only: string_t
     implicit none
     private
-    public :: gremlin_cli_run
+    public :: gremlin_cli_run, print_gremlin_usage
 
     integer, parameter :: ARG_LEN = 4096
 
@@ -46,7 +47,7 @@ contains
         call parse_cli(tokens, n_tokens, action, project_dir, request_json, &
             show_help)
         if (show_help) then
-            call print_gremlin_usage(output_unit)
+            call print_gremlin_usage(output_unit, trim(action))
             return
         end if
 
@@ -121,6 +122,7 @@ contains
             if (arg == '--help' .or. arg == '-h') then
                 show_help = .true.
                 request_json = '{}'
+                if (first == 1) action = 'help'
                 return
             end if
             if (len_trim(arg) == 0) then
@@ -273,20 +275,158 @@ contains
         is_integer_literal = .true.
     end function is_integer_literal
 
-    subroutine print_gremlin_usage(unit)
+    subroutine print_gremlin_usage(unit, action)
+        !! Per-action help rendered from the shared option table, so every
+        !! accepted flag is listed with its value kind, choices and default.
         integer, intent(in) :: unit
+        character(len=*), intent(in) :: action
+        character(len=10), parameter :: actions(7) = [character(len=10) :: &
+            'start', 'status', 'wait', 'events', 'failures', 'reproduce', 'stop']
+        integer :: i, bit
 
-        write (unit, '(a)') 'usage: fo gremlin [start|status|wait|events|failures|reproduce|stop] [options]'
-        write (unit, '(a)') '  start: --dir DIR --lane ID --target NAME --random N --seed N'
-        write (unit, '(a)') '         --random 0 quiesces after required targets pass'
-        write (unit, '(a)') '         --only-changed --shuffle --campaign-seconds N --timeout-seconds N'
-        write (unit, '(a)') '         -L|--label RE -LE|--exclude-label RE --layer NAME'
-        write (unit, '(a)') '  reads: --session ID --cursor N --lifecycle-cursor N'
-        write (unit, '(a)') '         --max-records N --max-bytes N'
-        write (unit, '(a)') '  reads: --detail summary|full (status/wait default: summary)'
-        write (unit, '(a)') '  wait: --wait-ms N --until CONDITION'
-        write (unit, '(a)') '  reproduce: ID or --case ID; optional --generation ID'
-        write (unit, '(a)') '  output is the shared Gremlin JSON response'
+        bit = gremlin_action_bit(action)
+        if (bit == GA_OTHER) then
+            write (unit, '(a)') 'usage: fo gremlin [ACTION] [--dir DIR] [options]'
+            write (unit, '(a)') '  actions: start (default), status, wait, events, failures,'
+            write (unit, '(a)') '           reproduce, stop'
+            write (unit, '(a)') '  fo gremlin ACTION --help lists the options of one action'
+            write (unit, '(a)') '  output is the shared Gremlin JSON response'
+            do i = 1, size(actions)
+                write (unit, '(a)') ''
+                call print_action_options(unit, trim(actions(i)))
+            end do
+            return
+        end if
+        call print_action_options(unit, action)
     end subroutine print_gremlin_usage
+
+    subroutine print_action_options(unit, action)
+        integer, intent(in) :: unit
+        character(len=*), intent(in) :: action
+        type(gremlin_option_t) :: o
+        character(len=:), allocatable :: head, detail
+        integer :: i, bit
+
+        bit = gremlin_action_bit(action)
+        if (action == 'reproduce') then
+            write (unit, '(a)') 'usage: fo gremlin reproduce [ID] [--dir DIR] [options]'
+        else
+            write (unit, '(a)') 'usage: fo gremlin '//action//' [--dir DIR] [options]'
+        end if
+        write (unit, '(a)') '  --dir DIR  project directory (default: .)'
+        do i = 1, N_GREMLIN_OPTIONS
+            o = GREMLIN_OPTIONS(i)
+            if (iand(o%actions, bit) == 0) cycle
+            head = '  '//trim(o%flag)
+            if (len_trim(o%alias) > 0) head = head//'|'//trim(o%alias)
+            select case (trim(o%kind))
+            case ('int')
+                head = head//' N'
+            case ('string', 'list')
+                head = head//' '//value_name(o)
+            end select
+            detail = ''
+            if (len_trim(o%choices) > 0) then
+                detail = 'one of '//trim(o%choices)
+            else if (trim(o%kind) == 'int') then
+                detail = range_text(o)
+            end if
+            if (trim(o%kind) == 'list') detail = append(detail, 'repeatable')
+            detail = append(detail, option_default(o%key, bit))
+            if (len_trim(o%note) > 0) detail = append(detail, trim(o%note))
+            write (unit, '(a)') head
+            if (len(detail) > 0) write (unit, '(a)') '      '//detail
+        end do
+    end subroutine print_action_options
+
+    function value_name(o) result(text)
+        type(gremlin_option_t), intent(in) :: o
+        character(len=:), allocatable :: text
+        integer :: i
+
+        text = trim(o%key)
+        if (len_trim(o%choices) > 0) text = 'CHOICE'
+        if (trim(o%kind) == 'list' .and. text(len(text):) == 's') &
+            text = text(:len(text) - 1)
+        do i = 1, len(text)
+            if (text(i:i) == '_') then
+                text(i:i) = '-'
+            else if (text(i:i) >= 'a' .and. text(i:i) <= 'z') then
+                text(i:i) = achar(iachar(text(i:i)) - 32)
+            end if
+        end do
+    end function value_name
+
+    function range_text(o) result(text)
+        type(gremlin_option_t), intent(in) :: o
+        character(len=:), allocatable :: text
+        character(len=24) :: lo, hi
+
+        write (lo, '(i0)') o%lo
+        write (hi, '(i0)') o%hi
+        if (o%hi == GA_UNBOUNDED) then
+            text = 'at least '//trim(lo)
+        else
+            text = 'range '//trim(lo)//'..'//trim(hi)
+        end if
+    end function range_text
+
+    function append(text, part) result(joined)
+        character(len=*), intent(in) :: text, part
+        character(len=:), allocatable :: joined
+
+        joined = text
+        if (len(part) == 0) return
+        if (len(joined) > 0) joined = joined//'; '
+        joined = joined//part
+    end function append
+
+    function option_default(key, bit) result(text)
+        !! The default taken from a default-initialised request, so help cannot
+        !! drift from the parser.
+        character(len=*), intent(in) :: key
+        integer, intent(in) :: bit
+        character(len=:), allocatable :: text
+        type(gremlin_request_t) :: d
+        character(len=24) :: number
+
+        number = ''
+        text = ''
+        select case (trim(key))
+        case ('lane_id')
+            text = trim(d%lane_id)
+        case ('random_count')
+            write (number, '(i0)') d%random_count
+        case ('seed')
+            text = '0 (seed from the clock)'
+        case ('campaign_seconds')
+            write (number, '(i0)') d%campaign_seconds
+        case ('timeout_seconds')
+            write (number, '(i0)') d%timeout_seconds
+        case ('cursor', 'lifecycle_cursor')
+            if (iand(bit, GA_WAIT) /= 0) then
+                text = 'end of the journal for an untyped wait'
+            else
+                text = '0'
+            end if
+        case ('max_records')
+            write (number, '(i0)') d%max_records
+        case ('max_bytes')
+            write (number, '(i0)') d%max_bytes
+        case ('wait_ms')
+            write (number, '(i0)') d%wait_ms
+        case ('lifetime')
+            text = trim(d%lifetime)
+        case ('detail')
+            text = 'summary'
+        case ('only_changed', 'shuffle')
+            text = 'false'
+        case ('wait_until')
+            text = 'the next event'
+        end select
+        if (len_trim(number) > 0 .and. len(text) == 0) text = trim(number)
+        if (len(text) > 0) text = 'default: '//text
+    end function option_default
+
 
 end module fo_gremlin_cli

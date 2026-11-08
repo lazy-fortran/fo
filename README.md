@@ -70,7 +70,8 @@ a coding agent, uses `fo gremlin start --owner lease --lease-seconds N`: every
 once nobody has read it for N seconds (default 1800). Explicitly stop temporary
 watchers when their work ends if the parent or server remains shared across tasks.
 `fo gremlin wait` without `--until` or a cursor waits for the next event; the
-response reports `next_cursor` and `next_lifecycle_cursor` for the following call. Every lane also stops when
+response reports `next_cursor` and `next_lifecycle_cursor` for the following call.
+`fo gremlin ACTION --help` lists the options of each action. Every lane also stops when
 its project directory is deleted or its owner receives SIGTERM, and
 `fo gremlin stop` and `status` still find a deleted project's lane by its path.
 Without `--session`, `status` of a lane whose owner has exited reports that
