@@ -194,6 +194,11 @@ source-dir = "test"
 main = "test_mcp_request_structure.f90"
 
 [[test]]
+name = "test_mcp_shutdown_drain"
+source-dir = "test"
+main = "test_mcp_shutdown_drain.f90"
+
+[[test]]
 name = "test_mcp_gremlin"
 source-dir = "test"
 main = "test_mcp_gremlin.f90"

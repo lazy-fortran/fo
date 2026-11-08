@@ -25,7 +25,7 @@ module fo_mcp
     use fo_process, only: argv_push, process_self_executable, process_suppress_heartbeats
     use fo_version_info, only: FO_VERSION
     use fo_exec_service, only: exec_job_t, exec_queue_t, exec_start, exec_poll, &
-        exec_cancel, RUN_RUNNING
+        exec_cancel, exec_clock_ms, RUN_RUNNING
     use fo_build_backend, only: backend_t, detect_backend, BACKEND_NONE
     use fo_fs, only: fs_sleep_ms, fs_canonical_path
     use fo_gremlin_status_json, only: gremlin_error_response
@@ -38,6 +38,8 @@ module fo_mcp
     integer, parameter :: MAX_LINE = 32768
     integer, parameter :: CANCEL_RETRY_INITIAL_DELAY_MS = 100
     integer, parameter :: CANCEL_RETRY_MAX_DELAY_MS = 5000
+    ! Safety bound for answering deferred requests still running at shutdown.
+    integer, parameter :: SHUTDOWN_GRACE_MS = 10000
 
     type :: mcp_deferred_t
         !! A Gremlin request running in an owned `fo gremlin` child; its
@@ -169,6 +171,7 @@ contains
             case ('resources/read')
                 call handle_resources_read(params_json, id_str, response, async_state)
             case ('shutdown')
+                call deferred_settle(async_state, framing)
                 call async_cancel_all(async_state, read_status)
                 if (read_status /= 0) then
                     call rpc_error(id_str, -32603, &
@@ -538,6 +541,36 @@ contains
             call deferred_drop(state, i)
         end do
     end subroutine deferred_poll
+
+    subroutine deferred_settle(state, framing)
+        !! Every request received before shutdown gets its response: running
+        !! deferred requests get a bounded grace, then an error response.
+        type(mcp_async_state_t), intent(inout) :: state
+        integer, intent(in) :: framing
+        character(len=:), allocatable :: result_json, response
+        integer(int64) :: started
+        integer :: i, k, status
+
+        started = exec_clock_ms()
+        do
+            call deferred_poll(state, framing)
+            if (size(state%deferred) == 0) return
+            if (exec_clock_ms() - started >= SHUTDOWN_GRACE_MS) exit
+            call fs_sleep_ms(20)
+        end do
+        do i = size(state%deferred), 1, -1
+            call exec_cancel(state%deferred(i)%job, status)
+            if (status /= 0) cycle
+            call gremlin_error_response(state%deferred(i)%action, &
+                'cancelled by server shutdown', result_json)
+            do k = 1, size(state%deferred(i)%ids)
+                call make_tool_text_response(state%deferred(i)%ids(k)%s, result_json, &
+                    2, response)
+                call mcp_send_response(response, framing)
+            end do
+            call deferred_drop(state, i)
+        end do
+    end subroutine deferred_settle
 
     subroutine deferred_cancel(state, request_id)
         !! notifications/cancelled: the id gets no response; a request no id
