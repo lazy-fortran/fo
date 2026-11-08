@@ -170,6 +170,7 @@ program test_mcp_gremlin
     call assert_true(count_lines(read_text(failure_marker)) > before, &
         'reproduce executes the captured failed test again')
     call reproduce_keeps_server_responsive()
+    call wait_keeps_server_responsive()
     call call_tool('{"action":"gremlin_stop"'//identity//'}', document)
     call assert_equal_string(gremlin_field(document, 'state'), 'stopping', &
         'scoped MCP stop acknowledges the stopping owner')
@@ -217,6 +218,31 @@ contains
         call assert_equal_integer(int(json_number_value(json_member(answer, 'id'))), &
             request_id, 'a cancelled reproduction sends no response')
     end subroutine reproduce_keeps_server_responsive
+    subroutine wait_keeps_server_responsive()
+        !! A wait blocks for its whole --wait-ms, longer than a client can
+        !! keep a request open on a single stdio server; it runs in an owned
+        !! child so the server answers other requests meanwhile, and a
+        !! cancelled wait sends no response. The lane keeps its failing
+        !! case, so fully-verified cannot hold and the wait really blocks.
+        type(json_value_t) :: answer
+        integer :: wait_id, request_id
+        logical :: sent
+
+        call mcp_session_send(server, 'tools/call', '{"name":"fo","arguments":'// &
+            '{"action":"gremlin_wait"'//identity//',"wait_ms":60000,'// &
+            '"wait_until":"fully-verified"}}', wait_id, sent)
+        call mcp_session_send(server, 'tools/call', '{"name":"fo","arguments":'// &
+            '{"action":"gremlin_status"'//identity//'}}', request_id, sent)
+        call mcp_session_receive(server, answer, 10000)
+        call assert_equal_integer(int(json_number_value(json_member(answer, 'id'))), &
+            request_id, 'MCP answers status while a long wait is pending')
+        call mcp_session_notify(server, 'notifications/cancelled', &
+            '{"requestId":'//integer_text(wait_id)//'}')
+        call mcp_session_send(server, 'tools/list', '', request_id, sent)
+        call mcp_session_receive(server, answer, 10000)
+        call assert_equal_integer(int(json_number_value(json_member(answer, 'id'))), &
+            request_id, 'a cancelled long wait sends no response')
+    end subroutine wait_keeps_server_responsive
 
     function integer_text(value) result(text)
         integer, intent(in) :: value
