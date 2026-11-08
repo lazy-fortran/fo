@@ -26,6 +26,9 @@ program test_fmt
     call test_procedure_keyword_after_embedded_suffix()
     call test_continued_character_literals()
     call test_named_constructs()
+    call test_construct_words_as_names()
+    call test_then_suffix_in_name()
+    call test_derived_type_forms()
 
     write (output_unit, '(a,i0,a,i0,a)') 'fmt: ', n_pass, ' pass, ', n_fail, ' fail'
     if (n_fail > 0) stop 1
@@ -111,6 +114,91 @@ contains
         call assert(trim(out(8)) == trim(inp(8)), &
             'typed function leaves program closing at column 1')
     end subroutine test_procedure_keyword_after_embedded_suffix
+
+    subroutine test_construct_words_as_names()
+        character(len=16), parameter :: names(21) = [character(len=16) :: &
+            'block', 'associate', 'select', 'do', 'if', 'where', 'forall', &
+            'critical', 'type', 'interface', 'enum', 'else', 'case', &
+            'contains', 'module', 'program', 'endif', 'enddo', 'BLOCK', &
+            'elseif_count', 'elsewhere']
+        character(len=MAX_LINE_LEN) :: inp(9), out(9)
+        integer :: i, n_out
+
+        do i = 1, size(names)
+            inp(1) = 'program name_probe'
+            inp(2) = 'implicit none'
+            inp(3) = 'real :: '//trim(names(i))//'(3)'
+            inp(4) = trim(names(i))//' = 1.0'
+            inp(5) = trim(names(i))//'(2) = 2.0'
+            inp(6) = trim(names(i))//' % x = 3.0'
+            inp(7) = trim(names(i))//' => null()'
+            inp(8) = 'print *, '//trim(names(i))
+            inp(9) = 'end program name_probe'
+            call fmt(inp, size(inp), out, n_out)
+            call assert(trim(out(5)) == '    '//trim(inp(5)), &
+                'construct word as variable keeps indent: '//trim(names(i)))
+            call assert(trim(out(8)) == '    '//trim(inp(8)), &
+                'construct word as variable leaves later lines: '//trim(names(i)))
+            call assert(trim(out(9)) == trim(inp(9)), &
+                'construct word as variable closes program at column 1: '// &
+                trim(names(i)))
+        end do
+    end subroutine test_construct_words_as_names
+
+    subroutine test_then_suffix_in_name()
+        character(len=MAX_LINE_LEN) :: inp(4), out(4)
+        integer :: n_out
+
+        inp(1) = 'program then_probe'
+        inp(2) = 'if (x > 0) y = athen'
+        inp(3) = 'print *, y'
+        inp(4) = 'end program then_probe'
+        call fmt(inp, size(inp), out, n_out)
+        call assert(trim(out(3)) == '    print *, y', &
+            'single-line if ending in a name ending with then opens no block')
+    end subroutine test_then_suffix_in_name
+
+    subroutine test_derived_type_forms()
+        character(len=48), parameter :: expected(22) = [character(len=48) :: &
+            'module type_probe', &
+            '    type point', &
+            '        real :: x', &
+            '    end type point', &
+            '    type, extends(point) :: point3', &
+            '        real :: z', &
+            '    end type point3', &
+            '    type (point) :: origin', &
+            'contains', &
+            '    type(point) function shifted(p)', &
+            '        class(point), intent(in) :: p', &
+            '        select type (p)', &
+            '        type is (point3)', &
+            '            shifted%x = p%z', &
+            '        class is (point)', &
+            '            shifted%x = p%x', &
+            '        class default', &
+            '            shifted%x = 0', &
+            '        end select', &
+            '        if (shifted%x > 0) shifted%x = athen', &
+            '    end function shifted', &
+            'end module type_probe']
+        character(len=MAX_LINE_LEN) :: inp(size(expected)), out(size(expected))
+        integer :: i, n_out
+
+        do i = 1, size(expected)
+            inp(i) = adjustl(expected(i))
+        end do
+        call fmt(inp, size(inp), out, n_out)
+        do i = 1, size(expected)
+            call assert(trim(out(i)) == trim(expected(i)), &
+                'derived type forms: '//trim(expected(i)))
+        end do
+        call fmt(expected, size(expected), out, n_out)
+        do i = 1, size(expected)
+            call assert(trim(out(i)) == trim(expected(i)), &
+                'derived type forms are a fixed point: '//trim(expected(i)))
+        end do
+    end subroutine test_derived_type_forms
 
     subroutine assert(cond, msg)
         logical, intent(in) :: cond

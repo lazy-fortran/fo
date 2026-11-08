@@ -363,6 +363,9 @@ contains
         n = len_trim(low)
         if (n == 0) return
 
+        ! Fortran keywords are not reserved: 'block = 1' or 'do(2) = x' assign.
+        if (is_assignment_stmt(low)) return
+
         ! ---- keywords that ONLY close (end X) ----
         if (matches(low, 'end do') .or. kw_eq(low, 'end do') .or. &
             kw_eq(low, 'enddo')) then
@@ -423,7 +426,7 @@ contains
         end if
         if (kw_starts(low, 'case ') .or. kw_eq(low, 'case default') .or. &
             kw_starts(low, 'case(') .or. kw_starts(low, 'class is') .or. &
-            kw_starts(low, 'class default')) then
+            kw_starts(low, 'class default') .or. is_type_guard(low)) then
             closes = 1; opens = 1; is_both = 1; return
         end if
         if (kw_eq(low, 'contains')) then
@@ -441,9 +444,7 @@ contains
 
         ! if (...) then  — only block form
         if (kw_starts(low, 'if ') .or. kw_starts(low, 'if(')) then
-            if (has_keyword_then(low)) then
-                opens = 1
-            end if
+            if (then_follows_condition(low)) opens = 1
             return
         end if
 
@@ -479,10 +480,8 @@ contains
             opens = 1; return
         end if
 
-        ! type :: name or type, attr :: name (not type(...)  which is a cast)
-        if (kw_starts(low, 'type ') .or. kw_starts(low, 'type,')) then
-            if (is_type_def(low)) opens = 1
-            return
+        if (is_type_def(low)) then
+            opens = 1; return
         end if
 
         if (kw_eq(low, 'interface') .or. &
@@ -514,6 +513,49 @@ contains
             opens = 1; return
         end if
     end subroutine classify_line
+
+    ! True if the statement starts with a name, optional subscripts or
+    ! substring ranges, and then '=', '=>' or '%'. Such a statement is an
+    ! assignment even when the name spells a construct keyword. A subscript
+    ! list left open by a continuation cannot be judged and counts as no.
+    logical function is_assignment_stmt(low)
+        character(len=*), intent(in) :: low
+        integer :: i, n, depth
+        character :: c
+
+        is_assignment_stmt = .false.
+        n = len_trim(low)
+        i = 1
+        do while (i <= n)
+            c = low(i:i)
+            if (.not. ((c >= 'a' .and. c <= 'z') .or. c == '_' .or. &
+                (i > 1 .and. c >= '0' .and. c <= '9'))) exit
+            i = i + 1
+        end do
+        if (i == 1) return
+        do
+            do while (i <= n)
+                if (low(i:i) /= ' ') exit
+                i = i + 1
+            end do
+            if (i > n) return
+            if (low(i:i) /= '(') exit
+            depth = 0
+            do while (i <= n)
+                if (low(i:i) == '(') depth = depth + 1
+                if (low(i:i) == ')') depth = depth - 1
+                i = i + 1
+                if (depth == 0) exit
+            end do
+            if (depth /= 0) return
+        end do
+        c = low(i:i)
+        if (c == '%') then
+            is_assignment_stmt = .true.
+        else if (c == '=') then
+            is_assignment_stmt = .true.
+        end if
+    end function is_assignment_stmt
 
     ! Remove a leading construct name ("outer: if (...) then") so the block
     ! keyword is classified as if it were unnamed. A "::" is not a construct
@@ -643,9 +685,7 @@ contains
         has_keyword_then = .false.
         ! Look for 'then' at end of line (possibly after closing paren/space).
         if (n >= 4) then
-            if (low(n - 3:n) == 'then') then
-                has_keyword_then = .true.
-            end if
+            if (low(n - 3:n) == 'then') has_keyword_then = starts_word(low, n - 3)
         end if
     end function has_keyword_then
 
@@ -693,11 +733,71 @@ contains
         end do
     end function is_block_forall
 
-    ! True if 'type ...' is a type definition (has '::'), not a type cast.
+    ! True for a derived-type definition: 'type name', 'type :: name' or
+    ! 'type, attr :: name'. 'type(t) :: x' declares a variable and
+    ! 'type is (t)' is a select-type guard.
     logical function is_type_def(low)
         character(len=*), intent(in) :: low
-        is_type_def = (index(low, '::') > 0)
+        integer :: i
+
+        is_type_def = .false.
+        if (.not. kw_starts(low, 'type')) return
+        i = next_nonblank(low, 5)
+        if (i > len_trim(low)) return
+        if (low(i:i) == ',' .or. low(i:i) == ':') then
+            is_type_def = .true.
+        else if (i > 5 .and. low(i:i) >= 'a' .and. low(i:i) <= 'z') then
+            is_type_def = .not. is_type_guard(low)
+        end if
     end function is_type_def
+
+    ! True for a select-type guard 'type is (t)'.
+    logical function is_type_guard(low)
+        character(len=*), intent(in) :: low
+        integer :: i
+
+        is_type_guard = .false.
+        if (.not. kw_starts(low, 'type ')) return
+        i = next_nonblank(low, 5)
+        if (i + 1 > len_trim(low)) return
+        if (low(i:i + 1) /= 'is') return
+        i = next_nonblank(low, i + 2)
+        if (i > len_trim(low)) return
+        is_type_guard = low(i:i) == '('
+    end function is_type_guard
+
+    ! Index of the first non-blank character at or after pos.
+    pure integer function next_nonblank(low, pos) result(i)
+        character(len=*), intent(in) :: low
+        integer, intent(in) :: pos
+
+        i = pos
+        do while (i <= len_trim(low))
+            if (low(i:i) /= ' ') return
+            i = i + 1
+        end do
+    end function next_nonblank
+
+    ! True if the parenthesised condition of an 'if' is followed only by
+    ! 'then'. A condition left open by a continuation counts as no.
+    logical function then_follows_condition(low)
+        character(len=*), intent(in) :: low
+        integer :: i, n, depth
+
+        then_follows_condition = .false.
+        n = len_trim(low)
+        i = index(low, '(')
+        if (i == 0) return
+        depth = 0
+        do while (i <= n)
+            if (low(i:i) == '(') depth = depth + 1
+            if (low(i:i) == ')') depth = depth - 1
+            i = i + 1
+            if (depth == 0) exit
+        end do
+        if (depth /= 0) return
+        then_follows_condition = trim(adjustl(low(i:n))) == 'then'
+    end function then_follows_condition
 
     ! True if the line contains a function opener. Handles prefixes like
     ! 'pure', 'elemental', 'recursive', 'real', 'integer', etc.
