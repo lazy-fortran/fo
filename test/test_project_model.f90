@@ -18,6 +18,7 @@ program test_project_model
         CASE_LABEL_EXCLUDED, CASE_SELECTED, CASE_DEPENDENCY
     use fo_project_model, only: model_unit_t, model_affected, CASE_NOT_AFFECTED
     use fo_project_model, only: model_case_digests
+    use fo_cmake_delta, only: cmake_delta_t
     use fo_project_model, only: model_layering_t, model_layering
     implicit none
 
@@ -39,6 +40,7 @@ program test_project_model
     call test_scale()
     call test_layering_scale()
     call test_affected()
+    call test_affected_registration()
     call test_affected_submodule()
 
     write (output_unit, '(a,i0,a,i0,a)') 'project model: ', n_pass, ' pass, ', &
@@ -523,6 +525,83 @@ contains
             'unselected case stays unselected')
         call expect_digests_follow_affected(m, units)
     end subroutine test_affected
+
+    subroutine test_affected_registration()
+        !! A listfile edit that only registers tests (fo_cmake_delta) affects
+        !! the cases it may create, cases linking a created target, cases
+        !! without a command target and cases naming the build tree; any
+        !! other listfile edit still widens.
+        type(project_model_t) :: m
+        type(model_unit_t) :: units(4)
+        type(cmake_delta_t) :: delta
+        type(string_t) :: roots(1)
+        type(string_t), allocatable :: paths(:), reasons(:)
+        type(model_selection_t) :: sel
+        integer :: ierr, t1, t2, t3, k
+        character(len=:), allocatable :: message, got
+
+        call model_init(m, 'unit', 'digest', build_dir='/p/build')
+        call add_target(m, 'core', TARGET_LIBRARY, '/p/src/core.f90', '', '')
+        call add_target(m, 'lib_new', TARGET_LIBRARY, '/p/src/new.f90', 'core', '')
+        call add_target(m, 'test_island', TARGET_EXECUTABLE, '/p/test/island.f90', &
+            'core', '/p/build/test_island', index=t1)
+        call add_target(m, 'test_other', TARGET_EXECUTABLE, '/p/test/other.f90', &
+            'core', '/p/build/test_other', index=t2)
+        call add_target(m, 'test_new', TARGET_EXECUTABLE, '/p/test/new.f90', &
+            'lib_new', '/p/build/test_new', index=t3)
+        call model_add_case(m, 'island_width_equal', command_target=t1, &
+            command=[string_t('/p/build/test_island'), string_t('width')])
+        call model_add_case(m, 'island_graded_equal', command_target=t1, &
+            command=[string_t('/p/build/test_island'), string_t('graded')])
+        call model_add_case(m, 'other', command_target=t2)
+        call model_add_case(m, 'uses_new', command_target=t3)
+        call model_add_case(m, 'layering', command=[string_t('cmake'), &
+            string_t('-P'), string_t('/p/cmake/check.cmake')])
+        call model_add_case(m, 'reads_tree', command_target=t2, &
+            command=[string_t('/p/build/test_other'), string_t('/p/build/targets.txt')])
+        call model_finalize(m, ierr, message)
+        call assert(ierr == 0, 'registration model finalizes: '//message)
+        call set_unit(units(1), '/p/src/core.f90', 'core', '')
+        call set_unit(units(2), '/p/test/island.f90', '', 'core')
+        call set_unit(units(3), '/p/test/other.f90', '', 'core')
+        call set_unit(units(4), '/p/test/new.f90', '', 'core')
+        roots(1)%s = '/p'
+        allocate(delta%paths(1), delta%tests(1), delta%targets(1))
+        delta%paths(1)%s = 'CMakeLists.txt'
+        delta%tests(1)%s = 'island_graded_*'
+        delta%targets(1)%s = 'lib_new'
+        call split_words('CMakeLists.txt', paths)
+
+        call run(m, '', sel)
+        call model_affected(m, units, roots, paths, sel, reasons, delta=delta)
+        got = ''
+        do k = 1, size(sel%cases)
+            if (k > 1) got = got//' '
+            got = got//m%cases(sel%cases(k))%name
+        end do
+        call assert(got == 'island_graded_equal layering reads_tree uses_new', &
+            'registration selects created, linking, script and build-tree cases: '// &
+            got)
+        call assert(size(reasons) == 0, 'a registration does not widen')
+
+        call split_words('CMakeLists.txt test/other.f90', paths)
+        call run(m, '', sel)
+        call model_affected(m, units, roots, paths, sel, reasons, delta=delta)
+        call assert(size(sel%cases) == 5 .and. size(reasons) == 0, &
+            'a registration adds to the closure of other changed files')
+
+        call split_words('CMakeLists.txt cmake/deps.cmake', paths)
+        call run(m, '', sel)
+        call model_affected(m, units, roots, paths, sel, reasons, delta=delta)
+        call assert(size(sel%cases) == 6 .and. size(reasons) == 1, &
+            'another changed listfile still widens')
+
+        call split_words('CMakeLists.txt', paths)
+        call run(m, '', sel)
+        call model_affected(m, units, roots, paths, sel, reasons)
+        call assert(size(sel%cases) == 6 .and. size(reasons) == 1, &
+            'without a registration delta a listfile edit widens')
+    end subroutine test_affected_registration
 
     subroutine test_affected_submodule()
         !! A submodule of a linked library uses a module no test reaches by
