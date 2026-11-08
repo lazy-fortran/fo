@@ -45,6 +45,7 @@ fo build [--profile NAME]  build applications and examples
 fo test [NAME ...]         build and run tests
 fo test --only-changed     run tests affected by changed modules
 fo run NAME [ARGS...]      build and run an application or example
+fo run FILE.f90 [ARGS...]  run a scratch program against a CMake build tree
 fo verify                  static checks, build, tests, lint, format check
 fo check --json=compact    one bounded JSON object with build and test status
 fo changed                 changed modules and their reverse dependents

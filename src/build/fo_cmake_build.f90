@@ -24,18 +24,19 @@ module fo_cmake_build
     use fo_cmake_model, only: cmake_plan_t, cmake_target_t, cmake_group_t, &
         cmake_plan_load, cmake_split_fragment
     use fo_scan, only: scan_unit_t, scan_file_preprocessed, scan_file_regex, &
-        MAX_UNITS
+        MAX_UNITS, scan_file_cached
     use fo_gfortran_build, only: native_action_t, native_compile_actions, &
         native_link_exact, native_archive_target, make_obj_path
     use fo_compiler_dialect, only: compiler_dialect, compiler_dialect_t
     use fo_compdb, only: compdb_write_commands
     use fo_fs, only: fs_make_dir, fs_write_text
-    use fo_process, only: argv_push, argv_push_split_nl
+    use fo_process, only: argv_push, argv_push_split_nl, process_run_argv_logged
     use, intrinsic :: iso_fortran_env, only: error_unit, int64
     implicit none
     private
 
     public :: cmake_route_t, cmake_build_route, cmake_build_native
+    public :: cmake_scratch_donor, cmake_scratch_build
 
     integer, parameter :: MODE_SKIP = 0, MODE_NATIVE = 1, MODE_DELEGATED = 2
     character(len=1), parameter :: nl = achar(10)
@@ -1098,6 +1099,242 @@ contains
                 tgt%artifact, log_file, exitcode)
         end associate
     end subroutine link_executable
+
+    subroutine cmake_scratch_donor(plan, source, donor, message)
+        !! The executable target whose compile settings and link line serve a
+        !! scratch program outside the project: its link closure holds every
+        !! library target that provides a module source uses, and of those
+        !! executables it has the smallest closure. donor is 0 with message
+        !! set when no executable links them all.
+        type(cmake_plan_t), intent(in) :: plan
+        character(len=*), intent(in) :: source
+        integer, intent(out) :: donor
+        character(len=:), allocatable, intent(out) :: message
+        type(scan_unit_t) :: program_unit, unit
+        integer, allocatable :: providers(:)
+        logical, allocatable :: closure(:), found(:)
+        integer :: t, i, m, ierr, best, size_closure
+        character(len=:), allocatable :: used
+
+        donor = 0
+        message = ''
+        call scan_file_cached(source, program_unit, ierr, allow_regex_fallback=.true.)
+        if (ierr /= 0) then
+            message = 'cannot scan '//trim(source)
+            return
+        end if
+        allocate(providers(0), found(program_unit%n_deps))
+        found = .false.
+        targets: do t = 1, size(plan%targets)
+            if (.not. has_fortran(plan%targets(t))) cycle
+            do i = 1, plan%targets(t)%n_sources
+                if (all(found)) exit targets
+                if (plan%targets(t)%src_group(i) < 1) cycle
+                if (plan%targets(t)%groups(plan%targets(t)%src_group(i))% &
+                    language /= 'Fortran') cycle
+                call scan_file_cached(plan%targets(t)%sources(i)%s, unit, ierr, &
+                    allow_regex_fallback=.true.)
+                if (ierr /= 0) cycle
+                do m = 1, program_unit%n_deps
+                    if (found(m)) cycle
+                    used = lowercase(trim(program_unit%deps(m)))
+                    if (.not. provides(unit, used)) cycle
+                    found(m) = .true.
+                    if (plan%targets(t)%type == 'EXECUTABLE') then
+                        message = 'module '//used//' is defined in executable '// &
+                            plan%targets(t)%name//', which nothing can link'
+                        return
+                    end if
+                    if (.not. any(providers == t)) providers = [providers, t]
+                end do
+            end do
+        end do targets
+        best = huge(best)
+        do t = 1, size(plan%targets)
+            if (plan%targets(t)%type /= 'EXECUTABLE') cycle
+            if (.not. has_fortran(plan%targets(t))) cycle
+            call link_closure(plan, t, closure)
+            if (.not. all(closure(providers))) cycle
+            size_closure = count(closure)
+            if (size_closure >= best) cycle
+            best = size_closure
+            donor = t
+        end do
+        if (donor > 0) return
+        message = 'no executable target links every library the program uses:'
+        do i = 1, size(providers)
+            message = message//' '//plan%targets(providers(i))%name
+        end do
+        if (size(providers) == 0) message = &
+            'no executable target with Fortran sources to take settings from'
+
+    contains
+
+        logical function provides(scanned, name) result(found)
+            type(scan_unit_t), intent(in) :: scanned
+            character(len=*), intent(in) :: name
+            integer :: k
+
+            found = lowercase(trim(scanned%module_name)) == name
+            if (found .or. .not. allocated(scanned%additional_modules)) return
+            do k = 1, size(scanned%additional_modules)
+                if (lowercase(trim(scanned%additional_modules(k))) == name) found = .true.
+            end do
+        end function provides
+
+    end subroutine cmake_scratch_donor
+
+    subroutine link_closure(plan, t, closure)
+        !! Targets t depends on, transitively, and t itself.
+        type(cmake_plan_t), intent(in) :: plan
+        integer, intent(in) :: t
+        logical, allocatable, intent(out) :: closure(:)
+        integer, allocatable :: queue(:)
+        integer :: head, i, k
+
+        allocate(closure(size(plan%targets)))
+        closure = .false.
+        closure(t) = .true.
+        queue = [t]
+        head = 1
+        do while (head <= size(queue))
+            do i = 1, plan%targets(queue(head))%n_deps
+                k = target_index(plan, plan%targets(queue(head))%dep_names(i)%s)
+                if (k == 0) cycle
+                if (closure(k)) cycle
+                closure(k) = .true.
+                queue = [queue, k]
+            end do
+            head = head + 1
+        end do
+    end subroutine link_closure
+
+    subroutine cmake_scratch_build(plan, donor, source, out_dir, executable, &
+            log_file, exitcode)
+        !! Compile source with the donor's Fortran compile settings and link
+        !! it with the donor's link line in place of the donor's own objects.
+        !! Every output, its modules included, goes below out_dir; the build
+        !! tree is only read.
+        type(cmake_plan_t), intent(in) :: plan
+        integer, intent(in) :: donor
+        character(len=*), intent(in) :: source, out_dir, executable, log_file
+        integer, intent(out) :: exitcode
+        type(native_action_t) :: action
+        type(compiler_dialect_t) :: dialect
+        type(string_t), allocatable :: words(:)
+        character(len=:), allocatable :: reason, argv, object, packed, candidate
+        logical, allocatable :: closure(:)
+        integer :: g, i, j, n_words, n_args
+
+        exitcode = 1
+        reason = ''
+        g = 0
+        do i = 1, plan%targets(donor)%n_groups
+            if (plan%targets(donor)%groups(i)%language == 'Fortran') then
+                g = i
+                exit
+            end if
+        end do
+        if (g == 0) then
+            call native_failure(log_file, 'scratch donor has no Fortran sources')
+            return
+        end if
+        call make_action(plan, donor, g, action, reason)
+        if (len(reason) > 0) then
+            call native_failure(log_file, 'cannot compile scratch program: '//reason)
+            return
+        end if
+        ! The donor's module output becomes a search path; modules the
+        ! program defines go to out_dir.
+        argv = ''
+        call split_lines(action%argv, words, n_words)
+        i = 1
+        do while (i <= n_words)
+            if (takes_module_directory(words(i)%s) .and. i < n_words) then
+                call add_token(argv, '-I'//words(i + 1)%s)
+                i = i + 2
+                cycle
+            end if
+            if (index(words(i)%s, '-J') == 1 .and. len(words(i)%s) > 2) then
+                call add_token(argv, '-I'//words(i)%s(3:))
+                i = i + 1
+                cycle
+            end if
+            call add_token(argv, words(i)%s)
+            i = i + 1
+        end do
+        call link_closure(plan, donor, closure)
+        do i = 1, size(closure)
+            if (.not. closure(i) .or. i == donor) cycle
+            if (has_fortran(plan%targets(i))) &
+                call add_token(argv, '-I'//fortran_module_dir(plan, i))
+        end do
+        dialect = compiler_dialect(action%compiler)
+        call add_token(argv, dialect%module_flags(out_dir))
+        object = out_dir//'/scratch.o'
+        packed = ''
+        n_args = 0
+        call argv_push(packed, n_args, action%compiler)
+        call argv_push_split_nl(packed, n_args, argv)
+        call argv_push(packed, n_args, '-c')
+        call argv_push(packed, n_args, source)
+        call argv_push(packed, n_args, '-o')
+        call argv_push(packed, n_args, object)
+        call process_run_argv_logged(out_dir, packed, n_args, log_file, .true., 0, &
+            exitcode)
+        if (exitcode /= 0) return
+
+        argv = ''
+        associate (tgt => plan%targets(donor))
+            do i = 1, tgt%n_link
+                if (tgt%link_roles(i)%s /= 'flags') cycle
+                call cmake_split_fragment(tgt%link_fragments(i)%s, words, n_words)
+                do j = 1, n_words
+                    call add_token(argv, words(j)%s)
+                end do
+            end do
+            call add_token(argv, object)
+            do i = 1, tgt%n_link
+                if (tgt%link_roles(i)%s == 'flags') cycle
+                call cmake_split_fragment(tgt%link_fragments(i)%s, words, n_words)
+                do j = 1, n_words
+                    candidate = words(j)%s
+                    if (candidate(1:1) /= '-') candidate = absolute(candidate, &
+                        plan%build_root)
+                    call add_token(argv, candidate)
+                end do
+            end do
+            packed = ''
+            n_args = 0
+            call argv_push(packed, n_args, tool(plan, tgt%link_language))
+            call argv_push_split_nl(packed, n_args, argv)
+            call argv_push(packed, n_args, '-o')
+            call argv_push(packed, n_args, executable)
+            call process_run_argv_logged(plan%build_root, packed, n_args, log_file, &
+                .true., 0, exitcode)
+        end associate
+
+    contains
+
+        subroutine split_lines(text, items, n)
+            character(len=*), intent(in) :: text
+            type(string_t), allocatable, intent(out) :: items(:)
+            integer, intent(out) :: n
+            integer :: start, k
+
+            allocate(items(0))
+            start = 1
+            do k = 1, len(text) + 1
+                if (k <= len(text)) then
+                    if (text(k:k) /= nl) cycle
+                end if
+                if (k > start) items = [items, string_t(text(start:k - 1))]
+                start = k + 1
+            end do
+            n = size(items)
+        end subroutine split_lines
+
+    end subroutine cmake_scratch_build
 
     subroutine log_line(log_file, text)
         !! Append to the build log and to the route record of the build tree,

@@ -32,13 +32,14 @@ module fo_cli_entry
         write_git_changed_source_list
     use fo_process, only: process_exit, process_run_argv_logged, argv_push, &
         process_configure_openmp, process_export_self_driver, &
-        process_configure_pkg_config
+        process_configure_pkg_config, process_has_fortran_source_ext
     use fo_ffc_cli, only: ffc_cmd_build, ffc_cmd_run, ffc_native_requested
     use fo_hook, only: hook_cli
     use fo_gremlin_cli, only: gremlin_cli_run, print_gremlin_usage
     use fo_commands, only: command_graph, command_info, command_changed, &
         command_clean, command_install, command_check, command_lint, &
         failed_tests_text
+    use fo_scratch_run, only: scratch_run
     use fo_exec_target, only: resolve_exec_target, exec_target_is_app, &
         exec_target_is_test, exec_args_t, parse_exec_args, exec_uses_cmake_model, &
         resolve_cmake_exec
@@ -482,8 +483,10 @@ contains
             case ('verify')
                 write (output_unit, '(a)') &
                     'usage: fo verify  static checks, build, tests, lint and format hint'
-            case ('exec', 'run')
+            case ('exec')
                 call print_exec_usage()
+            case ('run')
+                call print_run_usage()
             case ('clean')
                 write (output_unit, '(a)') 'usage: fo clean [--cache|--all|--stale|--gremlin] [--keep N]'
                 write (output_unit, '(a)') '  --help, -h  show this help without deleting files'
@@ -594,6 +597,34 @@ contains
             write (out, '(a)') '  fo build --release && fo exec --release --no-build simple in'
         end subroutine print_exec_usage
 
+        subroutine print_run_usage()
+            write (output_unit, '(a)') 'usage: fo run [options] <target|FILE.f90> [args...]'
+            write (output_unit, '(a)') ''
+            write (output_unit, '(a)') 'Build an application or example incrementally and run it.'
+            write (output_unit, '(a)') 'Options go before the target; later words go to the program.'
+            write (output_unit, '(a)') ''
+            write (output_unit, '(a)') 'options:'
+            write (output_unit, '(a)') '  --cwd <dir>       run the program in this directory'
+            write (output_unit, '(a)') '  --no-build        run without rebuilding the project'
+            write (output_unit, '(a)') '  --flag <flags>    build with extra compiler flags'
+            write (output_unit, '(a)') '  --profile <name>  build profile: debug, release, asan'
+            write (output_unit, '(a)') '  --release         same as --profile release'
+            write (output_unit, '(a)') '  -h, --help        show this help'
+            write (output_unit, '(a)') ''
+            write (output_unit, '(a)') 'Scratch programs (CMake projects): an existing FILE.f90 that'
+            write (output_unit, '(a)') 'uses project modules runs against the configured build tree.'
+            write (output_unit, '(a)') 'fo picks the smallest executable target that links every'
+            write (output_unit, '(a)') 'library providing those modules, builds that target, then'
+            write (output_unit, '(a)') 'compiles FILE with its Fortran flags and module paths and'
+            write (output_unit, '(a)') 'links it with its link line in a private temporary'
+            write (output_unit, '(a)') 'directory. The build tree changes only by building that'
+            write (output_unit, '(a)') 'target; objects and modules of FILE stay private.'
+            write (output_unit, '(a)') ''
+            write (output_unit, '(a)') 'examples:'
+            write (output_unit, '(a)') '  fo run simple simple.in'
+            write (output_unit, '(a)') '  fo run /tmp/probe.f90 0.5'
+        end subroutine print_run_usage
+
         subroutine cmd_check()
             character(len=:), allocatable :: text, err_text
             integer :: output_mode, mode_ierr, exitcode
@@ -640,7 +671,7 @@ contains
             character(len=len(parsed%target)) :: selected_tests(1)
             character(len=:), allocatable :: packed, message
             integer :: n_args
-            logical :: exists, configured, uses_model
+            logical :: exists, configured, uses_model, scratch
 
             n_words = max(0, command_argument_count() - 1)
             allocate (words(n_words))
@@ -649,7 +680,7 @@ contains
             end do
             call parse_exec_args(words, trim(action) == 'run', parsed)
             if (parsed%help) then
-                call print_exec_usage()
+                call print_command_help(trim(action))
                 return
             end if
             if (len_trim(parsed%error) > 0) then
@@ -665,6 +696,10 @@ contains
                 write (error_unit, '(a)') 'fo: no fpm.toml or CMakeLists.txt found'
                 stop 1
             end if
+            scratch = .false.
+            if (trim(action) == 'run' .and. &
+                process_has_fortran_source_ext(trim(parsed%target))) &
+                inquire (file=trim(parsed%target), exist=scratch)
 
             if (len_trim(parsed%profile) > 0 .and. &
                 len_trim(profile_flags(parsed%profile)) == 0) then
@@ -679,6 +714,18 @@ contains
                 else
                     all_flags = trim(parsed%flags)
                 end if
+            end if
+
+            if (scratch) then
+                packed = ''
+                n_args = 0
+                do i = 1, n_words
+                    if (parsed%to_program(i)) call argv_push(packed, n_args, trim(words(i)))
+                end do
+                call scratch_run(b, trim(parsed%target), all_flags, parsed%skip_build, &
+                    trim(parsed%cwd), packed, n_args, exitcode)
+                if (exitcode /= 0) call process_exit(exitcode)
+                return
             end if
 
             uses_model = exec_uses_cmake_model(b)
