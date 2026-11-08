@@ -28,13 +28,15 @@ module fo_gremlin_report
 contains
 
     function gremlin_report_json(records, generation, since, state, health, &
-            gate_green) result(report)
+            gate_green, progress) result(report)
         !! The report object. records: the session journal in order;
         !! generation: the lane's current generation ('' for any); since: ''
         !! or a 64-digit generation or a decimal journal byte cursor.
         type(journal_record_t), intent(in) :: records(:)
         character(len=*), intent(in) :: generation, since, state, health
         logical, intent(in) :: gate_green
+        !! What a pending lane is doing, e.g. waiting for a host work slot.
+        character(len=*), intent(in), optional :: progress
         character(len=:), allocatable :: report
         type(case_state_t), allocatable :: before(:), after(:)
         type(json_builder_t) :: jb
@@ -94,6 +96,10 @@ contains
         end if
 
         verdict = verdict_text(n_failing, n_pass, state, health, gate_green)
+        if (present(progress)) then
+            if (index(verdict, 'PENDING') == 1 .and. len_trim(progress) > 0) &
+                verdict = verdict//' ('//trim(progress)//')'
+        end if
         if (have_since) verdict = verdict//'; since '//trim(since(:min(len_trim(since), 12)))// &
             ': '//itoa(n_new)//' new, '//itoa(n_fixed)//' fixed, '//itoa(n_still)// &
             ' still failing'

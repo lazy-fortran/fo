@@ -263,7 +263,8 @@ contains
         o%session%driver_digest = o%pin%digest
         o%session%driver_size = o%pin%size
         call fs_make_dir(o%session%state_dir//'/logs')
-        call publish(o, 'starting', '', 'NONE', 0, ierr, o%message)
+        call publish(o, 'starting', '', 'NONE', 0, ierr, o%message, &
+            diagnostic='capturing project sources')
         if (ierr /= 0) then
             detail = o%message
             call gremlin_session_release(o%session, status, o%message)

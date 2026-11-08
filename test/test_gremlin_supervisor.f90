@@ -87,6 +87,7 @@ program test_gremlin_supervisor
     call test_unknown_terminal_read_is_side_effect_free()
     call test_same_place_attach_policy()
     call test_event_cursor_and_journal_errors()
+    call test_pending_verdict_names_progress()
     call test_readiness_status_and_semantic_waits()
     call test_terminal_session_history()
     call test_failed_final_status_uses_constructed_terminal()
@@ -454,6 +455,41 @@ contains
         call fs_remove_tree(trim(state_root))
         call fs_remove_tree(trim(project_dir))
     end subroutine test_event_cursor_and_journal_errors
+
+    subroutine test_pending_verdict_names_progress()
+        character(len=512) :: state_root, project_dir
+        type(gremlin_session_t) :: session
+        character(len=:), allocatable :: response_json, status_text
+        integer :: ierr, exitcode, release_error
+        character(len=512) :: message
+
+        call make_tmpfile('fo-gremlin-progress-state', state_root)
+        call make_tmpfile('fo-gremlin-progress-project', project_dir)
+        call fs_make_dir(trim(project_dir))
+        ierr = c_setenv('FO_GREMLIN_STATE_DIR'//c_null_char, &
+            trim(state_root)//c_null_char, 1_c_int)
+        call check(ierr == 0, 'sets an isolated Gremlin state directory')
+        call gremlin_session_acquire(trim(project_dir), 'progress-test', session, &
+            ierr, message)
+        call check(ierr == 0 .and. session%owner, 'creates isolated Gremlin owner')
+        if (ierr /= 0) return
+        status_text = '{"protocol":1,"session_id":"'//trim(session%session_id)// &
+            '","lane_id":"progress-test","state":"starting",'// &
+            '"active_generation":"","candidate_generation":"","completed":0,'// &
+            '"selected":0,"seed":1,"last_outcome":"NONE","last_exitcode":0,'// &
+            '"diagnostic":"waiting for a host Gremlin work slot held by other lanes"}'
+        call gremlin_session_publish(session, status_text, ierr, message)
+        call check(ierr == 0, 'publishes a starting lane state')
+        call gremlin_handle('status', trim(project_dir), &
+            '{"lane_id":"progress-test","detail":"summary"}', response_json, exitcode)
+        call check(exitcode == 0 .and. index(response_json, &
+            'lane starting (waiting for a host Gremlin work slot') > 0, &
+            'a pending verdict names what the lane is waiting for')
+        call gremlin_session_release(session, release_error, message)
+        call check(release_error == 0, 'releases test lane ownership')
+        call fs_remove_tree(trim(state_root))
+        call fs_remove_tree(trim(project_dir))
+    end subroutine test_pending_verdict_names_progress
 
     subroutine test_readiness_status_and_semantic_waits()
         type(gremlin_session_t) :: session

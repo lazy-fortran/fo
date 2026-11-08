@@ -431,6 +431,7 @@ contains
         character(len=HASH_LEN) :: generation
         character(len=32) :: state_name, health
         character(len=8) :: green
+        character(len=512) :: progress
 
         call journal_read_all(session%state_dir//'/journal.jsonl', records, ierr, &
             message)
@@ -443,8 +444,9 @@ contains
         call gremlin_json_field(status_text, 'state', state_name, .true.)
         call gremlin_json_field(status_text, 'health', health, .true.)
         call gremlin_json_field(status_text, 'local_gate_green', green, .true.)
+        call gremlin_json_field(status_text, 'diagnostic', progress, .true.)
         report = gremlin_report_json(records, trim(generation), trim(request%since), &
-            trim(state_name), trim(health), trim(green) == 'true')
+            trim(state_name), trim(health), trim(green) == 'true', trim(progress))
     end subroutine lane_report
 
     subroutine with_report(status_text, session, request, response, ierr, message)
