@@ -419,6 +419,23 @@ contains
             index(response_json, '"has_more":false') > 0, &
             'next cursor returns the next event without duplication')
 
+        call gremlin_handle('wait', trim(project_dir), &
+            '{"lane_id":"cursor-test","wait_ms":300,"detail":"summary"}', &
+            response_json, exitcode)
+        call check(exitcode == 0 .and. &
+            index(response_json, '"wait_timed_out":true') > 0 .and. &
+            index(response_json, '"wait_satisfied":false') > 0, &
+            'untyped wait without a cursor waits for the next event')
+        call check(index(response_json, '"next_cursor":') > 0 .and. &
+            index(response_json, '"next_lifecycle_cursor":') > 0, &
+            'wait summary reports both continuation cursors')
+        call gremlin_handle('wait', trim(project_dir), &
+            '{"lane_id":"cursor-test","wait_ms":300,"cursor":0}', &
+            response_json, exitcode)
+        call check(exitcode == 0 .and. &
+            index(response_json, '"wait_satisfied":true') > 0, &
+            'untyped wait from an explicit cursor returns its pending events')
+
         open (newunit=unit, file=trim(journal_path), &
             status='old', action='write', position='append', iostat=ios)
         if (ios == 0) then

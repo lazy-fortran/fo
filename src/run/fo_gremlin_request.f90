@@ -28,6 +28,8 @@ module fo_gremlin_request
         integer :: jobs = 0  !! 0: derive from the host job budget
         integer(int64) :: cursor = 0_int64
         integer(int64) :: lifecycle_cursor = 0_int64
+        !! An untyped wait without either cursor waits for the next event.
+        logical :: cursor_given = .false.
         integer :: wait_ms = 5000
         integer :: max_records = 32
         integer(int64) :: max_bytes = 262144_int64
@@ -629,8 +631,10 @@ contains
                 request%jobs = int(wide)
             case ('cursor')
                 request%cursor = wide
+                request%cursor_given = .true.
             case ('lifecycle_cursor')
                 request%lifecycle_cursor = wide
+                request%cursor_given = .true.
             case ('max_records')
                 request%max_records = int(wide)
             case ('max_bytes')

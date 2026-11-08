@@ -531,7 +531,8 @@ contains
 
     subroutine handle_wait(project_dir, request, response, exitcode)
         !! Poll the lane state until the typed condition (or, untyped, a new
-        !! event) holds, the lane is terminal or wait_ms passed.
+        !! event) holds, the lane is terminal or wait_ms passed. An untyped
+        !! wait without a cursor starts at the end of both journals.
         character(len=*), intent(in) :: project_dir
         type(gremlin_request_t), intent(in) :: request
         character(len=:), allocatable, intent(out) :: response
@@ -546,7 +547,7 @@ contains
         type(gremlin_session_t) :: session
         integer :: ierr, until_kind, elapsed, failure_exitcode
         integer(int64) :: started_ms, next_cursor, next_lifecycle_cursor
-        logical :: satisfied, failed, timed_out, terminal
+        logical :: satisfied, failed, timed_out, terminal, follow_tail
 
         exitcode = 2
         poll_request = request
@@ -555,6 +556,7 @@ contains
         wait_name = trim(request%wait_until)
         if (until_kind == 0) wait_name = 'events'
         timed_out = .false.
+        follow_tail = until_kind == 0 .and. .not. request%cursor_given
         started_ms = exec_clock_ms()
         do
             call status_snapshot(project_dir, poll_request, session, enriched, &
@@ -562,6 +564,16 @@ contains
             if (ierr == 0) call response_with_events('wait', enriched, session, &
                 poll_request, .false., status_json, ierr, message, next_cursor, &
                 next_lifecycle_cursor)
+            do while (ierr == 0 .and. follow_tail)
+                if (next_cursor <= poll_request%cursor .and. &
+                    next_lifecycle_cursor <= poll_request%lifecycle_cursor) exit
+                poll_request%cursor = next_cursor
+                poll_request%lifecycle_cursor = next_lifecycle_cursor
+                call response_with_events('wait', enriched, session, &
+                    poll_request, .false., status_json, ierr, message, next_cursor, &
+                    next_lifecycle_cursor)
+            end do
+            follow_tail = .false.
             if (ierr /= 0) then
                 call error_response('status', trim(message), response)
                 return

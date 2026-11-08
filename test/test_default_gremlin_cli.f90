@@ -208,8 +208,14 @@ contains
         call check_identity(parsed, expected_session, label)
         call check_absent(parsed, 'events', label)
         call check_absent(parsed, 'lifecycle_events', label)
-        call check_absent(parsed, 'next_cursor', label)
-        call check_absent(parsed, 'next_lifecycle_cursor', label)
+        ! A wait summary names the cursors to continue from; status does not.
+        if (index(label, 'wait') > 0) then
+            call check_present(parsed, 'next_cursor', label)
+            call check_present(parsed, 'next_lifecycle_cursor', label)
+        else
+            call check_absent(parsed, 'next_cursor', label)
+            call check_absent(parsed, 'next_lifecycle_cursor', label)
+        end if
     end subroutine check_summary_response
 
     subroutine check_full_response(result, expected_session, label, parsed)

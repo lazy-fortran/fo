@@ -247,6 +247,8 @@ contains
             'ordinary_passed', 'ordinary_skipped', 'ordinary_failures', &
             'full_required', 'full_passed', 'full_skipped', 'full_failures', &
             'wait_satisfied', 'wait_timed_out', 'wait_terminal', 'failure_observed']
+        character(len=32), parameter :: cursors(2) = [character(len=32) :: &
+            'next_cursor', 'next_lifecycle_cursor']
         character(len=4096) :: value
         type(json_builder_t) :: jb
         integer :: i
@@ -270,6 +272,15 @@ contains
             call json_key(jb, trim(scalars(i)))
             call json_value_raw(jb, trim(value))
         end do
+        ! A wait summary names the cursors a following wait continues from.
+        if (trim(action) == 'wait') then
+            do i = 1, size(cursors)
+                call gremlin_json_field(status_text, trim(cursors(i)), value, .true.)
+                if (len_trim(value) == 0) cycle
+                call json_key(jb, trim(cursors(i)))
+                call json_value_raw(jb, trim(value))
+            end do
+        end if
         if (len(latest_failure) > 0) then
             call json_key(jb, 'latest_failure')
             call json_value_raw(jb, latest_failure)
