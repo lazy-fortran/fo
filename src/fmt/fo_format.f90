@@ -49,6 +49,7 @@ contains
         character(len=:), allocatable :: prev_content, stmt_head
         character(len=1) :: quote_state, quote_before
         integer :: i, indent_level, opens, closes, is_both, width, wl
+        integer :: head_lead, head_indent
         logical :: in_continuation
 
         n_output = n_input
@@ -57,6 +58,8 @@ contains
         prev_content = ''
         stmt_head = ''
         quote_state = ' '
+        head_lead = 0
+        head_indent = 0
         width = INDENT_WIDTH
         if (indent_width > 0) width = indent_width
 
@@ -106,11 +109,16 @@ contains
                     indent_level = max(0, indent_level - closes)
                 end if
 
-                ! Emit with current indent.
+                ! Emit with current indent. A continuation line keeps a deeper
+                ! offset from its statement head, so hanging and nested
+                ! continuation indentation survives re-indenting.
                 if (in_continuation) then
-                    call apply_indent(content, comment, indent_level + 1, width, &
+                    call apply_indent(content, comment, 1, max((indent_level + 1)* &
+                        width, head_indent + leading_blanks(lines(i)%text) - head_lead), &
                         out_line)
                 else
+                    head_lead = leading_blanks(lines(i)%text)
+                    head_indent = indent_level*width
                     call apply_indent(content, comment, indent_level, width, out_line)
                 end if
                 output(i)%text = trim(out_line)
@@ -606,6 +614,14 @@ contains
             out_line = spaces(1:nsp)//trim(content)
         end if
     end subroutine apply_indent
+
+    ! Number of leading blanks of a raw source line; a tab counts as one.
+    pure integer function leading_blanks(text) result(n)
+        character(len=*), intent(in) :: text
+
+        n = verify(text, ' '//achar(9)) - 1
+        if (n < 0) n = len(text)
+    end function leading_blanks
 
     ! Strip trailing whitespace in place.
     subroutine rstrip(s)

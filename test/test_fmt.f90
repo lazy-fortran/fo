@@ -29,6 +29,7 @@ program test_fmt
     call test_construct_words_as_names()
     call test_then_suffix_in_name()
     call test_derived_type_forms()
+    call test_continuation_offsets()
 
     write (output_unit, '(a,i0,a,i0,a)') 'fmt: ', n_pass, ' pass, ', n_fail, ' fail'
     if (n_fail > 0) stop 1
@@ -199,6 +200,36 @@ contains
                 'derived type forms are a fixed point: '//trim(expected(i)))
         end do
     end subroutine test_derived_type_forms
+
+    subroutine test_continuation_offsets()
+        character(len=48), parameter :: expected(7) = [character(len=48) :: &
+            'module offset_probe', &
+            '    integer, parameter :: v(2) = [ &', &
+            '        f(1, &', &
+            '            2), &', &
+            '        f(3, &', &
+            '              4)]', &
+            'end module offset_probe']
+        character(len=MAX_LINE_LEN) :: inp(size(expected)), out(size(expected))
+        integer :: n_out
+
+        call fmt(expected, size(expected), out, n_out)
+        call assert(all(out(:n_out) == expected), &
+            'nested and aligned continuation lines keep their offsets')
+        inp = expected
+        inp(2) = adjustl(expected(2))
+        inp(3) = '    f(1, &'
+        inp(4) = '        2), &'
+        inp(5) = '    f(3, &'
+        inp(6) = '          4)]'
+        call fmt(inp, size(inp), out, n_out)
+        call assert(all(out(:n_out) == expected), &
+            'continuation lines move with their re-indented statement')
+        inp(3) = 'f(1, &'
+        call fmt(inp, size(inp), out, n_out)
+        call assert(trim(out(3)) == '        f(1, &', &
+            'a continuation line is at least one level deeper than its statement')
+    end subroutine test_continuation_offsets
 
     subroutine assert(cond, msg)
         logical, intent(in) :: cond
