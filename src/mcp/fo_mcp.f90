@@ -402,8 +402,10 @@ contains
     end subroutine handle_tools_call
 
     subroutine handle_gremlin_action(arguments, id_str, has_id, response, async_state)
-        !! A reproduction runs in an owned child so the request loop stays
-        !! responsive; the other Gremlin actions answer at once.
+        !! A reproduction or wait runs in an owned child so the request loop
+        !! stays responsive; a wait blocks for up to its --wait-ms, longer
+        !! than any client can keep a single stdio request open; the other
+        !! Gremlin actions answer at once.
         character(len=*), intent(in) :: arguments, id_str
         logical, intent(in) :: has_id
         character(len=:), allocatable, intent(out) :: response
@@ -426,7 +428,7 @@ contains
             call make_tool_text_response(id_str, json_to_string(jb), 2, response)
             return
         end if
-        if (trim(core_action) == 'reproduce') then
+        if (trim(core_action) == 'reproduce' .or. trim(core_action) == 'wait') then
             call deferred_start(async_state, trim(core_action), &
                 fs_canonical_path(trim(project_dir)), trim(request_json), id_str, &
                 has_id, ierr)
@@ -987,7 +989,7 @@ contains
             end if
             if (.not. only_changed .and. selection%status /= SELECT_EMPTY) &
                 call project_list_expand(b, '', request, model, selection, ierr, &
-                    message, build=.true.)
+                message, build=.true.)
             call test_cache_run(b, model, selection%cases, '', .false., tmpfile, &
                 exitcode, rerun, selection)
         end if
