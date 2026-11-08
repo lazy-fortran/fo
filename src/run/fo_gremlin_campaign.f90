@@ -15,7 +15,7 @@ module fo_gremlin_campaign
         generation_oracle_digests_ensure, generation_oracle_digest
     use fo_gremlin_context, only: generation_inventory_restore
     use fo_gremlin_coverage, only: coverage_epoch_t, coverage_open, coverage_next_chunk, &
-        coverage_record, coverage_recover_running, COVERAGE_OK
+        coverage_record, coverage_recover_running, coverage_retry_infra, COVERAGE_OK
     use fo_gremlin_execution_view, only: execution_view_t
     use fo_gremlin_generation, only: generation_t, generation_model_key
     use fo_gremlin_journal, only: journal_read_all, journal_record_t, JOURNAL_OK
@@ -529,6 +529,8 @@ contains
         integer :: shuffle_status, coverage_status
         character(len=NAME_LEN), allocatable :: all_names(:), impacted(:)
         character(len=NAME_LEN), allocatable :: history(:), debt(:), priorities(:)
+        character(len=NAME_LEN), allocatable :: retried(:)
+        integer :: n_retried
         type(coverage_epoch_t) :: coverage
         character(len=PATH_LEN) :: project_dir, live
         character(len=HASH_LEN) :: generation_id
@@ -552,7 +554,8 @@ contains
             capacity = max(capacity, size(model_cases))
         end if
         allocate (all_names(capacity), impacted(capacity), history(capacity), &
-            debt(capacity), priorities(capacity))
+            debt(capacity), priorities(capacity), retried(capacity))
+        n_retried = 0
         selected = ''
         impacted = ''
         n_selected = 0
@@ -725,6 +728,11 @@ contains
         seed = coverage%seed
         call reconcile_coverage(session, coverage, message, ierr)
         if (ierr /= 0) return
+        call coverage_retry_infra(coverage, retried, n_retried, coverage_status, message)
+        if (coverage_status /= COVERAGE_OK) then
+            ierr = coverage_status
+            return
+        end if
         call coverage_next_chunk(coverage, priorities, n_priorities, min(limit, &
             size(selected)), selected, n_selected, coverage_status, &
             n_selected_priorities)
@@ -751,7 +759,7 @@ contains
         n_mandatory_selected = n_selected_priorities
         call select_missing_gate_cases(session, generation_id, request, &
             min(limit, size(selected)), selected, n_selected, &
-            n_mandatory_selected, ierr, message)
+            n_mandatory_selected, ierr, message, retried(:n_retried))
         if (ierr /= 0) return
         if (request%shuffle) then
             call shuffle_gremlin_tests(selected, n_mandatory_selected, n_selected, &
@@ -803,7 +811,7 @@ contains
     end subroutine first_generation_impact
 
     subroutine select_missing_gate_cases(session, generation, request, limit, &
-            selected, n_selected, n_mandatory, ierr, message)
+            selected, n_selected, n_mandatory, ierr, message, retried)
         type(gremlin_session_t), intent(in) :: session
         character(len=*), intent(in) :: generation
         type(gremlin_request_t), intent(in) :: request
@@ -812,6 +820,8 @@ contains
         integer, intent(inout) :: n_selected, n_mandatory
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
+        !! Cases whose infrastructure error is retried: their receipts do not count.
+        character(len=*), intent(in) :: retried(:)
 
         character(len=NAME_LEN) :: pending(MAX_NODES)
         character(len=PATH_LEN) :: journal_path, campaign_state_dir
@@ -840,6 +850,7 @@ contains
         pending = ''
         n_pending = 0
         do i = 1, request%gate_required_count
+            if (any(retried == request%gate_cases(i))) attempted(i) = .false.
             if (attempted(i)) cycle
             n_pending = n_pending + 1
             pending(n_pending) = request%gate_cases(i)
