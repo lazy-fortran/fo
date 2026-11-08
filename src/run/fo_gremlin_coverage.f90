@@ -29,6 +29,10 @@ module fo_gremlin_coverage
     public :: coverage_open, coverage_next_chunk, coverage_record
     public :: coverage_remaining, coverage_view, coverage_record_path
     public :: coverage_read_view_path, coverage_begin_epoch, coverage_recover_running
+    public :: coverage_retry_infra
+
+    !! generation|case keys whose infrastructure error this process retried.
+    character(len=:), allocatable, save :: infra_retried
 
     interface
         integer(c_int) function coverage_lock(path) &
@@ -136,6 +140,50 @@ contains
         end if
         call coverage_unlock(fd)
     end subroutine coverage_recover_running
+
+    ! An infrastructure error says nothing about the code, and the generation
+    ! that met it may never change again. Each process retries such a case
+    ! once: a restarted owner or a later campaign of the same owner gets one
+    ! fresh attempt, a persistent error does not loop. The new epoch keeps
+    ! the journal's receipt of the failed attempt from discharging it again.
+    subroutine coverage_retry_infra(state, retried, n_retried, status, message)
+        type(coverage_epoch_t), intent(inout) :: state
+        character(len=*), intent(inout) :: retried(:)
+        integer, intent(out) :: n_retried, status
+        character(len=*), intent(out) :: message
+        character(len=:), allocatable :: key
+        integer(c_int) :: fd
+        integer :: i
+
+        n_retried = 0
+        if (.not. allocated(infra_retried)) infra_retried = achar(10)
+        call lock_state(state%path, fd, status, message)
+        if (status /= COVERAGE_OK) return
+        call refresh_state(state, status, message)
+        if (status == COVERAGE_OK) then
+            do i = 1, size(state%outcome)
+                select case (trim(state%outcome(i)))
+                case ('INFRA', 'INFRA_ERROR')
+                case default
+                    cycle
+                end select
+                key = trim(state%generation)//'|'//trim(state%inventory(i))//achar(10)
+                if (index(infra_retried, achar(10)//key) > 0) cycle
+                infra_retried = infra_retried//key
+                state%outcome(i) = 'UNKNOWN'
+                if (n_retried < size(retried)) then
+                    n_retried = n_retried + 1
+                    retried(n_retried) = state%inventory(i)
+                end if
+            end do
+            if (n_retried > 0) then
+                state%epoch = state%epoch + 1
+                state%cursor = 1
+                call coverage_save(state, status, message)
+            end if
+        end if
+        call coverage_unlock(fd)
+    end subroutine coverage_retry_infra
 
     subroutine coverage_begin_epoch(state, seed, status, message)
         type(coverage_epoch_t), intent(inout) :: state

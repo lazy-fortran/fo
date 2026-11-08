@@ -257,11 +257,14 @@ contains
                     status_is_failure(trim(status_name))) &
                     input%failure_observed = .true.
                 if (trim(receipt_generation) /= trim(active_id)) cycle
-                if (have_coverage .and. trim(status_name) == 'TIMEOUT') then
+                if (have_coverage .and. (trim(status_name) == 'TIMEOUT' .or. &
+                    trim(status_name) == 'INFRA' .or. &
+                    trim(status_name) == 'INFRA_ERROR')) then
                     call gremlin_json_field(records(i)%json, 'coverage_epoch', raw)
                     read(raw, *, iostat=ios) receipt_epoch
                     if (ios == 0) then
-                        ! A deliberate deadline change renews timeout obligations.
+                        ! A deliberate deadline change renews timeout obligations,
+                        ! and a retry renews those of an infrastructure error.
                         if (receipt_epoch < coverage%epoch) cycle
                     end if
                 end if
