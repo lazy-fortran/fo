@@ -6,6 +6,7 @@ module fo_test_gremlin_oracle
     use fo_test_harness, only: read_text, file_exists, run_process, assert_true
     use fo_test_harness, only: terminate_process_group, set_teardown_hook
     use fo_fs, only: fs_is_windows
+    use fo_test_cli, only: resolve_driver
     use fo_test_json, only: json_value_t, json_parse, json_member, json_string_value
     implicit none
     private
@@ -174,30 +175,8 @@ contains
     subroutine gremlin_setup(driver, scratch, project, cache, state, capture_counter)
         character(:), allocatable, intent(out) :: driver, scratch, project, cache, state
         character(:), allocatable, optional, intent(out) :: capture_counter
-        integer :: count, length, status
-        character(:), allocatable :: env_fo
-        character(len=512) :: value
 
-        count = command_argument_count()
-        if (count > 0) then
-            call get_command_argument(1, length=length, status=status)
-        else
-            length = 0
-            status = 1
-        end if
-        if (status == 0 .and. length > 0) then
-            allocate(character(len=length) :: driver)
-            call get_command_argument(1, driver, status=status)
-        else
-            call get_environment_variable('FO', length=length, status=status)
-            if (status == 0 .and. length > 0) then
-                allocate(character(len=length) :: env_fo)
-                call get_environment_variable('FO', env_fo, status=status)
-                driver = trim(env_fo)
-            else
-                driver = 'fo'
-            end if
-        end if
+        call resolve_driver(driver)
         if (allocated(started_lanes)) deallocate (started_lanes)
         call set_teardown_hook(stop_started_lanes)
         call make_scratch('fo-gremlin-fortran-oracle', scratch)

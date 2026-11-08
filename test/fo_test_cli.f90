@@ -6,6 +6,8 @@ module fo_test_cli
     use fo_test_harness, only: file_exists, remove_path, read_text, sleep_ms
     use fo_test_process_identity, only: mcp_kill_owned_tree, mcp_process_identity_running
     use fo_fs, only: fs_is_windows
+    use fo_process, only: process_self_executable
+    use, intrinsic :: iso_fortran_env, only: error_unit
     use fo_test_harness, only: assert_equal_string, assert_equal_integer
     use fo_test_harness, only: process_alive, start_sentinel, stop_sentinel
     use fo_test_harness, only: exercise_failure_cleanup_probe, open_descriptor_count
@@ -53,8 +55,31 @@ contains
             end if
             deallocate(driver)
         end if
-        driver = 'fo'
+        call built_driver(driver)
     end subroutine resolve_driver
+
+    subroutine built_driver(driver)
+        !! The fo built next to this test (by fo in the same bin, by fpm in ../app),
+        !! never one from PATH, which would test an installed release instead.
+        character(:), allocatable, intent(out) :: driver
+        character(len=4096) :: self
+        character(:), allocatable :: directory
+        logical :: found
+        integer :: slash
+
+        call process_self_executable(self, found)
+        if (found) then
+            slash = index(trim(self), '/', back=.true.)
+            directory = self(:max(1, slash - 1))
+            driver = directory//'/fo'
+            if (file_exists(driver)) return
+            driver = directory//'/../app/fo'
+            if (file_exists(driver)) return
+        end if
+        write (error_unit, '(a)') 'FAIL: no fo driver built next to this test; '// &
+            'pass the driver as the first argument or set FO'
+        error stop 2
+    end subroutine built_driver
 
     subroutine run_arguments(executable, arguments, cwd, result, environment, timeout_ms)
         character(len=*), intent(in) :: executable, cwd
