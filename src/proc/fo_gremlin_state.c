@@ -205,11 +205,32 @@ static int task_path(const char *dir, char *path, size_t cap) {
     return snprintf(path, cap, "%s/task.owner", dir) >= (int)cap ? ENAMETOOLONG : 0;
 }
 
-/* Drops the stop request and the task binding of the previous owner. */
+static int lease_path(const char *dir, char *path, size_t cap) {
+    return snprintf(path, cap, "%s/lease.owner", dir) >= (int)cap ? ENAMETOOLONG : 0;
+}
+
+/* Drops the stop request and the task or lease binding of the previous owner. */
 static void clear_stop(const char *dir) {
     char path[PATH_MAX];
     if (stop_path(dir, path, sizeof(path)) == 0) unlink(path);
     if (task_path(dir, path, sizeof(path)) == 0) unlink(path);
+    if (lease_path(dir, path, sizeof(path)) == 0) unlink(path);
+}
+
+/* Seconds a leased lane lives without a client read, or 0 if not leased. */
+static long lease_seconds(const char *dir, struct stat *st) {
+    char path[PATH_MAX], text[32];
+    long seconds = 0;
+    if (lease_path(dir, path, sizeof(path)) != 0) return 0;
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return 0;
+    ssize_t n = read(fd, text, sizeof(text) - 1);
+    int ok = fstat(fd, st) == 0;
+    close(fd);
+    if (n <= 0 || !ok) return 0;
+    text[n] = 0;
+    if (sscanf(text, "%ld", &seconds) != 1 || seconds < 1) return 0;
+    return seconds;
 }
 
 static int verify_owner_fd(const char *dir, int fd) {
@@ -545,6 +566,10 @@ int fo_gremlin_session_stop_requested(const char *dir, const char *session,
             }
         }
     }
+    /* A leased lane stops once no client has read it for its lease. */
+    struct stat lease;
+    long ttl = lease_seconds(dir, &lease);
+    if (ttl > 0 && difftime(time(NULL), lease.st_mtime) > (double)ttl) return 1;
     int e = stop_path(dir, path, sizeof(path));
     if (e) return -e;
     int fd = open(path, O_RDONLY | O_CLOEXEC);
@@ -563,6 +588,24 @@ int fo_gremlin_session_bind_task(const char *dir, int pid, const char *start) {
     int n = snprintf(text, sizeof(text), "%d %s\n", pid, start);
     if (pid <= 0 || n < 0 || n >= (int)sizeof(text)) return EINVAL;
     return atomic_write_file(dir, "task.owner", text, (size_t)n);
+}
+
+/* Make the owner's lane stop after `seconds` without a client read. */
+int fo_gremlin_session_bind_lease(const char *dir, int seconds) {
+    char text[32];
+    int n = snprintf(text, sizeof(text), "%d\n", seconds);
+    if (seconds <= 0 || n < 0 || n >= (int)sizeof(text)) return EINVAL;
+    return atomic_write_file(dir, "lease.owner", text, (size_t)n);
+}
+
+/* A client read renews a leased lane; other lanes have no lease file. */
+int fo_gremlin_session_renew_lease(const char *dir) {
+    struct stat st;
+    char text[32];
+    long ttl = lease_seconds(dir, &st);
+    if (ttl <= 0) return 0;
+    int n = snprintf(text, sizeof(text), "%ld\n", ttl);
+    return atomic_write_file(dir, "lease.owner", text, (size_t)n);
 }
 
 #if defined(__APPLE__) || defined(__linux__)

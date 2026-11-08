@@ -64,8 +64,11 @@ running fpm in the same tree afterwards is safe.
 Gremlin started through MCP stops when its server process exits unless
 `lifetime: persistent` is requested. CLI watchers remain persistent by default;
 on Linux or macOS, use `fo gremlin start --owner task` to stop a temporary watcher
-with its parent process. Explicitly stop temporary watchers when their work ends
-if the parent or server remains shared across tasks.
+with its parent process. A caller whose shell ends after each command, such as
+a coding agent, uses `fo gremlin start --owner lease --lease-seconds N`: every
+`status`, `wait`, `events` or `failures` read renews the lease, and the lane stops
+once nobody has read it for N seconds (default 1800). Explicitly stop temporary
+watchers when their work ends if the parent or server remains shared across tasks.
 `fo gremlin wait` without `--until` or a cursor waits for the next event; the
 response reports `next_cursor` and `next_lifecycle_cursor` for the following call. Every lane also stops when
 its project directory is deleted or its owner receives SIGTERM, and

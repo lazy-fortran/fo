@@ -76,6 +76,7 @@ program test_gremlin_task_lane
         persistent_session)
 
     call synchronous_cli()
+    call leased_lane()
     call mcp_connection()
     call finish_assertions(retain_failed_scratch=.true.)
 
@@ -114,6 +115,44 @@ contains
         call gremlin_stop_lane(driver, project, cache, state, 'cli-persistent', &
             sessions(split + 1:len(sessions) - 1))
     end subroutine synchronous_cli
+
+    subroutine leased_lane()
+        !! A leased lane needs no live parent: reads renew it, and it stops
+        !! once no client has read it for its lease.
+        type(string_list_t) :: start, query
+        type(process_result_t) :: started, read
+        type(json_value_t) :: reply
+        character(:), allocatable :: session
+        integer :: owner, i
+
+        call gremlin_start_args(start, project, 'cli-lease', 'test_task')
+        call list_add(start, '--owner')
+        call list_add(start, 'lease')
+        call list_add(start, '--lease-seconds')
+        call list_add(start, '3')
+        call gremlin_json(driver, project, cache, state, start, reply, started)
+        session = gremlin_field(reply, 'session_id')
+        call assert_true(started%exit_code == 0 .and. len(session) > 0, &
+            'starts a leased lane from a short-lived CLI call')
+        if (len(session) == 0) return
+        owner = gremlin_owner_pid(session)
+        call list_add(query, 'gremlin')
+        call list_add(query, 'status')
+        call list_add(query, '--dir')
+        call list_add(query, project)
+        call list_add(query, '--lane')
+        call list_add(query, 'cli-lease')
+        do i = 1, 6
+            call gremlin_run(driver, project, cache, state, query, read)
+            call gremlin_wait_ms(1000)
+        end do
+        call assert_true(gremlin_process_running(owner), &
+            'reads keep a leased lane alive beyond its lease')
+        call assert_true(gremlin_wait_exit(owner, 20000), &
+            'a leased lane stops once nobody reads it for its lease')
+        if (gremlin_process_running(owner)) &
+            call gremlin_stop_lane(driver, project, cache, state, 'cli-lease', session)
+    end subroutine leased_lane
 
     subroutine run_as_parent()
         !! The CLI's parent: start both lanes, publish their sessions, wait.

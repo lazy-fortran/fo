@@ -49,7 +49,7 @@ module fo_gremlin_owner
     use fo_gremlin_state, only: gremlin_session_t, gremlin_lease_t, &
         gremlin_lease_group_t, gremlin_session_acquire, gremlin_session_publish, &
         gremlin_session_read, gremlin_session_release, gremlin_session_stop_requested, &
-        gremlin_session_bind_task, gremlin_owner_trap_term, &
+        gremlin_session_bind_task, gremlin_owner_trap_term, gremlin_session_bind_lease, &
         gremlin_lease_release, gremlin_generation_lease_acquire_at, &
         gremlin_generation_pin_at, gremlin_generation_prune_inactive, &
         GREMLIN_STATE_TEXT_MAX
@@ -238,6 +238,14 @@ contains
                 call release_if_owner(o%session)
                 call refuse('cannot bind the task-owned lane to its client: '// &
                     trim(o%message))
+                return
+            end if
+        else if (trim(request%lifetime) == 'lease') then
+            call gremlin_session_bind_lease(o%session, request%lease_seconds, ierr, &
+                o%message)
+            if (ierr /= 0) then
+                call release_if_owner(o%session)
+                call refuse('cannot bind the lease of the lane: '//trim(o%message))
                 return
             end if
         end if

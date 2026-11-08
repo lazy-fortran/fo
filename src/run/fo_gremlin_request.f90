@@ -41,6 +41,8 @@ module fo_gremlin_request
         character(len=8) :: detail = 'full'
         !! 'persistent' lanes outlive their client; 'task' lanes stop with it.
         character(len=10) :: lifetime = 'persistent'
+        !! 'lease' lanes stop after this long without a status, wait or events read.
+        integer :: lease_seconds = 1800
         !! status/wait: report only what changed since a generation or journal cursor.
         character(len=HASH_LEN) :: since = ''
         logical :: input_changed = .false.
@@ -83,7 +85,7 @@ module fo_gremlin_request
         character(len=72) :: note = ''
     end type gremlin_option_t
 
-    integer, parameter, public :: N_GREMLIN_OPTIONS = 25
+    integer, parameter, public :: N_GREMLIN_OPTIONS = 26
     type(gremlin_option_t), parameter, public :: GREMLIN_OPTIONS(N_GREMLIN_OPTIONS) = [ &
         gremlin_option_t('lane_id', '--lane', '', 'string', GA_ANY), &
         gremlin_option_t('session_id', '--session', '', 'string', GA_ANY - GA_START), &
@@ -115,8 +117,10 @@ module fo_gremlin_request
         gremlin_option_t('max_records', '--max-records', '', 'int', GA_READS, 1, 128), &
         gremlin_option_t('max_bytes', '--max-bytes', '', 'int', GA_READS, 1, 262144), &
         gremlin_option_t('lifetime', '--owner', '--lifetime', 'string', GA_START, &
-            choices='persistent,task', &
-            note='task: the lane stops when the client that started it ends'), &
+        choices='persistent,task,lease', &
+        note='task: stops with its client; lease: without reads for --lease-seconds'), &
+        gremlin_option_t('lease_seconds', '--lease-seconds', '', 'int', GA_START, &
+        1, 604800, note='lease lifetime renewed by every read of the lane'), &
         gremlin_option_t('wait_ms', '--wait-ms', '', 'int', GA_WAIT, 0, 3600000, &
             note='upper bound one hour; returns early when --until holds'), &
         gremlin_option_t('wait_until', '--until', '', 'string', GA_WAIT, &
@@ -641,6 +645,8 @@ contains
                 request%max_bytes = wide
             case ('wait_ms')
                 request%wait_ms = int(wide)
+            case ('lease_seconds')
+                request%lease_seconds = int(wide)
             end select
         end select
         ierr = 0

@@ -251,6 +251,11 @@ contains
             call argv_push(packed, n_args, 'task')
             launch_env = launch_env//';FO_GREMLIN_TASK_PID='//int_text(client_pid)// &
                 ';FO_GREMLIN_TASK_START='//trim(client_start)
+        else if (trim(request%lifetime) == 'lease') then
+            call argv_push(packed, n_args, '--owner')
+            call argv_push(packed, n_args, 'lease')
+            call argv_push(packed, n_args, '--lease-seconds')
+            call argv_push(packed, n_args, int_text(request%lease_seconds))
         end if
         call exec_start(launcher, project_dir, packed, n_args, log_file, spawn_exit, &
             launch_env)

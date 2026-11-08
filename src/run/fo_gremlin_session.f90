@@ -5,6 +5,7 @@ module fo_gremlin_session
         JOURNAL_OK, JOURNAL_INVALID, JOURNAL_IO_ERROR, JOURNAL_MAX_RECORD_BYTES
     use fo_gremlin_state, only: gremlin_session_t, gremlin_session_read, &
         gremlin_session_recovery_complete, gremlin_session_release, &
+        gremlin_session_renew_lease, &
         GREMLIN_STATE_TEXT_MAX
     use fo_gremlin_request, only: gremlin_request_t, gremlin_json_field
     use fo_fs, only: fs_remove_file
@@ -99,6 +100,7 @@ contains
             if (ierr /= 0) return
             status_text = live_status
             is_live = .true.
+            call gremlin_session_renew_lease(project_dir, request%lane_id)
             return
         end if
         if (ierr == 0) then
@@ -108,6 +110,7 @@ contains
                 if (ierr /= 0) return
                 status_text = live_status
                 is_live = .true.
+                call gremlin_session_renew_lease(project_dir, request%lane_id)
                 return
             end if
         end if

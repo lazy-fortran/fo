@@ -50,6 +50,7 @@ module fo_gremlin_state
     public :: gremlin_session_request_stop, gremlin_session_stop_requested
     public :: gremlin_session_process_matches, gremlin_client_identity
     public :: gremlin_session_bind_task, gremlin_owner_trap_term
+    public :: gremlin_session_bind_lease, gremlin_session_renew_lease
     public :: gremlin_lease_acquire, gremlin_lease_release
     public :: gremlin_host_lease_acquire_weighted, gremlin_host_lease_release
     public :: gremlin_generation_register_lease_at
@@ -150,6 +151,21 @@ module fo_gremlin_state
             integer(c_int), value :: pid
             integer(c_int) :: ierr
         end function c_session_bind_task
+
+        function c_session_bind_lease(dir, seconds) &
+                bind(C, name='fo_gremlin_session_bind_lease') result(ierr)
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: dir(*)
+            integer(c_int), value :: seconds
+            integer(c_int) :: ierr
+        end function c_session_bind_lease
+
+        function c_session_renew_lease(dir) &
+                bind(C, name='fo_gremlin_session_renew_lease') result(ierr)
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: dir(*)
+            integer(c_int) :: ierr
+        end function c_session_renew_lease
 
         function c_client_identity(parent, pid, start, cap) &
                 bind(C, name='fo_gremlin_client_identity') result(ierr)
@@ -512,6 +528,30 @@ contains
             int(pid, c_int), trim(start)//c_null_char))
         message = error_text(ierr)
     end subroutine gremlin_session_bind_task
+
+    subroutine gremlin_session_bind_lease(session, seconds, ierr, message)
+        !! Make the owner's lane stop after `seconds` without a client read.
+        type(gremlin_session_t), intent(in) :: session
+        integer, intent(in) :: seconds
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+
+        ierr = int(c_session_bind_lease(session%state_dir//c_null_char, &
+            int(seconds, c_int)))
+        message = error_text(ierr)
+    end subroutine gremlin_session_bind_lease
+
+    subroutine gremlin_session_renew_lease(project_dir, lane_id)
+        !! A client read renews a leased lane; a failed renewal only shortens it.
+        character(len=*), intent(in) :: project_dir, lane_id
+        character(len=4096) :: state_dir, message
+        integer :: ierr
+        integer(c_int) :: status
+
+        call gremlin_session_state_dir(project_dir, lane_id, state_dir, ierr, message)
+        if (ierr /= 0) return
+        status = c_session_renew_lease(trim(state_dir)//c_null_char)
+    end subroutine gremlin_session_renew_lease
 
     subroutine gremlin_owner_trap_term(ierr)
         !! Turn TERM into a stop request of this lane owner.
