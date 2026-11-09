@@ -3768,7 +3768,8 @@ static int monitor_run(int argc, char **argv) {
     lifeline = argv[4][0] == 'L';
     if (lifeline) {
         owner = (pid_t)strtol(argv[4] + 3, NULL, 10);
-        if (owner <= 1) return 126;
+        /* Process 1 is a valid owner: fo is the first process of a container. */
+        if (owner < 1) return 126;
     }
 #ifdef __linux__
     if (!lifeline && prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0) return 126;
