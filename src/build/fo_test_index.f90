@@ -1,6 +1,7 @@
 module fo_test_index
     !! The per-project record of the last test run: for each case its last
-    !! status and, for a PASS, the input closure digest the PASS was observed
+    !! status, its cost (CPU time, peak memory, bytes written) and, for a
+    !! PASS, the input closure digest the PASS was observed
     !! at (the reuse key of `fo test`, see fo_test_cache). One small text
     !! file in the build tree, replaced atomically; it holds at most one line
     !! per model case (test_index_retain drops removed cases), so it is
@@ -13,7 +14,8 @@ module fo_test_index
     implicit none
     private
 
-    character(len=*), parameter :: MAGIC = 'fo-test-index-v1'
+    character(len=*), parameter :: MAGIC = 'fo-test-index-v2'
+    character(len=*), parameter :: MAGIC_V1 = 'fo-test-index-v1'
     integer, parameter :: DIGEST_LEN = 64
 
     type, public :: test_index_t
@@ -22,10 +24,14 @@ module fo_test_index
         type(string_t), allocatable :: status(:)
         !! Digest of a PASS; empty for any other status.
         type(string_t), allocatable :: digests(:)
+        !! CPU time (ms), peak resident memory (kB) and bytes written of the
+        !! last run of the case; -1 where unknown (#364).
+        integer(8), allocatable :: cpu_ms(:), peak_kb(:), write_bytes(:)
     end type test_index_t
 
     public :: test_index_dir, test_index_load, test_index_save
     public :: test_index_find, test_index_set, test_index_retain
+    public :: test_index_set_cost
 
 contains
 
@@ -43,15 +49,19 @@ contains
     subroutine test_index_load(dir, ix)
         character(len=*), intent(in) :: dir
         type(test_index_t), intent(out) :: ix
-        character(len=:), allocatable :: text
-        integer :: ierr, at, eol, bar1, bar2
+        character(len=:), allocatable :: text, rest
+        integer :: ierr, at, eol, bar1, bar2, bar, j, ios
+        integer(8) :: costs(3)
+        logical :: v2
 
         allocate (ix%names(0), ix%status(0), ix%digests(0))
+        allocate (ix%cpu_ms(0), ix%peak_kb(0), ix%write_bytes(0))
         call read_text_file_alloc(dir//'/fo-test-index', text, ierr)
         if (ierr /= 0) return
         at = index(text, achar(10))
         if (at == 0) return
-        if (text(1:at - 1) /= MAGIC) return
+        v2 = text(1:at - 1) == MAGIC
+        if (.not. v2 .and. text(1:at - 1) /= MAGIC_V1) return
         at = at + 1
         do while (at <= len(text))
             eol = index(text(at:), achar(10))
@@ -63,8 +73,24 @@ contains
             if (bar1 > 0 .and. bar2 > 0) then
                 bar2 = at + bar1 + bar2 - 1
                 bar1 = at + bar1 - 1
-                call test_index_set(ix, text(bar2 + 1:eol - 1), &
-                    text(at:bar1 - 1), text(bar1 + 1:bar2 - 1))
+                if (v2) then
+                    ! status|digest|cpu_ms|peak_kb|write_bytes|name
+                    rest = text(bar2 + 1:eol - 1)
+                    costs = -1
+                    do j = 1, 3
+                        bar = index(rest, '|')
+                        if (bar == 0) exit
+                        read (rest(1:bar - 1), *, iostat=ios) costs(j)
+                        if (ios /= 0) costs(j) = -1
+                        rest = rest(bar + 1:)
+                    end do
+                    call test_index_set(ix, rest, text(at:bar1 - 1), &
+                        text(bar1 + 1:bar2 - 1))
+                    call test_index_set_cost(ix, rest, costs(1), costs(2), costs(3))
+                else
+                    call test_index_set(ix, text(bar2 + 1:eol - 1), &
+                        text(at:bar1 - 1), text(bar1 + 1:bar2 - 1))
+                end if
             end if
             at = eol + 1
         end do
@@ -77,12 +103,15 @@ contains
         integer, intent(out) :: ierr
         character(len=4096) :: temporary
         character(len=:), allocatable :: text
+        character(len=80) :: numbers
         integer :: k, unit, ios
 
         text = MAGIC//achar(10)
         do k = 1, ix%n
+            write (numbers, '(i0,"|",i0,"|",i0)') ix%cpu_ms(k), ix%peak_kb(k), &
+                ix%write_bytes(k)
             text = text//ix%status(k)%s//'|'//ix%digests(k)%s//'|'// &
-                ix%names(k)%s//achar(10)
+                trim(numbers)//'|'//ix%names(k)%s//achar(10)
         end do
         ierr = 1
         call fs_make_dir(dir)
@@ -117,6 +146,8 @@ contains
         if (len(name) == 0 .or. scan(name, achar(10)//achar(13)) > 0) return
         if (len(digest) /= 0 .and. len(digest) /= DIGEST_LEN) return
         if (len(status) == 0 .or. scan(status, '|'//achar(10)) > 0) return
+        if (.not. allocated(ix%cpu_ms)) allocate (ix%cpu_ms(ix%n), &
+            ix%peak_kb(ix%n), ix%write_bytes(ix%n), source=-1_8)
         k = test_index_find(ix, name)
         if (k == 0) then
             allocate (names(ix%n + 1), statuses(ix%n + 1), digests(ix%n + 1))
@@ -128,11 +159,28 @@ contains
             call move_alloc(names, ix%names)
             call move_alloc(statuses, ix%status)
             call move_alloc(digests, ix%digests)
+            ix%cpu_ms = [ix%cpu_ms, -1_8]
+            ix%peak_kb = [ix%peak_kb, -1_8]
+            ix%write_bytes = [ix%write_bytes, -1_8]
             ix%names(k)%s = name
         end if
         ix%status(k)%s = status
         ix%digests(k)%s = digest
     end subroutine test_index_set
+
+    subroutine test_index_set_cost(ix, name, cpu_ms, peak_kb, write_bytes)
+        !! The cost of the last run of a recorded case; -1 = unknown.
+        type(test_index_t), intent(inout) :: ix
+        character(len=*), intent(in) :: name
+        integer(8), intent(in) :: cpu_ms, peak_kb, write_bytes
+        integer :: k
+
+        k = test_index_find(ix, name)
+        if (k == 0) return
+        ix%cpu_ms(k) = cpu_ms
+        ix%peak_kb(k) = peak_kb
+        ix%write_bytes(k) = write_bytes
+    end subroutine test_index_set_cost
 
     subroutine test_index_retain(ix, model)
         !! Drop the cases the model no longer has.
@@ -143,10 +191,13 @@ contains
         integer :: k
 
         allocate (kept%names(0), kept%status(0), kept%digests(0))
+        allocate (kept%cpu_ms(0), kept%peak_kb(0), kept%write_bytes(0))
         do k = 1, ix%n
             if (model_find_case(model, ix%names(k)%s) == 0) cycle
             call test_index_set(kept, ix%names(k)%s, ix%status(k)%s, &
                 ix%digests(k)%s)
+            call test_index_set_cost(kept, ix%names(k)%s, ix%cpu_ms(k), &
+                ix%peak_kb(k), ix%write_bytes(k))
         end do
         ix = kept
     end subroutine test_index_retain

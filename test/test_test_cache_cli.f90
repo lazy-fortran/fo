@@ -142,7 +142,8 @@ contains
 
     function recorded_digests(dir, listed) result(text)
         !! 'name=digest;' for the cases of listed, in that order, as the
-        !! PASS records of build/fo-test-index ('status|digest|name').
+        !! PASS records of build/fo-test-index
+        !! ('status|digest|cpu_ms|peak_kb|write_bytes|name').
         character(len=*), intent(in) :: dir, listed
         character(:), allocatable :: text, index_text, name
         integer :: at, eq, semi, row
@@ -156,7 +157,11 @@ contains
             name = listed(at:eq - 1)
             row = index(index_text, '|'//name//nl)
             text = text//name//'='
-            if (row > 64) text = text//index_text(row - 64:row - 1)
+            if (row > 0) then
+                ! Back to the start of the row, then past 'PASS|'.
+                row = index(index_text(1:row), nl, back=.true.) + 6
+                text = text//index_text(row:row + 63)
+            end if
             text = text//';'
             at = semi + 1
         end do

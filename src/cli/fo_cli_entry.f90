@@ -1210,6 +1210,7 @@ contains
             character(len=:), allocatable :: cases_path
             type(string_t), allocatable :: listed_names(:), listed_digests(:)
             integer :: n_changed
+            integer(8), allocatable :: listed_cpu(:), listed_peak(:)
 
             allocate (test_names(MAX_NODES), random_candidates(MAX_NODES))
             filter_text = ''
@@ -1543,7 +1544,10 @@ contains
             if (list_mode) then
                 if (use_json) then
                     call test_case_digests(b, model, all_flags, digests)
-                    call project_list_json(model, selection, text, digests)
+                    call recorded_costs(model, trim(b%project_dir), listed_cpu, &
+                        listed_peak)
+                    call project_list_json(model, selection, text, digests, &
+                        listed_cpu, listed_peak)
                 else
                     call project_list_text(model, selection, text)
                 end if
@@ -1592,6 +1596,28 @@ contains
             call delete_tmpfile(test_log)
             if (n_changed > 0) call process_exit(1)
         end subroutine cmd_test
+
+        subroutine recorded_costs(model, project_dir, cpu_ms, peak_kb)
+            !! The last recorded CPU time and peak memory of every model case
+            !! from the test index; -1 where none is recorded.
+            use fo_test_index, only: test_index_t, test_index_dir, test_index_load, &
+                test_index_find
+            type(project_model_t), intent(in) :: model
+            character(len=*), intent(in) :: project_dir
+            integer(8), allocatable, intent(out) :: cpu_ms(:), peak_kb(:)
+            type(test_index_t) :: recorded
+            integer :: k, j
+
+            allocate (cpu_ms(model%n_cases), peak_kb(model%n_cases), source=-1_8)
+            call test_index_load(test_index_dir(model, project_dir), recorded)
+            if (.not. allocated(recorded%cpu_ms)) return
+            do k = 1, model%n_cases
+                j = test_index_find(recorded, model%cases(k)%name)
+                if (j == 0) cycle
+                cpu_ms(k) = recorded%cpu_ms(j)
+                peak_kb(k) = recorded%peak_kb(j)
+            end do
+        end subroutine recorded_costs
 
         subroutine cases_from_list(path, names, n_names, listed_names, listed_digests)
             !! The cases of a `fo test --list --json` object as exact names.

@@ -1541,13 +1541,16 @@ contains
         end if
     end subroutine project_list_text
 
-    subroutine project_list_json(model, selection, text, digests)
+    subroutine project_list_json(model, selection, text, digests, cpu_ms, peak_kb)
         !! digests (one per model case), when given, adds each selected
-        !! case's input closure digest ('' = never reused).
+        !! case's input closure digest ('' = never reused); cpu_ms and
+        !! peak_kb (one per model case, -1 = unknown) its last recorded CPU
+        !! time (ms) and peak resident memory (kB).
         type(project_model_t), intent(in) :: model
         type(model_selection_t), intent(in) :: selection
         character(len=:), allocatable, intent(out) :: text
         character(len=64), intent(in), optional :: digests(:)
+        integer(8), intent(in), optional :: cpu_ms(:), peak_kb(:)
         type(model_plan_t) :: plan
         type(string_t), allocatable :: targets(:)
         type(json_builder_t) :: jb
@@ -1574,6 +1577,12 @@ contains
             call json_key_string(jb, 'reason', selection%reasons(i)%s)
             if (present(digests)) &
                 call json_key_string(jb, 'closure_digest', trim(digests(i)))
+            if (present(cpu_ms)) then
+                if (cpu_ms(i) >= 0) call json_key_int(jb, 'cpu_ms', int(cpu_ms(i)))
+            end if
+            if (present(peak_kb)) then
+                if (peak_kb(i) >= 0) call json_key_int(jb, 'peak_rss_kb', int(peak_kb(i)))
+            end if
             call json_object_end(jb)
         end do
         call json_array_end(jb)

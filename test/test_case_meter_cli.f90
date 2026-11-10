@@ -16,10 +16,10 @@ program test_case_meter_cli
 
     character(len=1), parameter :: nl = achar(10)
     character(:), allocatable :: driver, scratch, project, message
-    type(string_list_t) :: env, arguments
+    type(string_list_t) :: env, arguments, listing
     type(process_result_t) :: result
     type(json_value_t) :: report, tests, entry
-    real(8) :: heavy_peak, light_peak, heavy_written
+    real(8) :: heavy_peak, light_peak, heavy_written, heavy_listed
     logical :: valid, linux
     integer :: i
 
@@ -75,6 +75,21 @@ program test_case_meter_cli
         'the 300 MB case reports its peak memory: '//result%stdout)
     call assert_true(light_peak >= 0.0d0 .and. light_peak < 100000.0d0, &
         'the trivial case reports a small peak: '//result%stdout)
+    call list_add(listing, 'test')
+    call list_add(listing, '--list')
+    call list_add(listing, '--json')
+    call run_fo(driver, listing, project, join_path(scratch, 'cache'), result, &
+        env, 240000)
+    call json_parse(result%stdout, report, valid, message)
+    heavy_listed = -1
+    tests = json_member(report, 'cases')
+    do i = 1, json_size(tests)
+        entry = json_element(tests, i)
+        if (json_string_value(json_member(entry, 'name')) == 'meter_heavy') &
+            heavy_listed = json_number_value(json_member(entry, 'peak_rss_kb'))
+    end do
+    call assert_true(heavy_listed >= 280000.0d0, &
+        'the plan lists the recorded peak of the large case: '//result%stdout)
     inquire (file='/proc/self/io', exist=linux)
     if (linux .and. .not. on_tmpfs(project)) then
         call assert_true(heavy_written >= 8.0d6, &

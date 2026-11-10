@@ -19,7 +19,8 @@ module fo_test_cache
     use fo_gremlin_context, only: case_identity_capture
     use fo_gremlin_case_inputs, only: generation_case_digests_ensure
     use fo_test_index, only: test_index_t, test_index_dir, test_index_load, &
-        test_index_save, test_index_find, test_index_set, test_index_retain
+        test_index_save, test_index_find, test_index_set, test_index_retain, &
+        test_index_set_cost
     use fo_test_results, only: test_result_entry_t, parse_test_results
     use fo_process, only: process_self_executable
     use fo_util, only: make_tmpfile, delete_tmpfile, read_text_file_alloc
@@ -173,6 +174,9 @@ contains
                 call test_index_set(recorded, model%cases(c)%name, &
                     trim(entries(i)%status), '')
             end select
+            if (entries(i)%cpu_ms >= 0 .or. entries(i)%peak_rss_kb >= 0) &
+                call test_index_set_cost(recorded, model%cases(c)%name, &
+                entries(i)%cpu_ms, entries(i)%peak_rss_kb, entries(i)%write_bytes)
         end do
         call test_index_retain(recorded, model)
         call test_index_save(dir, recorded, ierr)
