@@ -26,7 +26,7 @@ module fo_test_cache
     implicit none
     private
 
-    public :: test_cache_run
+    public :: test_cache_run, test_case_digests
 
 contains
 
@@ -52,7 +52,7 @@ contains
         logical :: reused
 
         call system_clock(clock0, rate)
-        call model_digests(b, model, flags, digests)
+        call test_case_digests(b, model, flags, digests)
         dir = test_index_dir(model, trim(b%project_dir))
         call test_index_load(dir, recorded)
         allocate (to_run(size(cases)))
@@ -116,8 +116,9 @@ contains
             index(text, achar(10)//'TEST_WALL ') > 0
     end function has_wall_record
 
-    subroutine model_digests(b, model, flags, digests)
-        !! Input closure digest of every model case; '' = never reused.
+    subroutine test_case_digests(b, model, flags, digests)
+        !! Input closure digest of every model case, the key under which a
+        !! PASS of that case is recorded and reused; '' = never reused.
         type(backend_t), intent(inout) :: b
         type(project_model_t), intent(in) :: model
         character(len=*), intent(in) :: flags
@@ -145,7 +146,7 @@ contains
         call generation_case_digests_ensure(generation, trim(b%project_dir))
         if (.not. allocated(generation%case_digests)) return
         digests = generation%case_digests
-    end subroutine model_digests
+    end subroutine test_case_digests
 
     subroutine record_results(dir, model, digests, log_file)
         !! Record the status of every case of the log: PASS with its digest,

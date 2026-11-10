@@ -8,15 +8,18 @@ program test_test_cache_cli
     !!  - --rerun and MCP rerun:true run everything;
     !!  - an undeclared data file edit widens to every case (as 337dae0);
     !!  - a FAIL is never reused, not even with an unchanged closure;
-    !!  - MCP and CLI share the cache.
+    !!  - MCP and CLI share the cache;
+    !!  - `fo test --list --json` reports, without starting a test process,
+    !!    the digest under which the first run records each PASS (#362).
     !! Runs the driver named by FO.
     use fo_test_harness, only: process_result_t, string_list_t, list_add
     use fo_test_harness, only: make_scratch, join_path, write_text, read_text
     use fo_test_harness, only: remove_tree, assert_equal_integer
     use fo_test_harness, only: assert_contains, assert_not_contains, assert_true
-    use fo_test_harness, only: finish_assertions
+    use fo_test_harness, only: finish_assertions, assert_equal_string
     use fo_test_cli, only: resolve_driver, run_fo
     use fo_test_json, only: json_value_t, json_member, json_element, json_string_value
+    use fo_test_json, only: json_parse, json_size
     use fo_test_mcp, only: mcp_encode, mcp_request, mcp_call, mcp_quote, mcp_exchange
     implicit none
 
@@ -72,6 +75,47 @@ contains
         call case_program('case_c', '')
     end subroutine write_fixture
 
+    function listed_digests(json) result(text)
+        !! 'name=digest;' for every listed case, in listing order.
+        character(len=*), intent(in) :: json
+        character(:), allocatable :: text, message
+        type(json_value_t) :: report, cases, entry
+        logical :: valid
+        integer :: i
+
+        text = ''
+        call json_parse(json, report, valid, message)
+        if (.not. valid) return
+        cases = json_member(report, 'cases')
+        do i = 1, json_size(cases)
+            entry = json_element(cases, i)
+            text = text//json_string_value(json_member(entry, 'name'))//'='// &
+                json_string_value(json_member(entry, 'closure_digest'))//';'
+        end do
+    end function listed_digests
+
+    function recorded_digests(dir, listed) result(text)
+        !! 'name=digest;' for the cases of listed, in that order, as the
+        !! PASS records of build/fo-test-index ('status|digest|name').
+        character(len=*), intent(in) :: dir, listed
+        character(:), allocatable :: text, index_text, name
+        integer :: at, eq, semi, row
+
+        text = ''
+        index_text = read_text(join_path(dir, 'build/fo-test-index'))
+        at = 1
+        do while (at <= len(listed))
+            eq = at + index(listed(at:), '=') - 1
+            semi = at + index(listed(at:), ';') - 1
+            name = listed(at:eq - 1)
+            row = index(index_text, '|'//name//nl)
+            text = text//name//'='
+            if (row > 64) text = text//index_text(row - 64:row - 1)
+            text = text//';'
+            at = semi + 1
+        end do
+    end function recorded_digests
+
     integer function runs(name) result(count)
         !! Process starts of a case: the lines of its marker file.
         character(len=*), intent(in) :: name
@@ -112,12 +156,22 @@ contains
 
     subroutine check_reuse_and_edits()
         type(process_result_t) :: result
+        character(:), allocatable :: listed
+
+        call fo_test([character(len=16) :: '--list', '--json'], result)
+        call assert_equal_integer(result%exit_code, 0, 'plan lists: '//result%stderr)
+        listed = listed_digests(result%stdout)
+        call expect_runs(0, 0, 0, 'listing starts no test process')
+        call assert_true(len(listed) == 3*(6 + 1 + 64 + 1), &
+            'every case is listed with a 64-character digest: '//listed)
 
         call fo_test([character(len=16) :: ], result)
         call assert_equal_integer(result%exit_code, 0, 'first run passes: '// &
             result%stdout//result%stderr)
         call assert_contains(result%stdout, '3 pass', 'first run runs all three')
         call expect_runs(1, 1, 1, 'first run')
+        call assert_equal_string(recorded_digests(project, listed), listed, &
+            'the listed digests are the keys the first run records')
 
         call fo_test([character(len=16) :: ], result)
         call assert_equal_integer(result%exit_code, 0, 'unchanged rerun passes: '// &
@@ -187,7 +241,8 @@ contains
         character(:), allocatable :: cm
         type(process_result_t) :: result
         type(string_list_t) :: cmake_env
-        type(string_list_t) :: arguments
+        type(string_list_t) :: arguments, listing
+        character(:), allocatable :: listed
 
         cm = join_path(scratch, 'cmake')
         call write_text(join_path(cm, 'CMakeLists.txt'), 'cmake_minimum_required(VERSION 3.20)'//nl// &
@@ -204,8 +259,17 @@ contains
         call list_add(cmake_env, 'FO_JOBS=2')
         call list_add(cmake_env, 'FO_TEST_RERUN=0')
         call list_add(arguments, 'test')
+        call list_add(listing, 'test')
+        call list_add(listing, '--list')
+        call list_add(listing, '--json')
+        call run_fo(driver, listing, cm, cache, result, cmake_env, 240000)
+        listed = listed_digests(result%stdout)
+        call assert_true(len(listed) == 2*(6 + 1 + 64 + 1), &
+            'cmake: every case is listed with a 64-character digest: '//listed)
         call run_fo(driver, arguments, cm, cache, result, cmake_env, 240000)
         call assert_contains(result%stdout, '2 pass', 'cmake first run: '//result%stdout//result%stderr)
+        call assert_equal_string(recorded_digests(cm, listed), listed, &
+            'cmake: the listed digests are the keys the first run records')
         call run_fo(driver, arguments, cm, cache, result, cmake_env, 240000)
         call assert_contains(result%stdout, '2 reused', 'cmake unchanged rerun reuses: '//result%stdout)
         call write_text(join_path(cm, 'core.f90'), 'module core'//nl//'integer :: x'//nl//'end module'//nl)

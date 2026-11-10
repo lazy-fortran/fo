@@ -287,7 +287,9 @@ fo test --list [--json] [same selection]
 - `--list` prints the selected cases (labels, layer, reason), the targets that
   must be built for them, and whether the plan widened to every target with the
   reasons. It configures CMake but builds nothing. `--json` emits the same as
-  one object.
+  one object, with each case's `closure_digest`: the key under which a PASS
+  of that case is recorded and reused (empty when the case is never reused),
+  so another tool can plan which cases to run without building.
 - Running (CMake, also plain `fo test`): select, plan, build, run. CMake is
   configured once and the loaded model is reused. Only the plan targets are
   built (merged with `FO_CMAKE_BUILD_TARGETS`). A case whose command maps to no

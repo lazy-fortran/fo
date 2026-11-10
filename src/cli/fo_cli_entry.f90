@@ -49,7 +49,7 @@ module fo_cli_entry
     use fo_scaffold, only: scaffold_project
     use fo_version_info, only: FO_VERSION
     use fo_progress, only: progress_suppress
-    use fo_test_cache, only: test_cache_run
+    use fo_test_cache, only: test_cache_run, test_case_digests
     use fo_junit, only: junit_write
     use fo_case_filter, only: partition_parse, partition_keep
     implicit none
@@ -1205,6 +1205,7 @@ contains
             character(len=:), allocatable :: filter_text, partition_text, junit_path
             logical :: rerun, by_hash, no_cache
             integer :: part, parts
+            character(len=64), allocatable :: digests(:)
 
             allocate (test_names(MAX_NODES), random_candidates(MAX_NODES))
             filter_text = ''
@@ -1517,7 +1518,8 @@ contains
                 call narrow_to_partition(model, selection, by_hash, part, parts)
             if (list_mode) then
                 if (use_json) then
-                    call project_list_json(model, selection, text)
+                    call test_case_digests(b, model, all_flags, digests)
+                    call project_list_json(model, selection, text, digests)
                 else
                     call project_list_text(model, selection, text)
                 end if

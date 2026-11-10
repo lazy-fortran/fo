@@ -1541,10 +1541,13 @@ contains
         end if
     end subroutine project_list_text
 
-    subroutine project_list_json(model, selection, text)
+    subroutine project_list_json(model, selection, text, digests)
+        !! digests (one per model case), when given, adds each selected
+        !! case's input closure digest ('' = never reused).
         type(project_model_t), intent(in) :: model
         type(model_selection_t), intent(in) :: selection
         character(len=:), allocatable, intent(out) :: text
+        character(len=64), intent(in), optional :: digests(:)
         type(model_plan_t) :: plan
         type(string_t), allocatable :: targets(:)
         type(json_builder_t) :: jb
@@ -1569,6 +1572,8 @@ contains
             call json_array_end(jb)
             call json_key_string(jb, 'layer', layer_name(model, i))
             call json_key_string(jb, 'reason', selection%reasons(i)%s)
+            if (present(digests)) &
+                call json_key_string(jb, 'closure_digest', trim(digests(i)))
             call json_object_end(jb)
         end do
         call json_array_end(jb)
