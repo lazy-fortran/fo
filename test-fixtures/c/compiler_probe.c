@@ -8,12 +8,21 @@
 #include <windows.h>
 #include <io.h>
 #include <process.h>
+#include <wchar.h>
 int wmain(int argc, wchar_t **argv) {
     const wchar_t *marker = _wgetenv(L"FO_TEST_COMPILER_MARKER");
     if (marker) {
         FILE *log = _wfopen(marker, L"a");
         if (!log) return 124;
-        fputs("compiler invoked\n", log);
+        if (_wgetenv(L"FO_TEST_COMPILER_SOURCES_ONLY")) {
+            for (int i = 1; i < argc; ++i) {
+                size_t length = wcslen(argv[i]);
+                if (length >= 4 && !wcscmp(argv[i] + length - 4, L".F90"))
+                    fwprintf(log, L"%ls\n", argv[i]);
+            }
+        } else {
+            fputs("compiler invoked\n", log);
+        }
         if (fclose(log)) return 125;
     }
     const wchar_t *hold = _wgetenv(L"FO_TIMEOUT_VERSION_HOLD");
@@ -41,7 +50,15 @@ int main(int argc, char **argv) {
     if (marker) {
         FILE *log = fopen(marker, "a");
         if (!log) return 124;
-        fputs("compiler invoked\n", log);
+        if (getenv("FO_TEST_COMPILER_SOURCES_ONLY")) {
+            for (int i = 1; i < argc; ++i) {
+                size_t length = strlen(argv[i]);
+                if (length >= 4 && !strcmp(argv[i] + length - 4, ".F90"))
+                    fprintf(log, "%s\n", argv[i]);
+            }
+        } else {
+            fputs("compiler invoked\n", log);
+        }
         if (fclose(log)) return 125;
     }
     const char *hold = getenv("FO_TIMEOUT_VERSION_HOLD");
