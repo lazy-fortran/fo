@@ -404,6 +404,11 @@ contains
                 message = 'cannot prepare private build/dependency view'
                 exit validation
             end if
+            ! Projects whose build needs generated sources (LFortran's
+            ! build0.sh writes its version file, parser and ASR headers) name
+            ! the command that writes them; it runs in the staged view.
+            call run_prepare(root, snapshot, cap, status, message)
+            if (status /= 0) exit validation
             backend = detect_backend(snapshot, authority_dir=root)
             if (backend%kind == BACKEND_NONE) then
                 message = 'no supported staged Fortran project'
@@ -1122,6 +1127,36 @@ contains
             if (attempt < 20) call fs_sleep_ms(250)
         end do
     end subroutine remove_owned_view
+
+    subroutine run_prepare(root, view, cap, status, message)
+        !! Run git config fo.hookPrepare (a shell command, if set) in the
+        !! staged view, within the build cap.
+        character(len=*), intent(in) :: root, view
+        integer, intent(in) :: cap
+        integer, intent(out) :: status
+        character(len=:), allocatable, intent(inout) :: message
+        character(len=:), allocatable :: command, packed, output
+        character(len=4096) :: log
+        integer :: n, ierr
+
+        status = 0
+        call git_text(root, git_words('config', 'fo.hookPrepare'), command, ierr)
+        if (ierr /= 0 .or. len_trim(command) == 0) return
+        packed = ''
+        n = 0
+        call argv_push(packed, n, 'sh')
+        call argv_push(packed, n, '-c')
+        call argv_push(packed, n, trim(command))
+        call make_tmpfile('fo-hook-prepare', log)
+        call process_run_argv_logged(view, packed, n, trim(log), .false., cap, status)
+        if (status /= 0) then
+            call read_text_file_alloc(trim(log), output, ierr)
+            if (ierr /= 0) output = ''
+            if (len(output) > 2000) output = output(len(output) - 1999:)
+            message = 'fo.hookPrepare failed ('//trim(command)//'):'//new_line('a')//output
+        end if
+        call delete_tmpfile(trim(log))
+    end subroutine run_prepare
 
     integer function config_seconds(root, name, fallback) result(value)
         character(len=*), intent(in) :: root, name

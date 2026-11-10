@@ -123,6 +123,18 @@ git config fo.hookExcludeLabels 'slow|regression|performance|scalability'
 comma-separated entry is a label expression, with the same matching rules as
 `fo test -L` and `fo test -LE`. The result reports label exclusions.
 
+A project whose configure step needs generated sources that are not tracked
+names the command that writes them; it runs in the staged view before the
+backend is detected, within `fo.hookBuildCap`:
+
+```sh
+git config fo.hookPrepare ./build0.sh   # LFortran: version file, parser, ASR headers
+```
+
+Commits that stage only documentation, images or hosted CI configuration
+(`.github/`, `.gitlab/`, `.forgejo/`, `.gitlab-ci.yml`) build nothing, unless
+another file names them.
+
 Fast test invocations record elapsed time and warn by name above the threshold;
 this is advisory, not a new classification database. Mark slow tests using the
 existing declarations (they remain available explicitly outside the hook):

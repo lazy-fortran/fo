@@ -111,6 +111,29 @@ program test_hook_reuse
     call hook()
     call assert_process_ok(result, 'moved pin builds the new revision')
     call assert_contains(result%stdout, 'fast PASS 1', 'pinned revision test ran')
+    ! A project whose configure reads a generated file builds once
+    ! fo.hookPrepare writes that file in the staged view.
+    project = scratch//'/prepared'
+    call write_text(project//'/CMakeLists.txt', 'cmake_minimum_required(VERSION 3.20)'//nl// &
+        'project(hook_prepared LANGUAGES Fortran)'//nl// &
+        'file(STRINGS "${CMAKE_SOURCE_DIR}/version" generated_version)'//nl// &
+        'add_executable(answer answer.f90)'//nl)
+    call write_text(project//'/answer.f90', 'program answer'//nl//'end program answer'//nl)
+    call write_text(project//'/.gitignore', 'version'//nl)
+    call git('init', '-q')
+    call git('add', '.')
+    call git('commit', '-qm', 'base')
+    call write_text(project//'/answer.f90', 'program answer'//nl//'    ! changed'//nl// &
+        'end program answer'//nl)
+    call git('add', 'answer.f90')
+    call hook()
+    call assert_true(result%exit_code /= 0, 'without the generated file configure fails')
+    call assert_contains(result%stdout//result%stderr, 'version', &
+        'the failure names the missing generated file')
+    call git('config', 'fo.hookPrepare', 'echo 1.0 > version')
+    call hook()
+    call assert_process_ok(result, 'fo.hookPrepare writes the generated file first')
+
     call remove_tree(scratch)
     call finish_assertions()
 contains
