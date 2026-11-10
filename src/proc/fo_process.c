@@ -33,6 +33,7 @@
 #endif
 #ifdef __APPLE__
 #include <libproc.h>
+#include <sys/sysctl.h>
 #include <mach-o/dyld.h>
 #include <mach/mach_time.h>
 #include <sys/proc.h>
@@ -679,6 +680,21 @@ static void tree_meter(pid_t pid, int depth, long long *hwm_kb,
     closedir(tasks);
 }
 #endif
+
+/* Memory the system can give to new work, in kB: MemAvailable on Linux,
+   the physical memory on macOS; -1 where unknown. */
+long long fo_c_memory_available_kb(void) {
+#ifdef __linux__
+    return proc_number("/proc/meminfo", "MemAvailable:", 0);
+#elif defined(__APPLE__)
+    unsigned long long bytes = 0;
+    size_t size = sizeof(bytes);
+    if (sysctlbyname("hw.memsize", &bytes, &size, NULL, 0) != 0) return -1;
+    return (long long)(bytes / 1024ULL);
+#else
+    return -1;
+#endif
+}
 
 /* After the reap: the kernel's peak of the child and the descendants it
    waited for. It also counts this process's pages the child shared before

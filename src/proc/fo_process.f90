@@ -19,7 +19,7 @@ module fo_process
     public :: process_run_argv_logged, argv_push, argv_push_split
     public :: argv_push_split_nl
     public :: TIMEOUT_NONE, TIMEOUT_CPU, TIMEOUT_WALL, TIMEOUT_UNMEASURED
-    public :: TIMEOUT_MEMORY, process_set_memory_limit
+    public :: TIMEOUT_MEMORY, process_set_memory_limit, process_memory_available_kb
     integer, parameter :: C_PATH_LEN = 4096
     integer, parameter :: C_ARG_LEN = 4096
     !! Which limit killed a budgeted child (process_run_argv_logged).
@@ -198,6 +198,12 @@ module fo_process
             import :: c_long_long
             integer(c_long_long), value :: limit_kb
         end subroutine fo_c_set_memory_limit
+
+        function fo_c_memory_available_kb() result(kb) &
+                bind(C, name='fo_c_memory_available_kb')
+            import :: c_long_long
+            integer(c_long_long) :: kb
+        end function fo_c_memory_available_kb
 
         subroutine fo_c_exit(code) bind(C, name='fo_c_exit')
             import :: c_int
@@ -425,6 +431,11 @@ contains
         if (present(cpu_seconds)) cpu_seconds = real(cpu_ms) / 1000.0
         if (present(wall_seconds)) wall_seconds = real(wall_ms) / 1000.0
     end subroutine process_run_argv_logged
+
+    integer(c_long_long) function process_memory_available_kb() result(kb)
+        !! Memory the system can give to new work (kB), -1 where unknown.
+        kb = fo_c_memory_available_kb()
+    end function process_memory_available_kb
 
     subroutine process_set_memory_limit(limit_kb)
         !! Memory limit (kB of summed peak resident memory of the process

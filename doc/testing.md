@@ -50,6 +50,14 @@ test-memory-limit = "4G"   # K, M, G or T; no suffix means bytes
 
 `FO_TEST_MEMORY_LIMIT` takes precedence. There is no limit by default.
 
+Cases that run side by side are admitted by memory: each reserves the peak
+recorded at its last run (in `build/fo-test-index`), or 512 MB without a
+record (`FO_TEST_MEMORY_DEFAULT`), and starts only when its reservation fits
+next to those of the running cases, or when nothing else runs. The budget is
+half of the memory the system has available, or `test-memory-budget` in
+`[extra.fo]`, or `FO_TEST_MEMORY_BUDGET`, which takes precedence; `0` turns
+admission off.
+
 ## Cases
 
 An executable that implements the fo listing protocol is run case by case.

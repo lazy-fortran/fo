@@ -171,6 +171,8 @@ module fo_fpm_config
         integer :: test_timeout = 0
         !! [extra.fo] test-memory-limit as written (e.g. 4G); '' = none.
         character(len=32) :: test_memory_limit = ''
+        !! [extra.fo] test-memory-budget as written; '' = half the free memory.
+        character(len=32) :: test_memory_budget = ''
         integer :: slow_test_timeout = 0
         integer :: test_wall_timeout = 0
         ! [extra.fo] test-retries and slow-timeout = { period, terminate-after }
@@ -378,6 +380,7 @@ contains
         c%manifest_parse_error = ''
         c%test_timeout = 0
         c%test_memory_limit = ''
+        c%test_memory_budget = ''
         c%slow_test_timeout = 0
         c%test_wall_timeout = 0
         c%test_retries = -1
@@ -1535,6 +1538,9 @@ contains
         case ('test-memory-limit')
             call extract_string(val, str_val)
             config%test_memory_limit = trim(str_val)
+        case ('test-memory-budget')
+            call extract_string(val, str_val)
+            config%test_memory_budget = trim(str_val)
         case ('debug-info')
             call extract_string(val, str_val)
             select case (trim(str_val))

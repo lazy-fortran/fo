@@ -19,7 +19,10 @@ module fo_gfortran_build
     use fo_build_tree, only: native_output_dir, native_profiles_dir, &
         native_record_profile
     use fo_gremlin_execution_view, only: execution_view_copy_app_outputs
-    use fo_test_budget, only: test_memory_limit_kb
+    use fo_test_budget, only: test_memory_limit_kb, test_memory_budget_kb, &
+        test_memory_default_kb
+    use fo_test_index, only: test_index_t, test_index_load, test_index_find
+    use fo_fs, only: fs_sleep_ms
     use fo_process, only: process_set_memory_limit, TIMEOUT_MEMORY
     use fo_test_budget, only: test_timeout_seconds, test_budget_seconds, &
         test_wall_cap_seconds, timeout_detail_into, test_policy, test_strict_flaky
@@ -100,6 +103,8 @@ module fo_gfortran_build
         integer(8) :: peak_kb = -1, write_bytes = -1
         !! The limit that ended a run with exit 124 (fo_process TIMEOUT_*).
         integer :: timeout_kind = 0
+        !! Memory (kB) the case reserves against the admission budget.
+        integer(8) :: need_kb = 0
         logical :: flaky = .false.
         logical :: ran = .false.
         !! Project-relative source, for the test-group match of its policy.
@@ -161,6 +166,10 @@ module fo_gfortran_build
     type :: node_dirs_t
         character(len=512), allocatable :: d(:)
     end type node_dirs_t
+
+    !! Memory admission of the running test team (#364): budget and the sum
+    !! of the reservations of the cases that run, in kB.
+    integer(8), save :: memory_budget_kb = 0, memory_in_use_kb = 0
 
 contains
 
@@ -1901,6 +1910,7 @@ contains
         if (n_tests > 1) &
             team_omp_threads = max(1, native_jobs() / min(n_tests, native_jobs()))
         team_cases_done = 0
+        call plan_memory_admission(project_dir, config, tests, n_tests)
         !$omp parallel do if (n_tests > 1) num_threads(max(1, min(n_tests, native_jobs()))) &
         !$omp& schedule(dynamic) private(i, rerun_log, clk0, clk1, clk_rate)
         do i = 1, n_tests
@@ -1963,12 +1973,14 @@ contains
 
         call system_clock(clk0, clk_rate)
         if (test%ran) return
+        call admit_memory(test%need_kb)
         call run_test_binary(execution_cwd, test%bin, test%args, &
             test%log, config, is_slow_test(test%name), test%exit, test%cpu_secs, &
             case_env=test%case_env, slow_period=test%slow_period, &
             slow_after=test%slow_after, label=trim(test%name), &
             timeout_kind=test%timeout_kind)
         call process_last_run_meter(test%peak_kb, test%write_bytes)
+        call release_memory(test%need_kb)
         call system_clock(clk1, clk_rate)
         test%ran = .true.
         if (clk_rate > 0) test%secs = real(clk1 - clk0) / real(clk_rate)
@@ -4204,6 +4216,56 @@ contains
         write (value, '(i0)') team_omp_threads
         extra = ';OMP_NUM_THREADS='//trim(value)
     end subroutine team_openmp_env_into
+
+    subroutine plan_memory_admission(project_dir, config, tests, n_tests)
+        !! Each case reserves its last recorded peak (the test index in the
+        !! build tree), or test_memory_default_kb without one, against the
+        !! budget of test_memory_budget_kb (#364).
+        character(len=*), intent(in) :: project_dir
+        type(fpm_config_t), intent(in) :: config
+        type(current_test_t), intent(inout) :: tests(:)
+        integer, intent(in) :: n_tests
+        type(test_index_t) :: recorded
+        integer :: i, k
+
+        memory_budget_kb = test_memory_budget_kb(config)
+        memory_in_use_kb = 0
+        call test_index_load(trim(project_dir)//'/build', recorded)
+        do i = 1, n_tests
+            tests(i)%need_kb = test_memory_default_kb()
+            if (.not. allocated(recorded%peak_kb)) cycle
+            k = test_index_find(recorded, trim(tests(i)%name))
+            if (k == 0) cycle
+            if (recorded%peak_kb(k) >= 0) tests(i)%need_kb = recorded%peak_kb(k)
+        end do
+    end subroutine plan_memory_admission
+
+    subroutine admit_memory(need_kb)
+        !! Wait until need_kb fits next to the reservations of the running
+        !! cases, or nothing else runs.
+        integer(8), intent(in) :: need_kb
+        logical :: admitted
+
+        if (memory_budget_kb <= 0) return
+        do
+            !$omp critical (fo_memory_admission)
+            admitted = memory_in_use_kb == 0 .or. &
+                memory_in_use_kb + need_kb <= memory_budget_kb
+            if (admitted) memory_in_use_kb = memory_in_use_kb + need_kb
+            !$omp end critical (fo_memory_admission)
+            if (admitted) return
+            call fs_sleep_ms(20)
+        end do
+    end subroutine admit_memory
+
+    subroutine release_memory(need_kb)
+        integer(8), intent(in) :: need_kb
+
+        if (memory_budget_kb <= 0) return
+        !$omp critical (fo_memory_admission)
+        memory_in_use_kb = max(0_8, memory_in_use_kb - need_kb)
+        !$omp end critical (fo_memory_admission)
+    end subroutine release_memory
 
     subroutine run_test_binary(execution_cwd, bin_path, arg_lines, log_file, &
             config, slow, exitcode, cpu_seconds, case_env, slow_period, &

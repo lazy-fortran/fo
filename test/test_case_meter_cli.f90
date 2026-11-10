@@ -111,10 +111,84 @@ program test_case_meter_cli
         env, 240000)
     call assert_equal_integer(result%exit_code, 0, &
         'FO_TEST_MEMORY_LIMIT overrides the manifest: '//result%stdout//result%stderr)
+    call check_admission()
     call remove_tree(scratch)
     call finish_assertions()
 
 contains
+
+    subroutine check_admission()
+        !! Two cases with a recorded peak of about 300 MB each hold it for a
+        !! second: under a 400 MB budget they run one after the other, under
+        !! 2 GB side by side (FO_JOBS=2 both times).
+        character(:), allocatable :: dir
+        type(string_list_t) :: run_env, run_args
+        integer :: k
+
+        dir = join_path(scratch, 'admit')
+        call write_text(join_path(dir, 'fpm.toml'), 'name = "admit"'//nl)
+        call write_text(join_path(dir, 'src/admit.f90'), &
+            'module admit'//nl//'implicit none'//nl//'end module'//nl)
+        do k = 1, 2
+            call write_text(join_path(dir, 'test/hold_'//achar(96 + k)//'.f90'), &
+                'program hold'//nl//'implicit none'//nl// &
+                'real(8), allocatable :: a(:)'//nl// &
+                'integer(8) :: t0, t1, rate'//nl//'integer :: u'//nl// &
+                'allocate (a(37500000))'//nl//'a = 1.0d0'//nl// &
+                'call system_clock(t0, rate)'//nl// &
+                'open (newunit=u, file="'//join_path(dir, 'span_'//achar(96 + k))// &
+                '", status="replace")'//nl// &
+                'write (u, *) epoch_ms()'//nl// &
+                'do'//nl//'call system_clock(t1)'//nl// &
+                'if (t1 - t0 >= rate) exit'//nl//'end do'//nl// &
+                'write (u, *) epoch_ms()'//nl//'close (u)'//nl// &
+                'if (a(1) /= 1.0d0) error stop 1'//nl// &
+                'contains'//nl// &
+                'integer(8) function epoch_ms()'//nl// &
+                'integer :: v(8)'//nl//'call date_and_time(values=v)'//nl// &
+                'epoch_ms = ((int(v(3), 8)*24 + v(5))*60 + v(6))*60000 + v(7)*1000 + v(8)'//nl// &
+                'end function'//nl//'end program'//nl)
+        end do
+        call list_add(run_env, 'FO_JOBS=2')
+        call list_add(run_env, 'FO_TEST_RERUN=1')
+        call list_add(run_args, 'test')
+        call run_fo(driver, run_args, dir, join_path(scratch, 'cache'), result, &
+            run_env, 240000)
+        call assert_equal_integer(result%exit_code, 0, 'the holding cases pass: '// &
+            result%stdout//result%stderr)
+
+        call list_add(run_env, 'FO_TEST_MEMORY_BUDGET=400M')
+        call run_fo(driver, run_args, dir, join_path(scratch, 'cache'), result, &
+            run_env, 240000)
+        call assert_equal_integer(result%exit_code, 0, 'admitted run passes: '// &
+            result%stdout//result%stderr)
+        call assert_true(.not. overlap(dir), &
+            'cases whose recorded peaks exceed the budget together run apart')
+
+        call list_add(run_env, 'FO_TEST_MEMORY_BUDGET=2G')
+        call run_fo(driver, run_args, dir, join_path(scratch, 'cache'), result, &
+            run_env, 240000)
+        call assert_true(overlap(dir), 'cases that fit the budget run side by side')
+    end subroutine check_admission
+
+    logical function overlap(dir)
+        character(len=*), intent(in) :: dir
+        integer(8) :: a0, a1, b0, b1
+        integer :: u, ios
+
+        overlap = .false.
+        open (newunit=u, file=join_path(dir, 'span_a'), status='old', iostat=ios)
+        if (ios /= 0) return
+        read (u, *) a0
+        read (u, *) a1
+        close (u)
+        open (newunit=u, file=join_path(dir, 'span_b'), status='old', iostat=ios)
+        if (ios /= 0) return
+        read (u, *) b0
+        read (u, *) b1
+        close (u)
+        overlap = a0 < b1 .and. b0 < a1
+    end function overlap
 
     function status_of(name) result(status)
         character(len=*), intent(in) :: name

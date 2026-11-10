@@ -10,12 +10,14 @@ module fo_test_budget
     !! [extra.fo], then the default.
     use fo_fpm_config, only: fpm_config_t
     use fo_pattern, only: pattern_glob
-    use fo_process, only: TIMEOUT_CPU, TIMEOUT_WALL, TIMEOUT_UNMEASURED, TIMEOUT_MEMORY
+    use fo_process, only: TIMEOUT_CPU, TIMEOUT_WALL, TIMEOUT_UNMEASURED, TIMEOUT_MEMORY, &
+        process_memory_available_kb
     implicit none
     private
 
     public :: test_timeout_seconds, slow_test_timeout_seconds
     public :: test_budget_seconds, test_wall_cap_seconds, test_memory_limit_kb
+    public :: test_memory_budget_kb, test_memory_default_kb
     public :: ctest_default_timeout_seconds
     public :: timeout_detail, timeout_detail_into
     public :: test_policy, test_strict_flaky, test_retries_override
@@ -239,6 +241,36 @@ contains
         call get_environment_variable('FO_TEST_MEMORY_LIMIT', text, status=status)
         if (status == 0 .and. len_trim(text) > 0) limit = size_kb(text)
     end function test_memory_limit_kb
+
+    integer(8) function test_memory_budget_kb(config) result(budget)
+        !! Memory the tests of one run may hold together (kB): the sum of
+        !! their recorded peaks must fit, except for a case started alone.
+        !! FO_TEST_MEMORY_BUDGET, then [extra.fo] test-memory-budget, then
+        !! half of the memory the system has available; 0 = no admission.
+        type(fpm_config_t), intent(in), optional :: config
+        character(len=64) :: text
+        integer :: status
+
+        budget = process_memory_available_kb()/2
+        if (budget < 0) budget = 0
+        if (present(config)) then
+            if (len_trim(config%test_memory_budget) > 0) &
+                budget = size_kb(config%test_memory_budget)
+        end if
+        call get_environment_variable('FO_TEST_MEMORY_BUDGET', text, status=status)
+        if (status == 0 .and. len_trim(text) > 0) budget = size_kb(text)
+    end function test_memory_budget_kb
+
+    integer(8) function test_memory_default_kb() result(kb)
+        !! The memory a case without a recorded peak is assumed to need:
+        !! FO_TEST_MEMORY_DEFAULT, else 512 MB.
+        character(len=64) :: text
+        integer :: status
+
+        kb = 512_8*1024_8
+        call get_environment_variable('FO_TEST_MEMORY_DEFAULT', text, status=status)
+        if (status == 0 .and. len_trim(text) > 0) kb = size_kb(text)
+    end function test_memory_default_kb
 
     integer(8) function size_kb(text) result(kb)
         character(len=*), intent(in) :: text
