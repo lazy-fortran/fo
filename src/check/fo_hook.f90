@@ -775,8 +775,10 @@ contains
     end function toolchain_line
 
     logical function inert_paths(root, tree, paths) result(inert)
-        !! Documentation and images are inert unless a file other than
-        !! documentation names them, as a build script installing a page would.
+        !! Documentation, images and hosted CI configuration (.github/,
+        !! .gitlab/, .forgejo/, .gitlab-ci.yml: run by the forge, never by a
+        !! local build) are inert unless a file other than these names them, as
+        !! a build script installing a page would.
         character(len=*), intent(in) :: root, tree
         type(string_t), intent(in) :: paths(:)
         character(len=*), parameter :: documents(*) = [character(len=9) :: &
@@ -792,14 +794,16 @@ contains
         call argv_push(packed, n, '-q')
         call argv_push(packed, n, '-F')
         do i = 1, size(paths)
-            dot = index(paths(i)%s, '.', back=.true.)
-            if (dot == 0 .or. dot < index(paths(i)%s, '/', back=.true.)) return
-            extension = paths(i)%s(dot + 1:)
-            do k = 1, len(extension)
-                if (extension(k:k) >= 'A' .and. extension(k:k) <= 'Z') &
-                    extension(k:k) = achar(iachar(extension(k:k)) + 32)
-            end do
-            if (.not. any(documents == extension)) return
+            if (.not. hosted_ci(paths(i)%s)) then
+                dot = index(paths(i)%s, '.', back=.true.)
+                if (dot == 0 .or. dot < index(paths(i)%s, '/', back=.true.)) return
+                extension = paths(i)%s(dot + 1:)
+                do k = 1, len(extension)
+                    if (extension(k:k) >= 'A' .and. extension(k:k) <= 'Z') &
+                        extension(k:k) = achar(iachar(extension(k:k)) + 32)
+                end do
+                if (.not. any(documents == extension)) return
+            end if
             call argv_push(packed, n, '-e')
             call argv_push(packed, n, path_basename(paths(i)%s))
         end do
@@ -810,10 +814,20 @@ contains
             call argv_push(packed, n, ':(exclude)*.'//trim(documents(k)))
             call argv_push(packed, n, ':(exclude)*.'//upper(trim(documents(k))))
         end do
+        call argv_push(packed, n, ':(exclude).github')
+        call argv_push(packed, n, ':(exclude).gitlab')
+        call argv_push(packed, n, ':(exclude).forgejo')
+        call argv_push(packed, n, ':(exclude).gitlab-ci.yml')
         ! git grep exits 1 when nothing matches and higher on errors.
         call git_text(root, packed, text, status)
         inert = status == 1
     contains
+        logical function hosted_ci(path)
+            character(len=*), intent(in) :: path
+            hosted_ci = index(path, '.github/') == 1 .or. index(path, '.gitlab/') == 1 .or. &
+                index(path, '.forgejo/') == 1 .or. path == '.gitlab-ci.yml'
+        end function hosted_ci
+
         function upper(word) result(out)
             character(len=*), intent(in) :: word
             character(len=len(word)) :: out

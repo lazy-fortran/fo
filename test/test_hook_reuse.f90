@@ -1,5 +1,6 @@
 program test_hook_reuse
-    !! A commit that stages only documentation builds nothing, and CMake commits
+    !! A commit that stages only documentation or hosted CI configuration
+    !! builds nothing, and CMake commits
     !! of every worktree recompile only what changed in one shared staged build.
     use fo_test_harness, only: string_list_t, process_result_t, list_add, &
         make_scratch, write_text, read_text, remove_tree, assert_process_ok, &
@@ -29,6 +30,11 @@ program test_hook_reuse
     call hook()
     call assert_process_ok(result, 'documentation-only commit passes without configuring')
     call assert_contains(result%stderr, 'only documentation staged', 'skip is reported')
+    call git('reset', '-q', '--hard')
+    call write_text(project//'/.github/workflows/ci.yml', 'on: push'//nl)
+    call git('add', '.github/workflows/ci.yml')
+    call hook()
+    call assert_process_ok(result, 'a CI-configuration-only commit passes without configuring')
     call git('reset', '-q', '--hard')
     call write_text(project//'/guide.md', 'Changed guide.'//nl)
     call git('add', 'guide.md')
