@@ -700,7 +700,8 @@ contains
         end if
         call coverage_open(coverage_state_path(session, generation_id), generation_id, &
             all_names, n_all, &
-            seed, coverage, coverage_status, message)
+            seed, coverage, coverage_status, message, &
+            timeout_seconds=request%timeout_seconds)
         if (coverage_status /= COVERAGE_OK) then
             ierr = coverage_status
             message = 'cannot recover current-generation coverage: '//trim(message)

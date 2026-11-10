@@ -132,7 +132,8 @@ program test_hook_precommit
     call assert_contains(result%stdout, '"build":"PASS', 'over-budget build passes')
     call assert_contains(result%stdout, '"deferred_count":2', 'unrun tests deferred')
     call assert_contains(result%stdout, '"fast_passed":0', 'timed out test is not PASS')
-    call git([character(len=64) :: 'config', 'fo.hookBudget', '10'])
+    ! Preparation shares this budget; only the bounded hook measures commit latency.
+    call git([character(len=64) :: 'config', 'fo.hookBudget', '30'])
     call hook()
     call assert_process_ok(result, 'slow fast-tier test only warns')
     call assert_contains(result%stdout, '"slow_fast_tests":["wait"]', 'slow warning names test')
