@@ -957,6 +957,7 @@ contains
                 call argv_push(packed, n_args, context%extra_args(i))
             end do
         end if
+        call push_compiler_launcher(packed, n_args, context)
         inquire(file=context%source_root//'/.fo-cmake/cache.cmake', &
             exist=has_frozen_context)
         if (has_frozen_context) then
@@ -1448,5 +1449,36 @@ contains
             store_removed = .true.
         end if
     end subroutine backend_clean
+
+    subroutine push_compiler_launcher(packed, n_args, context)
+        !! C and C++ have no content-addressed cache of fo's own, so a CMake
+        !! project's C/C++ compiles go through ccache when it is installed:
+        !! a rebuild in a fresh tree (a staged hook view, a runner checkout)
+        !! then recompiles only what changed. Not when the project, its
+        !! arguments or the environment choose a launcher, or FO_CCACHE=0.
+        character(len=:), allocatable, intent(inout) :: packed
+        integer, intent(inout) :: n_args
+        type(cmake_context_t), intent(in) :: context
+        character(len=4096) :: ccache
+        character(len=64) :: setting
+        logical :: found
+        integer :: i, status
+
+        call get_environment_variable('FO_CCACHE', setting, status=status)
+        if (status == 0 .and. trim(setting) == '0') return
+        call get_environment_variable('CMAKE_CXX_COMPILER_LAUNCHER', setting, status=status)
+        if (status == 0) return
+        call get_environment_variable('CMAKE_C_COMPILER_LAUNCHER', setting, status=status)
+        if (status == 0) return
+        if (allocated(context%extra_args)) then
+            do i = 1, size(context%extra_args)
+                if (index(context%extra_args(i), 'COMPILER_LAUNCHER') > 0) return
+            end do
+        end if
+        call fs_find_executable('ccache', ccache, found)
+        if (.not. found) return
+        call argv_push(packed, n_args, '-DCMAKE_C_COMPILER_LAUNCHER='//trim(ccache))
+        call argv_push(packed, n_args, '-DCMAKE_CXX_COMPILER_LAUNCHER='//trim(ccache))
+    end subroutine push_compiler_launcher
 
 end module fo_build_backend
