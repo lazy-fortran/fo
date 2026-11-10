@@ -158,7 +158,7 @@ contains
         character(len=4096) :: driver, logfile, resultfile, dependency_message
         character(len=64) :: driver_digest, key
         character(len=:), allocatable :: root, snapshot, tree, text, message, packed, child_env
-        character(len=:), allocatable :: reuse, populated, backend_name, common
+        character(len=:), allocatable :: reuse, populated, backend_name
         type(string_t), allocatable :: excluded(:), included(:)
         character(len=4096), allocatable :: files(:)
         character(len=16384) :: formatting
@@ -210,16 +210,7 @@ contains
             ! own build stands on the configuration of its main checkout.
             call git_text(root, git_words('cat-file', '-e', ':fpm.toml'), text, status)
             if (status /= 0) then
-                call cmake_configured_build_dir(root, populated, populated_found, fortran)
-                if (.not. populated_found) then
-                    call git_text(root, git_words('rev-parse', '--path-format=absolute', &
-                        '--git-common-dir'), common, status)
-                    if (status == 0 .and. len(common) > 5) then
-                        if (common(len(common) - 4:) == '/.git') call &
-                            cmake_configured_build_dir(path_dirname(common), populated, &
-                            populated_found, fortran)
-                    end if
-                end if
+                call hook_cmake_build_dir(root, populated, populated_found, fortran)
                 if (populated_found .and. .not. fortran) then
                     message = 'configured CMake build enables no Fortran: '// &
                         populated//'; nothing to check'
@@ -304,7 +295,7 @@ contains
             ! dependency trees: the staged copy is pointed at them, because a
             ! commit never acquires a dependency. This runs before the backend
             ! is initialized so the effective configure arguments include it.
-            call cmake_configured_build_dir(root, populated, populated_found)
+            call hook_cmake_build_dir(root, populated, populated_found)
             if (populated_found) then
                 call cmake_populated_dependency_args(populated, &
                     'build/_deps', reuse, status, dependency_message)
@@ -557,6 +548,24 @@ contains
             end block
         end if
     end subroutine copy_log
+
+    subroutine hook_cmake_build_dir(root, build_dir, found, fortran)
+        character(len=*), intent(in) :: root
+        character(len=:), allocatable, intent(out) :: build_dir
+        logical, intent(out) :: found
+        logical, intent(out), optional :: fortran
+        character(len=:), allocatable :: common
+        integer :: status
+
+        call cmake_configured_build_dir(root, build_dir, found, fortran)
+        if (found) return
+        ! A fresh linked worktree can reuse dependencies populated by its main checkout.
+        call git_text(root, git_words('rev-parse', '--path-format=absolute', &
+            '--git-common-dir'), common, status)
+        if (status /= 0 .or. len(common) <= 5) return
+        if (common(len(common) - 4:) /= '/.git') return
+        call cmake_configured_build_dir(path_dirname(common), build_dir, found, fortran)
+    end subroutine hook_cmake_build_dir
 
     subroutine config_labels(root, name, labels)
         !! One regular expression per comma-separated entry of a Git config key.

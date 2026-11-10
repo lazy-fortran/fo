@@ -16,7 +16,7 @@ program test_hook_precommit
     type(string_list_t) :: args, environment, cmake_args
     integer(int64) :: started, finished, rate
     character(len=:), allocatable :: tag
-    logical :: downloaded
+    logical :: downloaded, exists
 
     call resolve_driver(driver)
     call make_scratch('fo-hook', scratch)
@@ -115,6 +115,22 @@ program test_hook_precommit
     call assert_process_ok(result, 'explicit slow label is deferred')
     call assert_contains(result%stdout, '"deferred":["test_answer"]', 'slow name reported')
     call assert_contains(result%stdout, '"fast_passed":0', 'slow test never passed implicitly')
+
+    ! A configure error can be surrounded by more status output than the report cap.
+    project = join_path(scratch, 'configure-error')
+    call write_text(project//'/CMakeLists.txt', 'cmake_minimum_required(VERSION 3.20)'//nl// &
+        'project(hook_configure_error LANGUAGES Fortran)'//nl// &
+        'message(STATUS "'//repeat('before ', 400)//'")'//nl// &
+        'message(SEND_ERROR "missing required dependency")'//nl// &
+        'message(STATUS "'//repeat('after ', 400)//'")'//nl)
+    call git([character(len=64) :: 'init', '-q'])
+    call git([character(len=64) :: 'add', 'CMakeLists.txt'])
+    call hook()
+    call assert_true(result%exit_code /= 0, 'configure failure blocks the hook')
+    call assert_contains(result%stdout, 'CMake Error at CMakeLists.txt:4', &
+        'configure report retains the first error location')
+    call assert_contains(result%stdout, 'missing required dependency', &
+        'configure report retains the error ahead of trailing status output')
 
     ! CTest's external command gives an independent deterministic budget oracle.
     project = join_path(scratch, 'cmake')
@@ -397,8 +413,29 @@ program test_hook_precommit
         '    if (dep_answer /= 7) stop 1'//nl//'end program app'//nl)
     call git([character(len=64) :: 'init', '-q'])
     call git([character(len=64) :: 'add', 'CMakeLists.txt', 'app.f90'])
+    call write_text(project//'/CMakePresets.json', &
+        '{"version":2,"configurePresets":[{"name":"default","generator":"Ninja",'// &
+        '"binaryDir":"${sourceDir}/build"}]}')
+    call git([character(len=64) :: 'add', 'CMakePresets.json'])
     call git([character(len=64) :: 'commit', '-qm', 'Synthetic FetchContent project'])
-    call configure_cmake(project)
+    cmake_args = string_list_t()
+    call list_add(cmake_args, '--preset')
+    call list_add(cmake_args, 'default')
+    call run_external('cmake', cmake_args, project, result, timeout_ms=180000)
+    call assert_process_ok(result, 'preset populates dependencies in main checkout')
+    call git([character(len=64) :: 'worktree', 'add', '-q', '../fresh-fetch-content'])
+    project = join_path(scratch, 'fresh-fetch-content')
+    inquire(file=project//'/build', exist=exists)
+    call assert_true(.not. exists, 'linked worktree has no build directory')
+    call write_text(project//'/app.f90', read_text(project//'/app.f90')// &
+        '! staged edit in the fresh worktree'//nl)
+    call git([character(len=64) :: 'add', 'app.f90'])
+    call hook()
+    call assert_process_ok(result, 'fresh worktree reuses main checkout dependencies')
+    call assert_contains(result%stdout, '"fast_passed":1', 'fresh worktree test ran')
+    inquire(file=project//'/build', exist=exists)
+    call assert_true(.not. exists, 'hook keeps the fresh worktree unconfigured')
+    project = join_path(scratch, 'fetch-content')
     call write_text(project//'/app.f90', 'program app'//nl// &
         '    use hook_dep_mod, only: dep_answer'//nl//'    implicit none'//nl// &
         '    if (dep_answer /= 7) stop 1'//nl//'    if (dep_answer < 7) stop 1'//nl// &

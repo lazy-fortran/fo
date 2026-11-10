@@ -78,7 +78,7 @@ contains
         type(string_t), allocatable, intent(out), optional :: scanned(:)
         character(len=1024) :: log_file
         character(len=:), allocatable :: text
-        integer :: exitcode, status
+        integer :: exitcode, status, error_start
 
         ierr = 0
         message = ''
@@ -100,7 +100,11 @@ contains
             message = 'CMake configure failed'
             call read_text_file_alloc(trim(log_file), text, status)
             if (status == 0) then
-                if (len(text) > 2000) text = '...'//text(len(text) - 1999:)
+                if (len(text) > 2000) then
+                    error_start = index(text, 'CMake Error')
+                    if (error_start > 0) text = text(error_start:)
+                    if (len(text) > 2000) text = text(:2000)//'...'
+                end if
                 message = message//new_line('a')//trim(text)
             end if
             call delete_tmpfile(trim(log_file))
