@@ -8,7 +8,7 @@ program test_gremlin_input_inventory
     use fo_gremlin_execution_view, only: execution_view_t, execution_view_create, &
         execution_view_release
     use fo_test_cli, only: resolve_driver, run_fo
-    use fo_test_harness, only: string_list_t, process_result_t, list_add
+    use fo_test_harness, only: string_list_t, process_result_t, list_add, make_symlink
     use fo_gremlin_generation, only: generation_context_t, generation_t, &
         generation_capture
     use fo_cache, only: cache_file_digest
@@ -62,9 +62,19 @@ program test_gremlin_input_inventory
     call write(trim(project)//'/src/cache/retained.f90', 'module retained_cache')
     call write(trim(project)//'/PLAN.md', 'not a build input')
 
+    call fs_make_dir(trim(project)//'/test/oracle/pixelcheck/.venv/bin')
+    call fs_make_dir(trim(project)//'/test/oracle/.cache')
+    call make_symlink('/unavailable/uv/python', &
+        trim(project)//'/test/oracle/pixelcheck/.venv/bin/python')
+    call write(trim(project)//'/test/oracle/.cache/ignored.f90', 'generated')
+
     call discover(initial, ierr, diagnostic)
     call require(ierr == 0, 'initial inventory: '//trim(diagnostic))
     call require(initial%complete, 'successful inventory is complete')
+    call require(.not. has_entry(initial, 'project', &
+        'test/oracle/.cache/ignored.f90', 'test-oracle'), &
+        'nested hidden cache sources are not implicit test inputs')
+
     call require(len_trim(initial%digest) > 0, 'inventory digest is present')
     call require(initial%root_count == 3, &
         'duplicate dependency paths share one physical root')
@@ -150,6 +160,23 @@ program test_gremlin_input_inventory
     call require(has_entry(runtime, 'project', 'cache/runtime.dat', &
         'runtime-oracle'), &
         'duplicate physical path retains its second role')
+    bad_declaration(1) = declarations(1)
+    bad_declaration(1)%relative_path = 'test/oracle/.cache/runtime.dat'
+    call write(trim(project)//'/test/oracle/.cache/runtime.dat', 'nested runtime')
+    call input_inventory_discover(trim(project), bad_declaration, runtime, ierr, &
+        diagnostic)
+    call require(ierr == 0, 'nested cache declaration: '//trim(diagnostic))
+    call require(has_entry(runtime, 'project', &
+        'test/oracle/.cache/runtime.dat', 'runtime-data'), &
+        'explicit input beneath a nested hidden cache is retained')
+    previous = runtime
+    call write(trim(project)//'/test/oracle/.cache/runtime.dat', 'changed runtime')
+    call input_inventory_discover(trim(project), bad_declaration, runtime, ierr, &
+        diagnostic)
+    call require(ierr == 0, 'changed nested cache declaration: '//trim(diagnostic))
+    call require(runtime%digest /= previous%digest, &
+        'explicit nested hidden cache content changes inventory identity')
+
     declarations(2)%writable_at_execution = .true.
     call input_inventory_discover(trim(project), declarations, runtime, ierr, &
         diagnostic)
@@ -271,7 +298,7 @@ contains
         original_digest = ''
         do i = 1, copied%entry_count
             if (copied%entries(i)%relative_path /= paths(1) .and. &
-                    copied%entries(i)%relative_path /= paths(2)) cycle
+                copied%entries(i)%relative_path /= paths(2)) cycle
             copied%entries(i)%role = 'cmake-project-input'
             if (copied%entries(i)%relative_path /= paths(2)) cycle
             original_digest = copied%entries(i)%content_digest
@@ -610,7 +637,7 @@ contains
         if (root_index == 0) return
         do i = 1, inventory%entry_count
             if (trim(inventory%entries(i)%root_alias) /= &
-                    trim(inventory%roots(root_index)%canonical_alias)) cycle
+                trim(inventory%roots(root_index)%canonical_alias)) cycle
             if (trim(inventory%entries(i)%relative_path) /= path) cycle
             if (trim(inventory%entries(i)%role) /= role) cycle
             has_entry = .true.

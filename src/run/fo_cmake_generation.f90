@@ -222,6 +222,25 @@ contains
                         help = key(7:len(key) - 9)//' compiler'
                 end if
             end if
+            ! project() changes a dependency's authored PATH cache entry to
+            ! STATIC. Replay only source roots already captured as dependencies.
+            if (kind == 'STATIC') then
+                source_key = .false.
+                if (len(key) > 11) then
+                    if (key(len(key) - 10:) == '_SOURCE_DIR') then
+                        call canonical_directory(value, normalized)
+                        do i = 1, n_roots
+                            if (index(labels(i), 'cmake-dependency:') /= 1) cycle
+                            if (trim(normalized) /= trim(roots(i))) cycle
+                            source_key = .true.
+                            value = trim(normalized)
+                            exit
+                        end do
+                    end if
+                end if
+                if (.not. source_key) cycle
+                kind = 'PATH'
+            end if
             if (kind /= 'BOOL' .and. kind /= 'STRING' .and. kind /= 'PATH' .and. &
                 kind /= 'FILEPATH' .and. kind /= 'INTERNAL') cycle
             if (key == 'CMAKE_INSTALL_PREFIX') cycle

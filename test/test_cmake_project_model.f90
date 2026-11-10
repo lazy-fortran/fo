@@ -48,7 +48,7 @@ program test_cmake_project_model
     call assert_true(model%complete, 'complete is set')
     call assert_true(model%finalized, 'model is finalized')
     call assert_equal_string(model%backend, 'cmake', 'backend')
-    call assert_equal_integer(model%n_targets, 4, 'four targets')
+    call assert_equal_integer(model%n_targets, 5, 'five targets')
     call check_targets()
     call check_layers()
     call check_cases()
@@ -81,6 +81,7 @@ contains
             'cmake_minimum_required(VERSION 3.20)'//nl// &
             'project(pm Fortran)'//nl// &
             'add_subdirectory("'//dependency//'" dep_build)'//nl// &
+            'add_custom_target(max_index-case)'//nl// &
             'add_subdirectory(core)'//nl// &
             'add_subdirectory(model)'//nl// &
             'add_executable(exe main.f90)'//nl// &

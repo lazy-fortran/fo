@@ -3,7 +3,7 @@ program test_atomic_link_artifacts
     use fo_fs, only: fs_identity
     use fo_build_tree, only: native_output_dir
     use fo_test_harness, only: string_list_t, process_result_t, list_add
-    use fo_test_harness, only: make_scratch, join_path, write_text, remove_tree
+    use fo_test_harness, only: make_scratch, join_path, write_text
     use fo_test_harness, only: remove_path, file_exists, assert_process_ok
     use fo_test_harness, only: assert_true, assert_equal_integer, assert_equal_string
     use fo_test_harness, only: assert_contains
@@ -41,6 +41,7 @@ program test_atomic_link_artifacts
     real_ar = find_tool('ar')
     call write_fixture()
     call install_archiver()
+    call test_failed_readiness()
 
     call run_build('normal', result)
     call assert_process_ok(result, 'cold archive build succeeds')
@@ -67,9 +68,10 @@ program test_atomic_link_artifacts
     args = words(['build'])
     env = build_environment('delay')
     call spawn_process(command(driver, args), project, child, env)
-    call wait_for(marker, 100, child, found)
+    call wait_for(marker, child, found, status)
     call assert_true(found, 'archiver reached partial-output point')
     call assert_file_exists(marker, 'archiver reached partial-output point')
+    if (.not. found) call readiness_failed(status)
     call run_build('normal', result)
     call assert_process_ok(result, 'concurrent build consumer succeeds')
     call poll_until(child, status)
@@ -88,9 +90,10 @@ program test_atomic_link_artifacts
     args = words(['build'])
     env = build_environment('hold')
     call spawn_process(command(driver, args), project, child, env)
-    call wait_for(marker, 100, child, found)
+    call wait_for(marker, child, found, status)
     call assert_true(found, 'partial archiver entered hold mode')
     call assert_file_exists(marker, 'partial archiver entered hold mode')
+    if (.not. found) call readiness_failed(status)
     call terminate_owned(child, status)
     call assert_equal_integer(status, -15, 'interrupted producer exits by SIGTERM')
     call assert_equal_string(archive_snapshot(), archive_state_before, &
@@ -118,8 +121,7 @@ program test_atomic_link_artifacts
         'recovered archive contains the correct objects')
     call test_profile_copy()
     if (child > 0) call cleanup_child()
-    call remove_tree(scratch)
-    call finish_assertions()
+    call finish_assertions(retain_failed_scratch=.true.)
     write(*, '(a)') 'atomic-link-artifacts: warm, corrupt, concurrent and interrupted paths pass'
 
 contains
@@ -239,6 +241,8 @@ contains
 
         call install_fake_tool(fake_ar, &
             'if $ARG1 = rcs append $FO_TEST_AR_LOG "$FO_TEST_AR_MODE $PPID $ARG2\n"' // lf // &
+            when_rcs // 'startup-fail exit 37' // lf // &
+            when_rcs // 'delay sleep 6000' // lf // &
             when_rcs // 'delay touch $FO_TEST_MARKER' // lf // &
             when_rcs // 'delay sleep 1000' // lf // &
             when_rcs // 'hold write $ARG2 "partial\n"' // lf // &
@@ -356,23 +360,65 @@ contains
         end if
     end function command
 
-    subroutine wait_for(path, limit, process_id, found)
+    subroutine test_failed_readiness()
+        integer :: failed_child, exit_status
+        logical :: reached
+
+        call spawn_process(command(fake_ar, words([character(len=16) :: &
+            'rcs', 'unused.a'])), project, failed_child, &
+            build_environment('startup-fail'))
+        call wait_for(marker, failed_child, reached, exit_status)
+        call assert_true(.not. reached, 'failed producer never reaches marker')
+        call assert_equal_integer(exit_status, 37, 'readiness reports early producer exit')
+        call assert_equal_integer(failed_child, -1, 'early producer is already reaped')
+    end subroutine test_failed_readiness
+
+    subroutine wait_for(path, process_id, found, exit_status)
         character(len=*), intent(in) :: path
-        integer, intent(in) :: limit
         integer, intent(inout) :: process_id
         logical, intent(out) :: found
-        integer :: i, ignored_status
+        integer, intent(out) :: exit_status
+        integer(c_long_long) :: now, deadline, rate
 
+        ! Readiness includes compiling the producer; it is not a build speed limit.
+        call system_clock(now, rate)
+        deadline = now + 30_c_long_long * rate
         found = .false.
-        do i = 1, limit
+        exit_status = 999
+        do
             if (file_exists(path)) then
                 found = .true.
                 return
             end if
+            if (process_id <= 0) then
+                exit_status = -999
+                return
+            end if
+            call poll_process(process_id, exit_status)
+            if (exit_status /= 999) then
+                if (exit_status == -999 .or. exit_status == -998) then
+                    call terminate_owned(process_id, exit_status)
+                else
+                    process_id = -1
+                end if
+                return
+            end if
+            call system_clock(now)
+            if (now >= deadline) exit
             call pause_briefly()
         end do
-        call terminate_owned(process_id, ignored_status)
+        call terminate_owned(process_id, exit_status)
     end subroutine wait_for
+
+    subroutine readiness_failed(exit_status)
+        integer, intent(in) :: exit_status
+
+        write(*, '(a)') 'PRODUCER_READINESS_MARKER ' // marker
+        write(*, '(a,i0)') 'PRODUCER_READINESS_STATUS ', exit_status
+        write(*, '(a)') 'PRODUCER_READINESS_SCRATCH ' // scratch
+        call finish_assertions(retain_failed_scratch=.true.)
+        error stop 'producer did not reach required archiver marker'
+    end subroutine readiness_failed
 
     subroutine pause_briefly()
         type(string_list_t) :: command
