@@ -216,7 +216,7 @@ contains
         type(cmake_context_t), intent(inout) :: context
         character(len=4096), allocatable :: paths(:)
         character(:), allocatable :: input
-        integer :: n_paths, collect_status, capacity
+        integer :: n_paths, collect_status, capacity, i, basename
 
         context%reported_generator = ''
         context%reply_index = ''
@@ -238,9 +238,15 @@ contains
             allocate (paths(capacity))
         end do
         if (n_paths < 1) return
-        context%reply_index = trim(paths(n_paths))
-        call cmake_context_read_file(trim(paths(n_paths)), input)
-        if (allocated(input)) call parse_reply(context, input)
+        do i = n_paths, 1, -1
+            basename = index(trim(paths(i)), '/', back=.true.) + 1
+            ! The collector matches infixes, including target names with index-.
+            if (index(paths(i)(basename:), 'index-') /= 1) cycle
+            context%reply_index = trim(paths(i))
+            call cmake_context_read_file(trim(paths(i)), input)
+            if (allocated(input)) call parse_reply(context, input)
+            return
+        end do
     end subroutine cmake_context_read_reply
 
     subroutine parse_reply(context, input)
