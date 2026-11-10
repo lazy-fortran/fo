@@ -103,8 +103,9 @@ contains
         profile_a_hit_log = temporary_root()//'/fo-self-refresh-oracle-'// &
             trim(pid_text)//'/profile-a-hit.log'
         install_bin = trim(prefix)//'/bin/fo'
-        write (profile_a_flags, '(a,i0)') '-O3 -fmax-errors=', pid + 1
-        write (profile_b_flags, '(a,i0)') '-O0 -fmax-errors=', pid + 2
+        ! Distinct profiles exercise A/B/A without discarding reusable actions.
+        profile_a_flags = '-O3 -fmax-errors=1'
+        profile_b_flags = '-O0 -fmax-errors=2'
 
         call fs_remove_tree(temporary_root()//'/fo-self-refresh-oracle-'// &
             trim(pid_text))
