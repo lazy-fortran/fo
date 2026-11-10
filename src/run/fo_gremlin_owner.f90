@@ -1595,6 +1595,8 @@ contains
             failure_event = 'test_flaky'
         case ('TIMEOUT')
             failure_event = 'test_timeout'
+        case ('LIMIT')
+            failure_event = 'test_limit'
         case ('INFRA_ERROR', 'INFRA')
             if (len_trim(current_case) > 0 .and. trim(current_case) /= '<build>') &
                 failure_event = 'test_infra_error'

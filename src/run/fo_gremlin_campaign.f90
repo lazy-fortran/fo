@@ -975,7 +975,7 @@ contains
             call gremlin_json_field(records(i)%json, 'seed', seed_text)
             if (.not. any(inventory(:n_inventory) == case_name)) cycle
             if (status_name /= 'PASS' .and. status_name /= 'FAIL' .and. &
-                status_name /= 'TIMEOUT') cycle
+                status_name /= 'TIMEOUT' .and. status_name /= 'LIMIT') cycle
             read(seed_text, *, iostat=ios) seed_value
             if (ios == 0) cursor_seed = seed_value
             call move_to_recent(case_name, debt, n_debt)

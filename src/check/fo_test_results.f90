@@ -204,7 +204,7 @@ contains
             exit_local, secs_str, iostat)
         if (iostat /= 0) return
         select case (status_local)
-        case ('PASS', 'FAIL', 'TIMEOUT', 'SKIP', 'FLAKY', 'UNTESTED', 'REUSED')
+        case ('PASS', 'FAIL', 'TIMEOUT', 'LIMIT', 'SKIP', 'FLAKY', 'UNTESTED', 'REUSED')
         case default
             iostat = 1
             return
@@ -505,6 +505,7 @@ contains
             ! that killed it (CPU budget or wall-clock cap).
             if (trim(entries(i)%status) == 'FAIL' .or. &
                 trim(entries(i)%status) == 'TIMEOUT' .or. &
+                trim(entries(i)%status) == 'LIMIT' .or. &
                 trim(entries(i)%status) == 'FLAKY') then
                 call extract_captured_stdout(source_log, entries(i)%name, captured)
                 if (len(captured) > 0) then
@@ -791,7 +792,7 @@ contains
                         json_escape_string(entries(i)%reason)//'"'
                 end if
                 select case (trim(entries(i)%status))
-                case ('FAIL', 'TIMEOUT', 'FLAKY')
+                case ('FAIL', 'TIMEOUT', 'LIMIT', 'FLAKY')
                     captured = ''
                     if (len(source_log) > 0 .and. n_listed <= MAX_EXCERPT_CASES) &
                         call extract_captured_stdout(source_log, entries(i)%name, &
@@ -850,7 +851,7 @@ contains
                 ! Counted by count_reused: neither run nor skipped.
             case ('FLAKY')
                 n_flaky = n_flaky + 1
-            case ('FAIL', 'TIMEOUT')
+            case ('FAIL', 'TIMEOUT', 'LIMIT')
                 n_fail = n_fail + 1
             case ('UNTESTED')
                 n_untested = n_untested + 1

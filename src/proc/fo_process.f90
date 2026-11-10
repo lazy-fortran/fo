@@ -19,11 +19,14 @@ module fo_process
     public :: process_run_argv_logged, argv_push, argv_push_split
     public :: argv_push_split_nl
     public :: TIMEOUT_NONE, TIMEOUT_CPU, TIMEOUT_WALL, TIMEOUT_UNMEASURED
+    public :: TIMEOUT_MEMORY, process_set_memory_limit
     integer, parameter :: C_PATH_LEN = 4096
     integer, parameter :: C_ARG_LEN = 4096
     !! Which limit killed a budgeted child (process_run_argv_logged).
     integer, parameter :: TIMEOUT_NONE = 0, TIMEOUT_CPU = 1, TIMEOUT_WALL = 2
     integer, parameter :: TIMEOUT_UNMEASURED = 3
+    !! The test's process tree exceeded its memory limit (#364).
+    integer, parameter :: TIMEOUT_MEMORY = 4
 
     type :: process_scope_t
         private
@@ -190,6 +193,11 @@ module fo_process
             import :: c_long_long
             integer(c_long_long), intent(out) :: peak_rss_kb, write_bytes
         end subroutine fo_c_last_run_meter
+
+        subroutine fo_c_set_memory_limit(limit_kb) bind(C, name='fo_c_set_memory_limit')
+            import :: c_long_long
+            integer(c_long_long), value :: limit_kb
+        end subroutine fo_c_set_memory_limit
 
         subroutine fo_c_exit(code) bind(C, name='fo_c_exit')
             import :: c_int
@@ -417,6 +425,14 @@ contains
         if (present(cpu_seconds)) cpu_seconds = real(cpu_ms) / 1000.0
         if (present(wall_seconds)) wall_seconds = real(wall_ms) / 1000.0
     end subroutine process_run_argv_logged
+
+    subroutine process_set_memory_limit(limit_kb)
+        !! Memory limit (kB of summed peak resident memory of the process
+        !! tree, 0 = none) of the next budgeted run on this thread.
+        integer(c_long_long), intent(in) :: limit_kb
+
+        call fo_c_set_memory_limit(limit_kb)
+    end subroutine process_set_memory_limit
 
     subroutine process_last_run_meter(peak_rss_kb, write_bytes)
         !! Peak resident memory (kB) and bytes written to storage of the last

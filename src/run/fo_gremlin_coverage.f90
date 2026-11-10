@@ -673,7 +673,7 @@ contains
                 view%fail_count = view%fail_count + 1
                 if (.not. is_slow_test(trim(state%inventory(i)))) &
                     view%ordinary_failure_count = view%ordinary_failure_count + 1
-            case ('TIMEOUT')
+            case ('TIMEOUT', 'LIMIT')
                 view%timeout_count = view%timeout_count + 1
                 if (.not. is_slow_test(trim(state%inventory(i)))) &
                     view%ordinary_timeout_count = view%ordinary_timeout_count + 1
@@ -853,7 +853,7 @@ contains
         character(len=*), intent(in) :: outcome
         select case (trim(outcome))
         case ('UNKNOWN', 'RUNNING', 'CANCELLED', 'PASS', 'SKIP', 'FAIL', 'TIMEOUT', &
-                'FLAKY', 'INFRA', 'INFRA_ERROR')
+                'LIMIT', 'FLAKY', 'INFRA', 'INFRA_ERROR')
             outcome_valid = .true.
         case default
             outcome_valid = .false.
@@ -863,7 +863,7 @@ contains
     pure logical function outcome_attempted(outcome)
         character(len=*), intent(in) :: outcome
         select case (trim(outcome))
-        case ('PASS', 'SKIP', 'FAIL', 'TIMEOUT', 'FLAKY', 'INFRA', 'INFRA_ERROR')
+        case ('PASS', 'SKIP', 'FAIL', 'TIMEOUT', 'LIMIT', 'FLAKY', 'INFRA', 'INFRA_ERROR')
             outcome_attempted = .true.
         case default
             outcome_attempted = .false.

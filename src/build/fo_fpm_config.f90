@@ -169,6 +169,8 @@ module fo_fpm_config
         ! FO_TEST_TIMEOUT, FO_SLOW_TEST_TIMEOUT and FO_TEST_WALL_TIMEOUT
         ! environment variables override these per invocation.
         integer :: test_timeout = 0
+        !! [extra.fo] test-memory-limit as written (e.g. 4G); '' = none.
+        character(len=32) :: test_memory_limit = ''
         integer :: slow_test_timeout = 0
         integer :: test_wall_timeout = 0
         ! [extra.fo] test-retries and slow-timeout = { period, terminate-after }
@@ -375,6 +377,7 @@ contains
         c%dependency_parse_error = ''
         c%manifest_parse_error = ''
         c%test_timeout = 0
+        c%test_memory_limit = ''
         c%slow_test_timeout = 0
         c%test_wall_timeout = 0
         c%test_retries = -1
@@ -1529,6 +1532,9 @@ contains
         case ('dispatcher')
             call extract_string(val, str_val)
             config%dispatcher = trim(str_val)
+        case ('test-memory-limit')
+            call extract_string(val, str_val)
+            config%test_memory_limit = trim(str_val)
         case ('debug-info')
             call extract_string(val, str_val)
             select case (trim(str_val))

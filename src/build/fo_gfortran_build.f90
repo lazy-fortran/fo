@@ -19,6 +19,8 @@ module fo_gfortran_build
     use fo_build_tree, only: native_output_dir, native_profiles_dir, &
         native_record_profile
     use fo_gremlin_execution_view, only: execution_view_copy_app_outputs
+    use fo_test_budget, only: test_memory_limit_kb
+    use fo_process, only: process_set_memory_limit, TIMEOUT_MEMORY
     use fo_test_budget, only: test_timeout_seconds, test_budget_seconds, &
         test_wall_cap_seconds, timeout_detail_into, test_policy, test_strict_flaky
     use fo_test_cases, only: CASE_SEP, case_listing_t, case_list, &
@@ -96,6 +98,8 @@ module fo_gfortran_build
         real :: cpu_secs = -1.0
         !! Peak resident memory (kB) and bytes written; -1 where unknown.
         integer(8) :: peak_kb = -1, write_bytes = -1
+        !! The limit that ended a run with exit 124 (fo_process TIMEOUT_*).
+        integer :: timeout_kind = 0
         logical :: flaky = .false.
         logical :: ran = .false.
         !! Project-relative source, for the test-group match of its policy.
@@ -1962,13 +1966,16 @@ contains
         call run_test_binary(execution_cwd, test%bin, test%args, &
             test%log, config, is_slow_test(test%name), test%exit, test%cpu_secs, &
             case_env=test%case_env, slow_period=test%slow_period, &
-            slow_after=test%slow_after, label=trim(test%name))
+            slow_after=test%slow_after, label=trim(test%name), &
+            timeout_kind=test%timeout_kind)
         call process_last_run_meter(test%peak_kb, test%write_bytes)
         call system_clock(clk1, clk_rate)
         test%ran = .true.
         if (clk_rate > 0) test%secs = real(clk1 - clk0) / real(clk_rate)
         status_text = 'PASS'
-        if (test%exit == 124) then
+        if (test%exit == 124 .and. test%timeout_kind == TIMEOUT_MEMORY) then
+            status_text = 'LIMIT'
+        else if (test%exit == 124) then
             status_text = 'TIMEOUT'
         else if (test%exit /= 0) then
             status_text = 'fail (retrying)'
@@ -2032,6 +2039,10 @@ contains
                 call append_flaky_status(log_file, tests(i)%name)
                 call write_test_result_line(log_file, tests(i)%name, 'FLAKY', '-', &
                     tests(i)%secs)
+            else if (tests(i)%exit == 124 .and. &
+                    tests(i)%timeout_kind == TIMEOUT_MEMORY) then
+                call write_test_result_line(log_file, tests(i)%name, 'LIMIT', &
+                    '124', tests(i)%secs)
             else if (tests(i)%exit == 124) then
                 call write_test_result_line(log_file, tests(i)%name, 'TIMEOUT', &
                     '124', tests(i)%secs)
@@ -4196,7 +4207,7 @@ contains
 
     subroutine run_test_binary(execution_cwd, bin_path, arg_lines, log_file, &
             config, slow, exitcode, cpu_seconds, case_env, slow_period, &
-            slow_after, label)
+            slow_after, label, timeout_kind)
         !! Run one test binary under its CPU budget and wall-clock cap (see
         !! fo_test_budget). A timeout returns 124 and appends a line naming the
         !! limit that fired to the test's own log. cpu_seconds is the CPU time
@@ -4211,6 +4222,8 @@ contains
         real, intent(out), optional :: cpu_seconds
         character(len=*), intent(in), optional :: case_env, label
         integer, intent(in), optional :: slow_period, slow_after
+        !! Which limit ended a run that returned 124 (fo_process TIMEOUT_*).
+        integer, intent(out), optional :: timeout_kind
 
         character(len=:), allocatable :: packed, extra_env, team_env, detail
         character(len=512) :: test_tmp
@@ -4237,6 +4250,7 @@ contains
         call make_tmpfile('fo-test-tmp', test_tmp)
         call fs_make_dir(trim(test_tmp))
         call team_openmp_env_into(team_env)
+        call process_set_memory_limit(test_memory_limit_kb(config))
         if (period > 0 .and. present(label)) then
             call process_run_argv_logged(execution_cwd, packed, n_args, log_file, &
                 .true., wall_cap, exitcode, env_extra='TMPDIR='//trim(test_tmp)// &
@@ -4252,6 +4266,7 @@ contains
         end if
         if (exitcode == 0) call fs_remove_tree(trim(test_tmp))
         if (present(cpu_seconds)) cpu_seconds = cpu_s
+        if (present(timeout_kind)) timeout_kind = kind
         if (exitcode /= 124) return
         open (newunit=u, file=trim(log_file), position='append', &
             status='unknown', action='write', iostat=ios)

@@ -333,7 +333,7 @@ contains
             k = test_index_find(recorded, model%cases(i)%name)
             if (k == 0) cycle
             local%failed(i) = recorded%status(k)%s == 'FAIL' .or. &
-                recorded%status(k)%s == 'TIMEOUT'
+                recorded%status(k)%s == 'TIMEOUT' .or. recorded%status(k)%s == 'LIMIT'
         end do
     end subroutine attach_recorded_failures
 

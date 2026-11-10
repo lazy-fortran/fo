@@ -587,12 +587,18 @@ struct run_budget {
     const char *slow_label; /* in: SLOW progress line label, NULL for none */
     long long peak_rss_kb; /* out: peak resident memory, -1 if unknown */
     long long write_bytes; /* out: bytes written to storage, -1 if unknown */
+    long long memory_limit_kb; /* in: kill above this summed peak, 0 = none */
 };
 
 /* The meter of the last budgeted run on this thread (#364): tests run on
    several threads at once, and each reads its own run back. */
 static __thread long long last_peak_rss_kb = -1;
 static __thread long long last_write_bytes = -1;
+static __thread long long next_memory_limit_kb = 0;
+
+void fo_c_set_memory_limit(long long limit_kb) {
+    next_memory_limit_kb = limit_kb > 0 ? limit_kb : 0;
+}
 
 void fo_c_last_run_meter(long long *peak_rss_kb, long long *write_bytes) {
     *peak_rss_kb = last_peak_rss_kb;
@@ -1572,6 +1578,21 @@ static int run_argv(const char *cwd, char *const argv[], const char *log_file,
             }
             if (budget != NULL && timespec_at_or_after(&now, &meter_check)) {
                 meter_sample(budget, accounted_pid);
+                if (budget->memory_limit_kb > 0 &&
+                    budget->peak_rss_kb > budget->memory_limit_kb) {
+                    record_timeout(budget, 4, child_cpu_ms(accounted_pid), &start, &now);
+                    int cleanup_error = 0;
+#if defined(__APPLE__) || defined(__linux__)
+                    if (lifeline_monitor)
+                        cleanup_error = stop_lifeline_monitor(pid, accounted_pid,
+                                                              target_start, &status);
+                    else
+#endif
+                        kill_group_and_reap(pid, &status, isolated_group);
+                    if (pid_fd >= 0) close(pid_fd);
+                    if (report_fd >= 0) close(report_fd);
+                    return cleanup_error == 0 ? 124 : 126;
+                }
                 if (meter_step_ms < METER_POLL_MS) meter_step_ms *= 2;
                 meter_check = now;
                 add_milliseconds(&meter_check, meter_step_ms);
@@ -1977,7 +1998,8 @@ void fo_c_run_argv_budget(const char *cwd, const char *args, int args_len,
                           const char *env_extra, int *exitcode,
                           int *timeout_kind, long long *cpu_ms,
                           long long *wall_ms) {
-    struct run_budget budget = {cpu_budget_s, 0, -1, 0, NULL, -1, -1};
+    struct run_budget budget = {cpu_budget_s, 0, -1, 0, NULL, -1, -1,
+                                next_memory_limit_kb};
 
     run_packed_argv(cwd, args, args_len, n_args, log_file, append, timeout_s,
                     heartbeat_s, env_extra, &budget, exitcode);
@@ -1997,7 +2019,8 @@ void fo_c_run_argv_slow(const char *cwd, const char *args, int args_len,
                         const char *slow_label, const char *env_extra,
                         int *exitcode, int *timeout_kind, long long *cpu_ms,
                         long long *wall_ms) {
-    struct run_budget budget = {cpu_budget_s, 0, -1, 0, slow_label, -1, -1};
+    struct run_budget budget = {cpu_budget_s, 0, -1, 0, slow_label, -1, -1,
+                                next_memory_limit_kb};
 
     run_packed_argv(cwd, args, args_len, n_args, log_file, append, timeout_s,
                     slow_period_s, env_extra, &budget, exitcode);

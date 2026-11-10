@@ -30,6 +30,26 @@ or per invocation with `FO_TEST_TIMEOUT`, `FO_SLOW_TEST_TIMEOUT` and
 `FO_TEST_WALL_TIMEOUT`, which take precedence. CPU time is read from `/proc` on
 Linux; on other systems the budget is a wall-clock limit.
 
+## Memory and writes
+
+Every case run by fo reports `cpu_seconds`, `peak_rss_kb` and `write_bytes` in
+`fo test --json=full`. On Linux the peak is the sum of each process's peak
+resident memory since it started its program, sampled over the test's process
+tree (2 ms after the start, then less often, at most every 200 ms), plus the
+kernel's peak where it exceeds fo's own; bytes written are writes to storage,
+so a test writing only to tmpfs reports none. On macOS only the kernel's peak
+is used and bytes written are unknown. Cases run by CTest are not metered yet.
+
+A memory limit ends a case whose summed peak exceeds it, with the verdict
+`LIMIT`, which is not retried:
+
+```toml
+[extra.fo]
+test-memory-limit = "4G"   # K, M, G or T; no suffix means bytes
+```
+
+`FO_TEST_MEMORY_LIMIT` takes precedence. There is no limit by default.
+
 ## Cases
 
 An executable that implements the fo listing protocol is run case by case.

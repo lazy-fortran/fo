@@ -169,7 +169,7 @@ contains
             case ('PASS')
                 call test_index_set(recorded, model%cases(c)%name, 'PASS', &
                     trim(digests(c)))
-            case ('FAIL', 'TIMEOUT', 'FLAKY')
+            case ('FAIL', 'TIMEOUT', 'LIMIT', 'FLAKY')
                 call test_index_set(recorded, model%cases(c)%name, &
                     trim(entries(i)%status), '')
             end select

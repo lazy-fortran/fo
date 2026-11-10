@@ -258,6 +258,7 @@ contains
                     input%failure_observed = .true.
                 if (trim(receipt_generation) /= trim(active_id)) cycle
                 if (have_coverage .and. (trim(status_name) == 'TIMEOUT' .or. &
+                    trim(status_name) == 'LIMIT' .or. &
                     trim(status_name) == 'INFRA' .or. &
                     trim(status_name) == 'INFRA_ERROR')) then
                     call gremlin_json_field(records(i)%json, 'coverage_epoch', raw)
@@ -702,7 +703,7 @@ contains
             call gremlin_json_field(records(i)%json, 'oracle_identity', identity)
             call gremlin_json_field(records(i)%json, 'completion_id', completion)
             if (verdict /= 'PASS' .and. verdict /= 'FAIL' .and. &
-                verdict /= 'TIMEOUT') cycle
+                verdict /= 'TIMEOUT' .and. verdict /= 'LIMIT') cycle
             j = 1
             do while (j <= n)
                 if (entries(j)%name == name) exit
@@ -942,7 +943,8 @@ contains
         character(len=*), intent(in) :: status
 
         status_is_failure = status == 'FAIL' .or. status == 'BUILD_FAIL' .or. &
-            status == 'TIMEOUT' .or. status == 'FLAKY' .or. status == 'INFRA_ERROR'
+            status == 'TIMEOUT' .or. status == 'LIMIT' .or. status == 'FLAKY' .or. &
+            status == 'INFRA_ERROR'
     end function status_is_failure
 
     logical function coverage_outcome(status)
@@ -1064,6 +1066,8 @@ contains
                             outcome = 'FAIL'
                         case ('timeout')
                             outcome = 'TIMEOUT'
+                        case ('limit')
+                            outcome = 'LIMIT'
                         case ('flaky')
                             outcome = 'FLAKY'
                         case default

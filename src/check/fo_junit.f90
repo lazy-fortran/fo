@@ -71,7 +71,7 @@ contains
                 xml_escape(entries(i)%name)//'" time="'// &
                 seconds_text(real(entries(i)%seconds, real64))//'"'
             select case (trim(entries(i)%status))
-            case ('FAIL', 'TIMEOUT')
+            case ('FAIL', 'TIMEOUT', 'LIMIT')
                 if (trim(entries(i)%status) == 'FAIL') then
                     n_fail = n_fail + 1
                 else
@@ -135,7 +135,7 @@ contains
         character(len=:), allocatable :: name
 
         name = 'failure'
-        if (trim(status) == 'TIMEOUT') name = 'error'
+        if (trim(status) == 'TIMEOUT' .or. trim(status) == 'LIMIT') name = 'error'
     end function element
 
     function xml_escape(text) result(out)

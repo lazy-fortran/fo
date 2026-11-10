@@ -10,12 +10,12 @@ module fo_test_budget
     !! [extra.fo], then the default.
     use fo_fpm_config, only: fpm_config_t
     use fo_pattern, only: pattern_glob
-    use fo_process, only: TIMEOUT_CPU, TIMEOUT_WALL, TIMEOUT_UNMEASURED
+    use fo_process, only: TIMEOUT_CPU, TIMEOUT_WALL, TIMEOUT_UNMEASURED, TIMEOUT_MEMORY
     implicit none
     private
 
     public :: test_timeout_seconds, slow_test_timeout_seconds
-    public :: test_budget_seconds, test_wall_cap_seconds
+    public :: test_budget_seconds, test_wall_cap_seconds, test_memory_limit_kb
     public :: ctest_default_timeout_seconds
     public :: timeout_detail, timeout_detail_into
     public :: test_policy, test_strict_flaky, test_retries_override
@@ -214,6 +214,9 @@ contains
                 write (buf, '(a,i0,a)') 'wall-clock cap of ', wall_cap, &
                     ' s exceeded; test-process CPU is unavailable'
             end if
+        case (TIMEOUT_MEMORY)
+            write (buf, '(a)') 'memory limit exceeded (the summed peak resident '// &
+                'memory of the test processes; FO_TEST_MEMORY_LIMIT, test-memory-limit)'
         case (TIMEOUT_UNMEASURED)
             write (buf, '(a,i0,a)') 'budget of ', budget, ' s exceeded in wall '// &
                 'time (child CPU time is not measurable on this platform)'
@@ -222,6 +225,47 @@ contains
         end select
         text = trim(buf)
     end subroutine timeout_detail_into
+
+    integer(8) function test_memory_limit_kb(config) result(limit)
+        !! Memory limit of a test in kB, 0 = none: FO_TEST_MEMORY_LIMIT, then
+        !! [extra.fo] test-memory-limit, each a number with an optional K, M,
+        !! G or T suffix (1024-based; no suffix means bytes).
+        type(fpm_config_t), intent(in), optional :: config
+        character(len=64) :: text
+        integer :: status
+
+        limit = 0
+        if (present(config)) limit = size_kb(config%test_memory_limit)
+        call get_environment_variable('FO_TEST_MEMORY_LIMIT', text, status=status)
+        if (status == 0 .and. len_trim(text) > 0) limit = size_kb(text)
+    end function test_memory_limit_kb
+
+    integer(8) function size_kb(text) result(kb)
+        character(len=*), intent(in) :: text
+        character(len=64) :: value
+        integer(8) :: number, scale
+        integer :: n, ios
+
+        kb = 0
+        value = adjustl(text)
+        n = len_trim(value)
+        if (n == 0) return
+        scale = 1
+        select case (value(n:n))
+        case ('K', 'k')
+            scale = 1024_8
+        case ('M', 'm')
+            scale = 1024_8**2
+        case ('G', 'g')
+            scale = 1024_8**3
+        case ('T', 't')
+            scale = 1024_8**4
+        end select
+        if (scale > 1) n = n - 1
+        read (value(1:n), *, iostat=ios) number
+        if (ios /= 0 .or. number <= 0) return
+        kb = max(1_8, number*scale/1024_8)
+    end function size_kb
 
     subroutine environment_seconds(name, seconds)
         !! Replace seconds by a positive integer environment value, if set.

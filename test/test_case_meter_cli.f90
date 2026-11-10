@@ -2,11 +2,13 @@ program test_case_meter_cli
     !! Cost of each test case in the JSON report (#364): a case that touches
     !! 300 MB and writes 8 MB to a file reports at least that peak resident
     !! memory and, on Linux outside tmpfs, those bytes written; a trivial case
-    !! reports far less memory. Runs the driver named by FO.
+    !! reports far less memory. Under a 100 MB limit from [extra.fo]
+    !! test-memory-limit the large case alone ends as LIMIT, and
+    !! FO_TEST_MEMORY_LIMIT overrides the manifest. Runs the driver named by FO.
     use fo_test_harness, only: process_result_t, string_list_t, list_add
     use fo_test_harness, only: make_scratch, join_path, write_text, read_text
     use fo_test_harness, only: remove_tree, assert_equal_integer, assert_true
-    use fo_test_harness, only: finish_assertions
+    use fo_test_harness, only: finish_assertions, assert_equal_string
     use fo_test_cli, only: resolve_driver, run_fo
     use fo_test_json, only: json_value_t, json_parse, json_member, json_element
     use fo_test_json, only: json_size, json_string_value, json_number_value
@@ -78,10 +80,45 @@ program test_case_meter_cli
         call assert_true(heavy_written >= 8.0d6, &
             'the case that writes 8 MB reports those bytes: '//result%stdout)
     end if
+
+    call write_text(join_path(project, 'fpm.toml'), 'name = "meter"'//nl// &
+        '[extra.fo]'//nl//'test-memory-limit = "100M"'//nl)
+    call run_fo(driver, arguments, project, join_path(scratch, 'cache'), result, &
+        env, 240000)
+    call assert_true(result%exit_code /= 0, 'a case over its memory limit fails')
+    call assert_equal_string(status_of('meter_heavy'), 'limit', &
+        'the case over the limit ends as LIMIT: '//result%stdout)
+    call assert_equal_string(status_of('meter_light'), 'pass', &
+        'the small case still passes: '//result%stdout)
+
+    call list_add(env, 'FO_TEST_MEMORY_LIMIT=1G')
+    call run_fo(driver, arguments, project, join_path(scratch, 'cache'), result, &
+        env, 240000)
+    call assert_equal_integer(result%exit_code, 0, &
+        'FO_TEST_MEMORY_LIMIT overrides the manifest: '//result%stdout//result%stderr)
     call remove_tree(scratch)
     call finish_assertions()
 
 contains
+
+    function status_of(name) result(status)
+        character(len=*), intent(in) :: name
+        character(:), allocatable :: status, text
+        type(json_value_t) :: parsed, cases, item
+        logical :: ok
+        integer :: k
+
+        status = 'missing'
+        call json_parse(result%stdout, parsed, ok, text)
+        if (.not. ok) return
+        cases = json_member(parsed, 'tests')
+        do k = 1, json_size(cases)
+            item = json_element(cases, k)
+            if (json_string_value(json_member(item, 'name')) == name) &
+                status = json_string_value(json_member(item, 'status'))
+        end do
+    end function status_of
+
 
     logical function on_tmpfs(path)
         !! The longest mount point of /proc/self/mounts that contains path
