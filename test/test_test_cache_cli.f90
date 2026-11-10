@@ -98,6 +98,10 @@ contains
         call assert_equal_integer(result%exit_code, 0, 'listed case runs: '// &
             result%stdout//result%stderr)
         call expect_runs(a0, b0, c0 + 1, 'only the listed case runs')
+        call assert_contains(result%stdout, 'plan targets: ', &
+            'the run names the targets it builds: '//result%stdout)
+        call assert_not_contains(result%stdout, 'case_a', &
+            'the targets of unlisted cases are not built: '//result%stdout)
 
         call write_text(join_path(project, 'src/mod_a.f90'), &
             'module mod_a'//nl//'implicit none'//nl//'integer :: planned'//nl// &

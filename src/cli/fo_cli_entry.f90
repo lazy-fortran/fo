@@ -1570,6 +1570,13 @@ contains
                 call delete_tmpfile(test_log)
                 return
             end if
+            if (len(cases_path) > 0) then
+                ! The planner sees which targets the listed cases build.
+                call project_list_text(model, selection, text)
+                i = index(text, 'plan targets:')
+                if (i > 0) write (output_unit, '(a)') &
+                    text(i:i + index(text(i:), new_line('a')) - 2)
+            end if
             if (no_cache) then
                 call project_run_cases(b, model, selection%cases, all_flags, no_build, &
                     test_log, exitcode, selection)
