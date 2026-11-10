@@ -2327,7 +2327,7 @@ contains
         new_mod_keys = ''
         smod_cacheable = .true.
         call load_mod_keys(mod_dir, dag, n_order, topo_order, old_mod_keys)
-        call cache_init(c, cache_ierr)
+        call cache_init(c, cache_ierr, compile=.true.)
         allow_cache = .true.
         if (present(use_cache)) allow_cache = use_cache
         if (.not. allow_cache) cache_ierr = 1
@@ -2390,6 +2390,10 @@ contains
             else
                 source_key_flags(node_id) = compile_key_flags(source_flags(node_id))
             end if
+            if (.not. with_actions) source_key_flags(node_id) = &
+                trim(source_key_flags(node_id))//new_line('a')// &
+                'source-context:'//source_compile_context( &
+                filenames(node_id), project_dir, node_tokens(node_id)%s)
             if (size(interfaces(node_id)%modules) > 1) &
                 source_key_flags(node_id) = trim(source_key_flags(node_id))// &
                     '|fo-interface-vector-v1'
@@ -3768,8 +3772,8 @@ contains
         character(len=MAX_PATH) :: tname
         character(len=MAX_PATH) :: fname_local
         character(len=512) :: log_local
-        type(cache_t) :: c
-        integer :: cache_ierr
+        type(cache_t) :: c, compile_cache
+        integer :: cache_ierr, compile_cache_ierr
         character(len=256) :: compiler
         character(len=HASH_LEN), allocatable :: dep_keys(:)
         character(len=HASH_LEN) :: output_key, lib_hash
@@ -3841,9 +3845,13 @@ contains
             incl_flag = with_user_flags(incl_flag, test_flags)
         end if
         call cache_init(c, cache_ierr)
+        call cache_init(compile_cache, compile_cache_ierr, compile=.true.)
         allow_cache = .true.
         if (present(use_cache)) allow_cache = use_cache
-        if (.not. allow_cache) cache_ierr = 1
+        if (.not. allow_cache) then
+            cache_ierr = 1
+            compile_cache_ierr = 1
+        end if
         call detect_compiler(compiler)
 
         ! Select the test programs to run first, so helper compilation and the
@@ -4005,7 +4013,9 @@ contains
                 n_dep = n_dep + 1
                 dep_keys(n_dep) = lib_hash
             end if
-            test_key_flags = compile_key_flags(test_flags)
+            test_key_flags = compile_key_flags(test_flags)//new_line('a')// &
+                'source-context:'//source_compile_context( &
+                filenames(node_id), project_dir, incl_flag)
             if (len_trim(link_base) > 0) test_key_flags = &
                 trim(test_key_flags)//new_line('a')//'test-link:'//trim(link_base)
             if (len_trim(run_args(i)) > 0) then
@@ -4031,9 +4041,9 @@ contains
             log_local = run_logs(i)
             call make_obj_path(fname_local, project_dir, obj_dir, obj_path)
             restored = .false.
-            if (cache_ierr == 0) then
-                call cache_restore_action(c, run_keys(i), obj_path, mod_dir, &
-                    restored)
+            if (compile_cache_ierr == 0) then
+                call cache_restore_action(compile_cache, run_keys(i), &
+                    obj_path, mod_dir, restored)
             end if
             if (.not. restored) then
                 call compile_f90(project_dir, fname_local, obj_path, incl_flag, &
@@ -4082,11 +4092,12 @@ contains
                 if (exitcode == 0) exitcode = run_exits(i)
             else
                 call append_log_file(trim(run_logs(i)), log_file)
-                if (cache_ierr == 0 .and. run_compiled(i)) then
+                if (compile_cache_ierr == 0 .and. run_compiled(i)) then
                     call make_obj_path(filenames(run_nodes(i)), project_dir, &
                         obj_dir, obj_path)
-                    call cache_store_action(c, run_keys(i), obj_path, mod_dir, &
-                        NO_MODULE_OUTPUTS, output_key, cache_ierr)
+                    call cache_store_action(compile_cache, run_keys(i), &
+                        obj_path, mod_dir, NO_MODULE_OUTPUTS, output_key, &
+                        compile_cache_ierr)
                     if (present(n_compiled)) n_compiled = n_compiled + 1
                 end if
             end if
@@ -5331,6 +5342,21 @@ contains
             'compiler-baseline:'//trim(fc_base_flags())//new_line('a')// &
             'project-flags:'//trim(flags)
     end function compile_key_flags
+
+    function source_compile_context(source, cwd, tokens) result(context)
+        ! Preprocessing and debug records can observe both paths even when
+        ! source and include contents are identical in another project.
+        character(len=*), intent(in) :: source, cwd, tokens
+        character(len=HASH_LEN) :: context, token_key
+        character(len=MAX_PATH) :: parts(4)
+
+        parts(1) = 'fo-source-context-v2'
+        parts(2) = source
+        parts(3) = cwd
+        call text_digest(tokens, token_key)
+        parts(4) = token_key
+        context = cache_digest(parts, size(parts))
+    end function source_compile_context
 
     subroutine make_includes_flag(mod_dir, dep_includes, n_dep_includes, flag)
         character(len=*), intent(in) :: mod_dir

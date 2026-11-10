@@ -48,16 +48,27 @@ contains
         call action_cache_schema(schema)
     end subroutine cache_schema
 
-    subroutine cache_init(c, ierr)
+    subroutine cache_init(c, ierr, compile)
         !! FO_CACHE_MAX_SIZE caps the shared store (default 10G; K/M/G/T
         !! suffixes, 0 disables). FO_CACHE_GRACE (seconds, default 3600)
         !! protects entries used or published that recently from eviction.
         type(cache_t), intent(out) :: c
         integer, intent(out) :: ierr
+        logical, intent(in), optional :: compile
         integer(int64) :: max_bytes, grace
-        logical :: ok
+        logical :: ok, compile_store
+        character(len=512) :: override
 
-        call action_cache_init(c, FO_CACHE_ENV, FO_CACHE_SUBDIR, ierr)
+        compile_store = .false.
+        if (present(compile)) compile_store = compile
+        override = ''
+        if (compile_store) call get_environment_variable( &
+            'FO_COMPILE_CACHE_DIR', override)
+        if (len_trim(override) > 0) then
+            call action_cache_init(c, 'FO_COMPILE_CACHE_DIR', FO_CACHE_SUBDIR, ierr)
+        else
+            call action_cache_init(c, FO_CACHE_ENV, FO_CACHE_SUBDIR, ierr)
+        end if
         !$omp critical (fo_cache_policy)
         if (.not. policy_set) then
             max_bytes = 10_int64 * 1024_int64**3

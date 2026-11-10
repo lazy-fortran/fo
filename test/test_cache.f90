@@ -55,6 +55,7 @@ program test_cache
     call test_large_file_hashes_full_source()
     call test_schema_and_root()
     call test_distinct_roots_are_isolated()
+    call test_compile_store_scope()
     call end_test_cache_scope()
 
     write (output_unit, '(a,i0,a,i0,a)') 'cache: ', n_pass, ' pass, ', n_fail, ' fail'
@@ -200,6 +201,62 @@ contains
         call fs_remove_file(trim(mod_path))
         call fs_remove_tree(trim(mod_dir))
     end subroutine test_action_store_restore
+
+    subroutine test_compile_store_scope()
+        type(cache_t) :: compilation, runtime
+        character(len=:), allocatable :: prior
+        character(len=512) :: obj, mods
+        character(len=1) :: no_modules(0)
+        character(len=HASH_LEN) :: key, output
+        integer :: ierr, rc, n, status
+        logical :: restored
+
+        call get_environment_variable('FO_COMPILE_CACHE_DIR', length=n, status=status)
+        if (status == 0) then
+            allocate (character(len=n) :: prior)
+            call get_environment_variable('FO_COMPILE_CACHE_DIR', prior)
+        end if
+        rc = c_setenv('FO_COMPILE_CACHE_DIR'//c_null_char, &
+            trim(test_cache_root)//'/compile'//c_null_char, 1_c_int)
+        if (rc /= 0) error stop 'cannot set compile store'
+        call cache_init(compilation, ierr, compile=.true.)
+        call assert(ierr == 0, 'compile store initializes')
+        call make_tmp_path('fo_compile_object', obj, '.o')
+        call make_tmp_path('fo_compile_mods', mods, '')
+        call fs_make_dir(mods)
+        call write_text(obj, 'independent compile payload')
+        key = repeat('9', HASH_LEN)
+        call cache_store_action(compilation, key, obj, mods, &
+            no_modules, output, ierr)
+        call assert(ierr == 0, 'compile payload publishes')
+        call cache_init(runtime, ierr)
+        call assert(.not. cache_lookup(runtime, key), &
+            'compile payload is absent from runtime store')
+        rc = c_setenv('FO_CACHE_DIR'//c_null_char, &
+            trim(test_cache_root)//'/other-runtime'//c_null_char, 1_c_int)
+        if (rc /= 0) error stop 'cannot isolate runtime store'
+        call cache_init(runtime, ierr)
+        call assert(.not. cache_lookup(runtime, key), &
+            'second runtime store remains independent')
+        call cache_init(compilation, ierr, compile=.true.)
+        call fs_remove_file(obj)
+        call cache_restore_action(compilation, key, obj, mods, restored)
+        call assert(restored, 'second runtime restores shared compilation')
+        call assert(file_contains(obj, 'independent compile payload'), &
+            'restored compile payload retains its bytes')
+        rc = c_setenv('FO_CACHE_DIR'//c_null_char, &
+            trim(test_cache_root)//c_null_char, 1_c_int)
+        if (rc /= 0) error stop 'cannot restore runtime store'
+        if (allocated(prior)) then
+            rc = c_setenv('FO_COMPILE_CACHE_DIR'//c_null_char, &
+                prior//c_null_char, 1_c_int)
+        else
+            rc = c_unsetenv('FO_COMPILE_CACHE_DIR'//c_null_char)
+        end if
+        if (rc /= 0) error stop 'cannot restore compile store'
+        call fs_remove_file(obj)
+        call fs_remove_tree(mods)
+    end subroutine test_compile_store_scope
 
     subroutine test_parallel_cache_lookup()
         type(cache_t) :: c
