@@ -10,7 +10,9 @@ program test_test_cache_cli
     !!  - a FAIL is never reused, not even with an unchanged closure;
     !!  - MCP and CLI share the cache;
     !!  - `fo test --list --json` reports, without starting a test process,
-    !!    the digest under which the first run records each PASS (#362).
+    !!    the digest under which the first run records each PASS (#362);
+    !!  - `fo test --cases FILE` runs exactly the listed cases and reports a
+    !!    case whose inputs changed since the listing as CHANGED (#363).
     !! Runs the driver named by FO.
     use fo_test_harness, only: process_result_t, string_list_t, list_add
     use fo_test_harness, only: make_scratch, join_path, write_text, read_text
@@ -41,6 +43,7 @@ program test_test_cache_cli
     call check_failures_are_not_reused()
     call check_mcp()
     call check_cmake()
+    call check_case_list()
 
     call remove_tree(scratch)
     call finish_assertions()
@@ -74,6 +77,45 @@ contains
         call case_program('case_b', 'mod_b')
         call case_program('case_c', '')
     end subroutine write_fixture
+
+    subroutine check_case_list()
+        type(process_result_t) :: result
+        character(:), allocatable :: listed, plan, digest_a, digest_c
+        integer :: a0, b0, c0
+
+        call fo_test([character(len=16) :: '--list', '--json'], result)
+        listed = listed_digests(result%stdout)
+        digest_a = listed(index(listed, 'case_a=') + 7:index(listed, 'case_a=') + 70)
+        digest_c = listed(index(listed, 'case_c=') + 7:index(listed, 'case_c=') + 70)
+        a0 = runs('case_a')
+        b0 = runs('case_b')
+        c0 = runs('case_c')
+
+        plan = join_path(scratch, 'plan.json')
+        call write_text(plan, '{"cases":[{"name":"case_c","closure_digest":"'// &
+            digest_c//'"}]}')
+        call fo_test([character(len=256) :: '--rerun', '--cases', plan], result)
+        call assert_equal_integer(result%exit_code, 0, 'listed case runs: '// &
+            result%stdout//result%stderr)
+        call expect_runs(a0, b0, c0 + 1, 'only the listed case runs')
+
+        call write_text(join_path(project, 'src/mod_a.f90'), &
+            'module mod_a'//nl//'implicit none'//nl//'integer :: planned'//nl// &
+            'end module'//nl)
+        call write_text(plan, '{"cases":[{"name":"case_a","closure_digest":"'// &
+            digest_a//'"},{"name":"case_c","closure_digest":"'//digest_c//'"}]}')
+        call fo_test([character(len=256) :: '--rerun', '--cases', plan], result)
+        call assert_true(result%exit_code /= 0, 'a changed case fails the command')
+        call assert_contains(result%stdout, 'CHANGED case_a', &
+            'the edited case is reported CHANGED: '//result%stdout)
+        call expect_runs(a0, b0, c0 + 2, 'a CHANGED case does not run, the other does')
+
+        call write_text(plan, '{"cases":[{"name":"no_such_case"}]}')
+        call fo_test([character(len=256) :: '--cases', plan], result)
+        call assert_true(result%exit_code /= 0, 'an unknown case fails: '// &
+            result%stdout//result%stderr)
+        call expect_runs(a0, b0, c0 + 2, 'an unknown case runs nothing')
+    end subroutine check_case_list
 
     function listed_digests(json) result(text)
         !! 'name=digest;' for every listed case, in listing order.

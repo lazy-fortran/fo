@@ -267,6 +267,7 @@ manifest and source scan, or CMake targets and CTest cases after configure.
 fo test [name|glob ...] [-L RE] [-LE RE] [--layer NAME] [-E EXPR] [--all] [--only-changed] [--no-build]
         [--rerun] [--partition hash:K/N|count:K/N] [--junit PATH]
 fo test --list [--json] [same selection]
+fo test --cases FILE|- [--rerun] [--junit PATH]
 ```
 
 - Names are exact case names or whole-name globs (`*`, `?`, `[...]`). An exact
@@ -290,6 +291,13 @@ fo test --list [--json] [same selection]
   one object, with each case's `closure_digest`: the key under which a PASS
   of that case is recorded and reused (empty when the case is never reused),
   so another tool can plan which cases to run without building.
+- `--cases FILE` (`-` reads standard input) runs exactly the cases of an
+  object in the format of `--list --json`; only `cases[].name` and the
+  optional `cases[].closure_digest` are read, and default exclusions do not
+  apply. A listed case whose digest differs from the current one is not run:
+  it prints `CHANGED NAME` and the command exits 1, so the planner can replan.
+  An unknown name exits 1 before anything is built. Names, `--only-changed`,
+  `--random` and `--list` cannot be combined with it.
 - Running (CMake, also plain `fo test`): select, plan, build, run. CMake is
   configured once and the loaded model is reused. Only the plan targets are
   built (merged with `FO_CMAKE_BUILD_TARGETS`). A case whose command maps to no

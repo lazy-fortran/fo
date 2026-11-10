@@ -50,6 +50,7 @@ module fo_cli_entry
     use fo_version_info, only: FO_VERSION
     use fo_progress, only: progress_suppress
     use fo_test_cache, only: test_cache_run, test_case_digests
+    use fo_case_list, only: case_list_read, case_list_parse
     use fo_junit, only: junit_write
     use fo_case_filter, only: partition_parse, partition_keep
     implicit none
@@ -1206,11 +1207,15 @@ contains
             logical :: rerun, by_hash, no_cache
             integer :: part, parts
             character(len=64), allocatable :: digests(:)
+            character(len=:), allocatable :: cases_path
+            type(string_t), allocatable :: listed_names(:), listed_digests(:)
+            integer :: n_changed
 
             allocate (test_names(MAX_NODES), random_candidates(MAX_NODES))
             filter_text = ''
             partition_text = ''
             junit_path = ''
+            cases_path = ''
             rerun = env_flag('FO_TEST_RERUN')
             no_cache = .false.
             only_changed = .false.
@@ -1282,6 +1287,10 @@ contains
                         if (len_trim(arg) <= eq) call test_usage_error('--junit needs PATH')
                         junit_path = trim(arg(eq + 1:))
                         cycle
+                    case ('--cases')
+                        if (len_trim(arg) <= eq) call test_usage_error('--cases needs FILE')
+                        cases_path = trim(arg(eq + 1:))
+                        cycle
                     case ('--partition')
                         if (len_trim(arg) <= eq) &
                             call test_usage_error('--partition needs hash:K/N or count:K/N')
@@ -1336,6 +1345,10 @@ contains
                 case ('--junit')
                     call test_option_value(i, '--junit needs PATH', arg)
                     junit_path = trim(arg)
+                    skip_next = .true.
+                case ('--cases')
+                    call test_option_value(i, '--cases needs FILE', arg)
+                    cases_path = trim(arg)
                     skip_next = .true.
                 case ('--partition')
                     call test_option_value(i, '--partition needs hash:K/N or count:K/N', arg)
@@ -1459,6 +1472,14 @@ contains
             ! One selection path for every backend, CLI and MCP: load the project
             ! model (CMake is configured, nothing is built), select, run the exact
             ! cases. The model applies the default exclusions and --all.
+            if (len(cases_path) > 0) then
+                if (n_arg_names > 0 .or. only_changed .or. random_count > 0 .or. &
+                    list_mode) call test_usage_error('--cases conflicts with names, '// &
+                    '--only-changed, --random and --list')
+                call cases_from_list(cases_path, test_names, n_arg_names, &
+                    listed_names, listed_digests)
+                include_all = .true.
+            end if
             allocate (request%names(n_arg_names))
             do i = 1, n_arg_names
                 request%names(i)%s = trim(test_names(i))
@@ -1486,6 +1507,9 @@ contains
                     stop 1
                 end if
             end if
+            n_changed = 0
+            if (len(cases_path) > 0) call drop_changed_cases(b, model, selection, &
+                all_flags, listed_names, listed_digests, n_changed)
             if (random_count > 0) then
                 ! Candidates are the model's default selection.
                 if (size(selection%cases) > size(random_candidates)) then
@@ -1559,7 +1583,71 @@ contains
                 require_results=.true., json_full=json_full, full_text=verbose, &
                 junit_path=junit_path, project_dir=b%project_dir)
             call delete_tmpfile(test_log)
+            if (n_changed > 0) call process_exit(1)
         end subroutine cmd_test
+
+        subroutine cases_from_list(path, names, n_names, listed_names, listed_digests)
+            !! The cases of a `fo test --list --json` object as exact names.
+            character(len=*), intent(in) :: path
+            character(len=1024), allocatable, intent(inout) :: names(:)
+            integer, intent(out) :: n_names
+            type(string_t), allocatable, intent(out) :: listed_names(:), listed_digests(:)
+            character(len=:), allocatable :: text, message
+            integer :: ierr, k
+
+            call case_list_read(path, text, ierr, message)
+            if (ierr == 0) call case_list_parse(text, listed_names, listed_digests, &
+                ierr, message)
+            if (ierr /= 0) then
+                write (error_unit, '(a)') 'fo test: '//message
+                stop 1
+            end if
+            n_names = size(listed_names)
+            if (allocated(names)) deallocate (names)
+            allocate (names(max(1, n_names)))
+            do k = 1, n_names
+                if (len(listed_names(k)%s) > len(names(k))) &
+                    call test_usage_error('case name exceeds 1024 characters')
+                names(k) = listed_names(k)%s
+            end do
+        end subroutine cases_from_list
+
+        subroutine drop_changed_cases(b, model, selection, flags, listed_names, &
+                listed_digests, n_changed)
+            !! A listed case whose input closure digest now differs from the
+            !! listed one is not run: it is reported CHANGED and makes the
+            !! command fail, so a scheduler replans instead of reading a
+            !! verdict for inputs it did not plan.
+            type(backend_t), intent(inout) :: b
+            type(project_model_t), intent(in) :: model
+            type(model_selection_t), intent(inout) :: selection
+            character(len=*), intent(in) :: flags
+            type(string_t), intent(in) :: listed_names(:), listed_digests(:)
+            integer, intent(out) :: n_changed
+            character(len=64), allocatable :: current(:)
+            logical, allocatable :: keep(:)
+            integer :: k, c, j
+
+            n_changed = 0
+            if (.not. allocated(selection%cases)) return
+            call test_case_digests(b, model, flags, current)
+            allocate (keep(size(selection%cases)))
+            keep = .true.
+            do k = 1, size(selection%cases)
+                c = selection%cases(k)
+                do j = 1, size(listed_names)
+                    if (listed_names(j)%s /= model%cases(c)%name) cycle
+                    if (len(listed_digests(j)%s) == 0) exit
+                    if (listed_digests(j)%s == trim(current(c))) exit
+                    keep(k) = .false.
+                    n_changed = n_changed + 1
+                    write (output_unit, '(a)') 'CHANGED '//model%cases(c)%name
+                    exit
+                end do
+            end do
+            selection%cases = pack(selection%cases, keep)
+            if (n_changed > 0 .and. size(selection%cases) == 0) call process_exit(1)
+        end subroutine drop_changed_cases
 
         subroutine narrow_to_partition(model, selection, by_hash, part, parts)
             !! Keep the selected cases of partition part of parts (--partition).
