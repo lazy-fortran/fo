@@ -8,6 +8,7 @@ module fo_process
     public :: process_scan_sources
     public :: process_has_fortran_source_ext
     public :: process_start_argv_logged
+    public :: process_last_run_meter
     public :: process_set_async_scope, process_reap_adopted_scope_zombies
     public :: process_scope_t, process_scope_begin, process_scope_end
     public :: process_poll_pid, process_cancel_pid
@@ -183,6 +184,12 @@ module fo_process
             integer(c_int), intent(out) :: exitcode, timeout_kind
             integer(c_long_long), intent(out) :: cpu_ms, wall_ms
         end subroutine fo_c_run_argv_slow
+
+        subroutine fo_c_last_run_meter(peak_rss_kb, write_bytes) &
+                bind(C, name='fo_c_last_run_meter')
+            import :: c_long_long
+            integer(c_long_long), intent(out) :: peak_rss_kb, write_bytes
+        end subroutine fo_c_last_run_meter
 
         subroutine fo_c_exit(code) bind(C, name='fo_c_exit')
             import :: c_int
@@ -410,6 +417,14 @@ contains
         if (present(cpu_seconds)) cpu_seconds = real(cpu_ms) / 1000.0
         if (present(wall_seconds)) wall_seconds = real(wall_ms) / 1000.0
     end subroutine process_run_argv_logged
+
+    subroutine process_last_run_meter(peak_rss_kb, write_bytes)
+        !! Peak resident memory (kB) and bytes written to storage of the last
+        !! budgeted run on this thread; -1 where unknown (#364).
+        integer(c_long_long), intent(out) :: peak_rss_kb, write_bytes
+
+        call fo_c_last_run_meter(peak_rss_kb, write_bytes)
+    end subroutine process_last_run_meter
 
     recursive subroutine argv_push(packed, n_args, token)
         !! Append one argv token (a whole word) to the packed NUL-separated

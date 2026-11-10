@@ -32,7 +32,7 @@ module fo_gfortran_build
         cache_store_binary, cache_restore_binary, cache_binary_matches
     use fo_util, only: make_tmpfile, make_sibling_tmpfile, delete_tmpfile, &
         read_text_file, clean_root_build_artifacts
-    use fo_process, only: process_run_logged, &
+    use fo_process, only: process_run_logged, process_last_run_meter, &
         process_run_argv_logged, argv_push, argv_push_split, &
         argv_push_split_nl, process_detect_nproc, process_setenv_default
     use fo_lock, only: lock_check
@@ -94,6 +94,8 @@ module fo_gfortran_build
         integer :: rerun_exit = 0
         real :: secs = 0.0
         real :: cpu_secs = -1.0
+        !! Peak resident memory (kB) and bytes written; -1 where unknown.
+        integer(8) :: peak_kb = -1, write_bytes = -1
         logical :: flaky = .false.
         logical :: ran = .false.
         !! Project-relative source, for the test-group match of its policy.
@@ -1961,6 +1963,7 @@ contains
             test%log, config, is_slow_test(test%name), test%exit, test%cpu_secs, &
             case_env=test%case_env, slow_period=test%slow_period, &
             slow_after=test%slow_after, label=trim(test%name))
+        call process_last_run_meter(test%peak_kb, test%write_bytes)
         call system_clock(clk1, clk_rate)
         test%ran = .true.
         if (clk_rate > 0) test%secs = real(clk1 - clk0) / real(clk_rate)
@@ -2040,6 +2043,7 @@ contains
                 call write_test_result_line(log_file, tests(i)%name, 'FAIL', &
                     trim(exit_str), tests(i)%secs)
             end if
+            call write_test_cost_line(log_file, tests(i))
             call delete_tmpfile(tests(i)%log)
             secs = tests(i)%secs
             ! Warn by CPU time where known: wall time also measures host load.
@@ -4998,6 +5002,24 @@ contains
             trim(status), ' ', trim(exit_str), ' ', trim(secs_str)
         close (u)
     end subroutine write_test_result_line
+
+    subroutine write_test_cost_line(log_file, test)
+        !! `TEST_COST name cpu_ms peak_rss_kb write_bytes` (-1 = unknown),
+        !! right after the case's TEST_RESULT line (#364).
+        character(len=*), intent(in) :: log_file
+        type(current_test_t), intent(in) :: test
+        integer :: u, ios
+        integer(8) :: cpu_ms
+
+        cpu_ms = -1
+        if (test%cpu_secs >= 0.0) cpu_ms = nint(test%cpu_secs*1000.0, 8)
+        open (newunit=u, file=trim(log_file), position='append', status='old', &
+            iostat=ios)
+        if (ios /= 0) return
+        write (u, '(a,3(1x,i0))') 'TEST_COST '//trim(test%name), cpu_ms, &
+            test%peak_kb, test%write_bytes
+        close (u)
+    end subroutine write_test_cost_line
 
     integer function build_timeout_seconds() result(t)
         !! Per-invocation wall clock for a single compile or link. A hung

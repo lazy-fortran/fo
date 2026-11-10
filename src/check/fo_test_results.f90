@@ -30,6 +30,9 @@ module fo_test_results
         character(len=10)   :: status
         real                :: seconds
         integer             :: exit_code
+        !! CPU time (ms), peak resident memory (kB) and bytes written of the
+        !! run, from its TEST_COST line; -1 where unknown (#364).
+        integer(c_long_long) :: cpu_ms = -1, peak_rss_kb = -1, write_bytes = -1
     end type test_result_entry_t
 
 contains
@@ -68,6 +71,8 @@ contains
             end if
             if (index(line, 'TEST_REASON ') == 1) then
                 native_reason = line(13:)
+            else if (index(line, 'TEST_COST ') == 1) then
+                call apply_cost_line(line(11:), entries, n_entries)
             else if (line == 'TEST_JUNIT_IMPORT') then
                 ! The verdicts of the console block just read follow exactly.
                 n_entries = n_entries - n_console
@@ -682,6 +687,12 @@ contains
                 if (len(entries(i)%reason) > 0) output = output//',"reason":"'// &
                     json_escape_string(entries(i)%reason)//'"'
             end if
+            if (entries(i)%cpu_ms >= 0) output = output//',"cpu_seconds":'// &
+                format_seconds(real(entries(i)%cpu_ms, real64)/1000.0_real64)
+            if (entries(i)%peak_rss_kb >= 0) output = output//',"peak_rss_kb":'// &
+                trim(json_int64(entries(i)%peak_rss_kb))
+            if (entries(i)%write_bytes >= 0) output = output//',"write_bytes":'// &
+                trim(json_int64(entries(i)%write_bytes))
             if (trim(entries(i)%status) == 'FLAKY') then
                 output = output//',"attempts":{"first":"fail",'// &
                     '"retry":"pass"}'
@@ -1189,5 +1200,38 @@ contains
             if (c >= iachar('A') .and. c <= iachar('Z')) out(i:i) = achar(c + 32)
         end do
     end function lower_status
+
+    subroutine apply_cost_line(rest, entries, n_entries)
+        !! `name cpu_ms peak_rss_kb write_bytes` onto the newest entry of that
+        !! name; a malformed line is ignored.
+        character(len=*), intent(in) :: rest
+        type(test_result_entry_t), intent(inout) :: entries(:)
+        integer, intent(in) :: n_entries
+        integer(c_long_long) :: values(3)
+        integer :: space, k, ios
+
+        space = index(trim(rest), ' ', back=.true.)
+        do k = 1, 2
+            if (space <= 1) return
+            space = index(rest(1:space - 1), ' ', back=.true.)
+        end do
+        if (space <= 1) return
+        read (rest(space + 1:), *, iostat=ios) values
+        if (ios /= 0) return
+        do k = n_entries, 1, -1
+            if (entries(k)%name /= rest(1:space - 1)) cycle
+            entries(k)%cpu_ms = values(1)
+            entries(k)%peak_rss_kb = values(2)
+            entries(k)%write_bytes = values(3)
+            return
+        end do
+    end subroutine apply_cost_line
+
+    function json_int64(value) result(text)
+        integer(c_long_long), intent(in) :: value
+        character(len=24) :: text
+
+        write (text, '(i0)') value
+    end function json_int64
 
 end module fo_test_results

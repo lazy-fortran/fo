@@ -577,7 +577,7 @@ static void add_milliseconds(struct timespec *ts, int ms) {
     ts->tv_nsec %= 1000000000L;
 }
 
-enum { CPU_POLL_MS = 200 };
+enum { CPU_POLL_MS = 200, METER_POLL_MS = 200 };
 
 struct run_budget {
     int cpu_s;         /* in: CPU-second budget; 0 means wall clock only */
@@ -585,7 +585,131 @@ struct run_budget {
     long long cpu_ms;  /* out: child CPU time at exit or kill, -1 if unknown */
     long long wall_ms; /* out: wall time at the kill */
     const char *slow_label; /* in: SLOW progress line label, NULL for none */
+    long long peak_rss_kb; /* out: peak resident memory, -1 if unknown */
+    long long write_bytes; /* out: bytes written to storage, -1 if unknown */
 };
+
+/* The meter of the last budgeted run on this thread (#364): tests run on
+   several threads at once, and each reads its own run back. */
+static __thread long long last_peak_rss_kb = -1;
+static __thread long long last_write_bytes = -1;
+
+void fo_c_last_run_meter(long long *peak_rss_kb, long long *write_bytes) {
+    *peak_rss_kb = last_peak_rss_kb;
+    *write_bytes = last_write_bytes;
+}
+
+#ifdef __linux__
+/* One field of a small /proc file: the number after `key` (a "key: value"
+   line) or, with key NULL, the field-th number of the first line. */
+static long long proc_number(const char *path, const char *key, int field) {
+    char buf[4096];
+    ssize_t n;
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    char *p;
+
+    if (fd < 0) return -1;
+    n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n <= 0) return -1;
+    buf[n] = '\0';
+    if (key != NULL) {
+        p = strstr(buf, key);
+        if (p == NULL) return -1;
+        return strtoll(p + strlen(key), NULL, 10);
+    }
+    p = buf;
+    while (--field > 0) {
+        while (*p == ' ') p++;
+        while (*p != ' ' && *p != '\0') p++;
+        if (*p == '\0') return -1;
+    }
+    return strtoll(p, NULL, 10);
+}
+
+/* Over pid and all its live descendants, found through each thread's
+   `children` list rather than a scan of /proc (a sample costs a few reads
+   per process of the test itself): the sum of each process's peak resident
+   memory since it started its program (VmHWM, kB), and of the bytes each
+   wrote to storage. The kernel's rusage peak is not used: it also counts the
+   parent's pages the child shared before exec. */
+static void tree_meter(pid_t pid, int depth, long long *hwm_kb,
+                       long long *written) {
+    char path[96], buf[4096];
+    long long value;
+    DIR *tasks;
+    struct dirent *entry;
+
+    snprintf(path, sizeof(path), "/proc/%d/status", (int)pid);
+    value = proc_number(path, "VmHWM:", 0);
+    if (value > 0) *hwm_kb += value;
+    snprintf(path, sizeof(path), "/proc/%d/io", (int)pid);
+    value = proc_number(path, "write_bytes:", 0);
+    if (value > 0) *written += value;
+    if (depth > 64) return;
+    snprintf(path, sizeof(path), "/proc/%d/task", (int)pid);
+    tasks = opendir(path);
+    if (tasks == NULL) return;
+    while ((entry = readdir(tasks)) != NULL) {
+        char *p, *end;
+        ssize_t n;
+        int fd;
+
+        if (entry->d_name[0] < '0' || entry->d_name[0] > '9') continue;
+        snprintf(path, sizeof(path), "/proc/%d/task/%.16s/children", (int)pid,
+                 entry->d_name);
+        fd = open(path, O_RDONLY | O_CLOEXEC);
+        if (fd < 0) continue;
+        n = read(fd, buf, sizeof(buf) - 1);
+        close(fd);
+        if (n <= 0) continue;
+        buf[n] = '\0';
+        for (p = buf;; p = end) {
+            long child = strtol(p, &end, 10);
+            if (end == p) break;
+            tree_meter((pid_t)child, depth + 1, hwm_kb, written);
+        }
+    }
+    closedir(tasks);
+}
+#endif
+
+/* After the reap: the kernel's peak of the child and the descendants it
+   waited for. It also counts this process's pages the child shared before
+   it started its program, so it is only evidence where it exceeds this
+   process's own peak; a short large test is then still measured exactly. */
+static void meter_finish(struct run_budget *budget, const struct rusage *usage) {
+    long long peak, own;
+
+    if (budget == NULL) return;
+#ifdef __APPLE__
+    peak = (long long)usage->ru_maxrss / 1024;
+    {
+        struct rusage self;
+        own = getrusage(RUSAGE_SELF, &self) == 0 ? (long long)self.ru_maxrss / 1024 : -1;
+    }
+#else
+    peak = (long long)usage->ru_maxrss;
+    own = proc_number("/proc/self/status", "VmHWM:", 0);
+#endif
+    if (own >= 0 && peak > own && peak > budget->peak_rss_kb)
+        budget->peak_rss_kb = peak;
+}
+
+static void meter_sample(struct run_budget *budget, pid_t pid) {
+    if (budget == NULL) return;
+#ifdef __linux__
+    {
+        long long hwm = 0, written = 0;
+        tree_meter(pid, 0, &hwm, &written);
+        if (hwm > budget->peak_rss_kb) budget->peak_rss_kb = hwm;
+        if (written > budget->write_bytes) budget->write_bytes = written;
+    }
+#else
+    (void)pid;
+#endif
+}
+
 
 /* User CPU time of a live (or zombie) child over all of its threads, in
    milliseconds; -1 where it cannot be read cheaply. Processes the child
@@ -1336,6 +1460,7 @@ static int run_argv(const char *cwd, char *const argv[], const char *log_file,
 
     if (timeout_s > 0) {
         struct timespec start, deadline, next_heartbeat, cpu_check, now;
+        struct timespec meter_check;
         int cpu_s = budget ? budget->cpu_s : 0;
 
         clock_gettime(CLOCK_MONOTONIC, &start);
@@ -1357,6 +1482,11 @@ static int run_argv(const char *cwd, char *const argv[], const char *log_file,
             cpu_check = start;
             add_seconds(&cpu_check, cpu_s);
         }
+        /* Sample early and then less often (2, 4, 8 ... ms), so a short
+           test is still measured while it runs. */
+        int meter_step_ms = 2;
+        meter_check = start;
+        add_milliseconds(&meter_check, meter_step_ms);
 #ifdef __linux__
         /* A process blocked on a hung file system (a network or parallel
            file system, typically during a dependency clone) makes no
@@ -1385,6 +1515,8 @@ static int run_argv(const char *cwd, char *const argv[], const char *log_file,
                 struct rusage usage;
                 long long own = budget != NULL ? child_cpu_ms(accounted_pid) : -1;
 
+                meter_sample(budget, accounted_pid);
+
                 /* The leader's zombie keeps its private process-group ID
                    anchored while we terminate any background descendants.
                    The seccomp monitor owns cleanup when this group is shared. */
@@ -1395,6 +1527,7 @@ static int run_argv(const char *cwd, char *const argv[], const char *log_file,
                     if (report_fd >= 0) close(report_fd);
                     return 1;
                 }
+                meter_finish(budget, &usage);
                 if (budget != NULL) {
                     if (report_fd >= 0) {
                         long long reported;
@@ -1436,6 +1569,12 @@ static int run_argv(const char *cwd, char *const argv[], const char *log_file,
                 if (pid_fd >= 0) close(pid_fd);
                 if (report_fd >= 0) close(report_fd);
                 return cleanup_error == 0 ? 124 : 126;
+            }
+            if (budget != NULL && timespec_at_or_after(&now, &meter_check)) {
+                meter_sample(budget, accounted_pid);
+                if (meter_step_ms < METER_POLL_MS) meter_step_ms *= 2;
+                meter_check = now;
+                add_milliseconds(&meter_check, meter_step_ms);
             }
             if (cpu_s > 0 && timespec_at_or_after(&now, &cpu_check)) {
                 long long used = child_cpu_ms(accounted_pid);
@@ -1516,6 +1655,10 @@ static int run_argv(const char *cwd, char *const argv[], const char *log_file,
                 if (cpu_s > 0) {
                     int cpu_ms = milliseconds_until(&now, &cpu_check);
                     if (cpu_ms < wait_ms) wait_ms = cpu_ms;
+                }
+                if (budget != NULL) {
+                    int meter_ms = milliseconds_until(&now, &meter_check);
+                    if (meter_ms < wait_ms) wait_ms = meter_ms;
                 }
 #ifdef __linux__
                 if (stall_s > 0) {
@@ -1834,10 +1977,12 @@ void fo_c_run_argv_budget(const char *cwd, const char *args, int args_len,
                           const char *env_extra, int *exitcode,
                           int *timeout_kind, long long *cpu_ms,
                           long long *wall_ms) {
-    struct run_budget budget = {cpu_budget_s, 0, -1, 0, NULL};
+    struct run_budget budget = {cpu_budget_s, 0, -1, 0, NULL, -1, -1};
 
     run_packed_argv(cwd, args, args_len, n_args, log_file, append, timeout_s,
                     heartbeat_s, env_extra, &budget, exitcode);
+    last_peak_rss_kb = budget.peak_rss_kb;
+    last_write_bytes = budget.write_bytes;
     *timeout_kind = budget.kind;
     *cpu_ms = budget.cpu_ms;
     *wall_ms = budget.wall_ms;
@@ -1852,10 +1997,12 @@ void fo_c_run_argv_slow(const char *cwd, const char *args, int args_len,
                         const char *slow_label, const char *env_extra,
                         int *exitcode, int *timeout_kind, long long *cpu_ms,
                         long long *wall_ms) {
-    struct run_budget budget = {cpu_budget_s, 0, -1, 0, slow_label};
+    struct run_budget budget = {cpu_budget_s, 0, -1, 0, slow_label, -1, -1};
 
     run_packed_argv(cwd, args, args_len, n_args, log_file, append, timeout_s,
                     slow_period_s, env_extra, &budget, exitcode);
+    last_peak_rss_kb = budget.peak_rss_kb;
+    last_write_bytes = budget.write_bytes;
     *timeout_kind = budget.kind;
     *cpu_ms = budget.cpu_ms;
     *wall_ms = budget.wall_ms;
