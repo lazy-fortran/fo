@@ -18,6 +18,8 @@ program test_gremlin_coverage
     character(len=32) :: path
     integer :: i, n_selected, status, runs
 
+    call test_timeout_requalification()
+
     path = 'gremlin-coverage-test.state'
     call fs_remove_file(trim(path))
     call fs_remove_file(trim(path)//'.tmp')
@@ -110,6 +112,43 @@ program test_gremlin_coverage
     write(*, '(a)') 'Gremlin coverage behavioral oracle: PASS'
 
 contains
+
+    subroutine test_timeout_requalification()
+        character(len=*), parameter :: policy_path = 'gremlin-coverage-policy.state'
+        character(len=16) :: cases(3), picked(3)
+        type(coverage_epoch_t) :: policy
+        integer :: rc, n
+        character(len=256) :: detail
+
+        cases = [character(len=16) :: 'passed', 'timed_out', 'failed']
+        call fs_remove_file(policy_path)
+        call coverage_open(policy_path, repeat('e', 64), cases, 3, 17, policy, &
+            rc, detail, timeout_seconds=1)
+        call coverage_record(policy, 'passed', 'PASS', rc, detail)
+        call coverage_record(policy, 'timed_out', 'TIMEOUT', rc, detail)
+        call coverage_record(policy, 'failed', 'FAIL', rc, detail)
+        call coverage_open(policy_path, repeat('e', 64), cases, 3, 17, policy, &
+            rc, detail, timeout_seconds=1)
+        call coverage_next_chunk(policy, cases, 3, 3, picked, n, rc)
+        call check(rc == COVERAGE_OK .and. n == 0, &
+            'unchanged deadline does not retry terminal coverage')
+        call coverage_open(policy_path, repeat('e', 64), cases, 3, 17, policy, &
+            rc, detail, timeout_seconds=10)
+        call check(policy%epoch == 2 .and. coverage_remaining(policy) == 1, &
+            'changed explicit deadline renews only timeout debt in a new epoch')
+        call coverage_next_chunk(policy, cases, 3, 3, picked, n, rc)
+        call check(rc == COVERAGE_OK .and. n == 1, &
+            'deadline requalification selects exactly one obligation')
+        call check(picked(1) == 'timed_out', 'PASS and FAIL are retained')
+        call coverage_record(policy, 'timed_out', 'TIMEOUT', rc, detail)
+        call coverage_open(policy_path, repeat('e', 64), cases, 3, 17, policy, &
+            rc, detail, timeout_seconds=10)
+        call coverage_next_chunk(policy, cases, 3, 3, picked, n, rc)
+        call check(n == 0 .and. policy%epoch == 2, &
+            'a second timeout under the same policy is not retried forever')
+        call fs_remove_file(policy_path)
+        call fs_remove_file(policy_path//'.lock')
+    end subroutine test_timeout_requalification
 
     subroutine check_stale_writers()
         type(coverage_epoch_t) :: first, second, latest

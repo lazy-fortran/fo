@@ -215,7 +215,7 @@ contains
             separator = index(relative, '/', back=.true.)
             call fs_realpath(root//'/'//relative(:separator - 1), parent, ok)
             if (.not. ok .or. trim(parent) /= &
-                    trim(canonical_root)//'/'//relative(:separator - 1)) then
+                trim(canonical_root)//'/'//relative(:separator - 1)) then
                 ierr = 1
                 message = 'unsupported referenced CMake directory alias: '//trim(path)
                 return
@@ -396,7 +396,7 @@ contains
                 if (ierr /= 0) return
                 do j = 1, size(provider_dirs)
                     inquire(file=trim(sources(i))//'/'//trim(provider_dirs(j)), &
-                            exist=provider_dir_exists)
+                        exist=provider_dir_exists)
                     if (.not. provider_dir_exists) cycle
                     provider_dir = input_entry_t()
                     provider_dir%root_alias = labels(i)
@@ -618,7 +618,7 @@ contains
                 if (ierr /= 0) return
             end if
             if (alias_root(inventory, 'dependency:'// &
-                    trim(config%deps(i)%name)) /= 0) cycle
+                trim(config%deps(i)%name)) /= 0) cycle
             call discover_acquired_dependency(trim(dependency_root), &
                 'dependency:'//trim(config%deps(i)%name), &
                 'project/build/dependencies/'//trim(config%deps(i)%name), &
@@ -656,7 +656,7 @@ contains
                 is_local = .false.
                 do j = 1, config%n_dev_deps
                     if (trim(config%dev_deps(j)%name) /= &
-                            trim(resolved_dev_deps(i)%name)) cycle
+                        trim(resolved_dev_deps(i)%name)) cycle
                     is_local = dep_kind(config%dev_deps(j)) == DEP_PATH
                     exit
                 end do
@@ -719,11 +719,11 @@ contains
         declaration_is_duplicate = .false.
         do i = 1, current - 1
             if (trim(declarations(i)%root_alias) /= &
-                    trim(declarations(current)%root_alias)) cycle
+                trim(declarations(current)%root_alias)) cycle
             if (trim(declarations(i)%relative_path) /= &
-                    trim(declarations(current)%relative_path)) cycle
+                trim(declarations(current)%relative_path)) cycle
             if (trim(declarations(i)%role) /= &
-                    trim(declarations(current)%role)) cycle
+                trim(declarations(current)%role)) cycle
             declaration_is_duplicate = .true.
             return
         end do
@@ -737,15 +737,15 @@ contains
         declaration_has_conflicting_intent = .false.
         do i = 1, current - 1
             if (trim(declarations(i)%root_alias) /= &
-                    trim(declarations(current)%root_alias)) cycle
+                trim(declarations(current)%root_alias)) cycle
             if (trim(declarations(i)%relative_path) /= &
-                    trim(declarations(current)%relative_path)) cycle
+                trim(declarations(current)%relative_path)) cycle
             if ((declarations(i)%writable_at_execution .neqv. &
-                    declarations(current)%writable_at_execution) .or. &
-                    declarations(i)%expected_kind /= &
-                    declarations(current)%expected_kind .or. &
-                    declarations(i)%expected_mode /= &
-                    declarations(current)%expected_mode) then
+                declarations(current)%writable_at_execution) .or. &
+                declarations(i)%expected_kind /= &
+                declarations(current)%expected_kind .or. &
+                declarations(i)%expected_mode /= &
+                declarations(current)%expected_mode) then
                 declaration_has_conflicting_intent = .true.
                 return
             end if
@@ -770,7 +770,7 @@ contains
         allocate(declarations(config%n_fo_inputs))
         do i = 1, config%n_fo_inputs
             if (.not. config%fo_inputs(i)%path_seen .or. &
-                    .not. config%fo_inputs(i)%role_seen) then
+                .not. config%fo_inputs(i)%role_seen) then
                 ierr = 1
                 message = 'each [[extra.fo.inputs]] row requires path and role'
                 return
@@ -908,9 +908,9 @@ contains
             return
         end if
         if (observed%digest /= expected%digest .or. &
-                observed%root_count /= expected%root_count .or. &
-                (observed%complete .neqv. expected%complete) .or. &
-                (observed%valid .neqv. expected%valid)) then
+            observed%root_count /= expected%root_count .or. &
+            (observed%complete .neqv. expected%complete) .or. &
+            (observed%valid .neqv. expected%valid)) then
             ierr = 1
             message = 'input inventory changed during generation capture'
             do i = 1, min(expected%entry_count, observed%entry_count)
@@ -951,8 +951,8 @@ contains
                 return
             end if
             if (observed%roots(observed_root)%device /= &
-                    expected%roots(i)%device .or. &
-                    observed%roots(observed_root)%inode /= expected%roots(i)%inode) then
+                expected%roots(i)%device .or. &
+                observed%roots(observed_root)%inode /= expected%roots(i)%inode) then
                 ierr = 1
                 message = 'input root identity changed during generation capture: '// &
                     trim(expected%roots(i)%canonical_alias)
@@ -967,9 +967,9 @@ contains
                     return
                 end if
                 if (bundle_path_for_alias(observed%roots(observed_root), &
-                        trim(expected%roots(i)%aliases(j))) /= &
-                        bundle_path_for_alias(expected%roots(i), &
-                        trim(expected%roots(i)%aliases(j)))) then
+                    trim(expected%roots(i)%aliases(j))) /= &
+                    bundle_path_for_alias(expected%roots(i), &
+                    trim(expected%roots(i)%aliases(j)))) then
                     ierr = 1
                     message = 'input root bundle mapping changed during capture'
                     return
@@ -1003,8 +1003,8 @@ contains
             return
         end if
         if (len_trim(dependency_root) >= PATH_LEN .or. &
-                len_trim(bundle_path) >= PATH_LEN .or. &
-                len_trim(alias) > ALIAS_LEN) then
+            len_trim(bundle_path) >= PATH_LEN .or. &
+            len_trim(alias) > ALIAS_LEN) then
             call mark_incomplete(inventory, trim(alias)// &
                 ' exceeds supported acquired-dependency path or alias length')
             return
@@ -1188,7 +1188,7 @@ contains
             return
         end if
         call scan_tree(inventory, root_index, alias, trim(project_root), trim(rel), &
-            role, .false., ierr, message)
+            role, .false., ierr, message, skip_hidden_caches=.true.)
     end subroutine scan_configured_dir
 
     subroutine add_target_main(project_root, alias, target, role, inventory, &
@@ -1389,7 +1389,7 @@ contains
         call external_requests_add(inventory%external_requests, config, &
             alias == 'project')
         if (config%mpi .or. config%hdf5 .or. config%netcdf .or. config%stdlib .or. &
-                config%minpack) then
+            config%minpack) then
             call mark_incomplete(inventory, trim(alias)// &
                 ' declares an external FPM metapackage')
         end if
@@ -1503,21 +1503,21 @@ contains
         do i = 1, inventory%root_count
             if (.not. root_has_alias(inventory%roots(i), alias)) cycle
             if (inventory%roots(i)%device /= device .or. &
-                    inventory%roots(i)%inode /= inode) then
+                inventory%roots(i)%inode /= inode) then
                 message = 'ambiguous logical input-root alias: '//trim(alias)
                 return
             end if
         end do
         do i = 1, inventory%root_count
             if (inventory%roots(i)%device /= device .or. &
-                    inventory%roots(i)%inode /= inode) cycle
+                inventory%roots(i)%inode /= inode) cycle
             root_index = i
             call add_root_alias(inventory%roots(i), alias, checked_bundle_path, ierr, &
                 message)
             if (ierr /= 0) return
             if (trim(alias) == 'project' .or. &
-                    (trim(inventory%roots(i)%canonical_alias) /= 'project' .and. &
-                    trim(alias) < trim(inventory%roots(i)%canonical_alias))) then
+                (trim(inventory%roots(i)%canonical_alias) /= 'project' .and. &
+                trim(alias) < trim(inventory%roots(i)%canonical_alias))) then
                 inventory%roots(i)%canonical_alias = trim(alias)
                 inventory%roots(i)%physical_path = trim(normalized)
                 inventory%roots(i)%bundle_path = trim(checked_bundle_path)
@@ -1649,8 +1649,8 @@ contains
         ierr = 1
         message = ''
         if (len_trim(normalized) == 0 .or. normalized(1:1) == '/' .or. &
-                trim(normalized) == '..' .or. index(trim(normalized), '../') == 1 .or. &
-                len_trim(normalized) >= PATH_LEN) then
+            trim(normalized) == '..' .or. index(trim(normalized), '../') == 1 .or. &
+            len_trim(normalized) >= PATH_LEN) then
             message = 'path dependency escapes the frozen bundle: '// &
                 trim(dependency_path)
             return
@@ -1741,7 +1741,8 @@ contains
     end function root_has_alias
 
     subroutine scan_tree(inventory, root_index, alias, physical_root, prefix, &
-            role, writable, ierr, message, cmake_scan, excluded_directory)
+            role, writable, ierr, message, cmake_scan, excluded_directory, &
+            skip_hidden_caches)
         type(input_inventory_t), intent(inout) :: inventory
         integer, intent(in) :: root_index
         character(len=*), intent(in) :: alias, physical_root, prefix, role
@@ -1756,7 +1757,7 @@ contains
         type(input_entry_t) :: entry
         character(kind=c_char, len=:), allocatable :: c_root, c_manifest
         logical :: whole_root_scan
-        logical, intent(in), optional :: cmake_scan
+        logical, intent(in), optional :: cmake_scan, skip_hidden_caches
         character(len=*), intent(in), optional :: excluded_directory
         character(kind=c_char, len=:), allocatable :: c_excluded
         integer(c_int) :: exclude_root_outputs
@@ -1771,6 +1772,10 @@ contains
         else
             c_root = trim(physical_root)//'/'//trim(prefix)//c_null_char
             exclude_root_outputs = 0_c_int
+        end if
+        if (present(skip_hidden_caches)) then
+            if (skip_hidden_caches .and. .not. whole_root_scan) &
+                exclude_root_outputs = 3_c_int
         end if
         if (present(cmake_scan)) then
             if (cmake_scan .and. whole_root_scan) exclude_root_outputs = 2_c_int
@@ -1838,7 +1843,7 @@ contains
                 end if
             end if
             if (ignored_input_path(trim(relative), kind == INPUT_DIRECTORY, &
-                    whole_root_scan)) cycle
+                whole_root_scan)) cycle
             if (.not. under_prefix(trim(relative), trim(prefix))) cycle
             if (trim(relative) == trim(prefix)) cycle
             entry = input_entry_t()
@@ -2043,7 +2048,7 @@ contains
             case ('.cache', '.venv', 'build', 'cache', 'caches', 'session', &
                     'sessions', 'log', 'logs')
                 if (whole_root_scan .and. component_index == 1 .and. &
-                        (stop /= 0 .or. is_directory)) then
+                    (stop /= 0 .or. is_directory)) then
                     ignored_input_path = .true.
                     return
                 end if
@@ -2075,7 +2080,7 @@ contains
             return
         end if
         if (path(1:1) == '/' .or. index(path(:n), achar(10)) > 0 .or. &
-                index(path(:n), achar(13)) > 0 .or. index(path(:n), '|') > 0) then
+            index(path(:n), achar(13)) > 0 .or. index(path(:n), '|') > 0) then
             message = 'input path must be relative and contain no delimiters'
             return
         end if
@@ -2114,9 +2119,9 @@ contains
         do i = 1, len_trim(alias)
             code = iachar(alias(i:i))
             if ((code >= iachar('a') .and. code <= iachar('z')) .or. &
-                    (code >= iachar('A') .and. code <= iachar('Z')) .or. &
-                    (code >= iachar('0') .and. code <= iachar('9')) .or. &
-                    index('_-:/', alias(i:i)) > 0) cycle
+                (code >= iachar('A') .and. code <= iachar('Z')) .or. &
+                (code >= iachar('0') .and. code <= iachar('9')) .or. &
+                index('_-:/', alias(i:i)) > 0) cycle
             return
         end do
         valid_alias = .true.
@@ -2131,9 +2136,9 @@ contains
         do i = 1, len_trim(role)
             code = iachar(role(i:i))
             if ((code >= iachar('a') .and. code <= iachar('z')) .or. &
-                    (code >= iachar('A') .and. code <= iachar('Z')) .or. &
-                    (code >= iachar('0') .and. code <= iachar('9')) .or. &
-                    index('_-:', role(i:i)) > 0) cycle
+                (code >= iachar('A') .and. code <= iachar('Z')) .or. &
+                (code >= iachar('0') .and. code <= iachar('9')) .or. &
+                index('_-:', role(i:i)) > 0) cycle
             return
         end do
         valid_role = .true.
@@ -2192,9 +2197,9 @@ contains
         if (declaration%expected_mode < 0) return
         do i = 1, inventory%entry_count
             if (trim(inventory%entries(i)%root_alias) /= &
-                    trim(declaration%root_alias)) cycle
+                trim(declaration%root_alias)) cycle
             if (trim(inventory%entries(i)%relative_path) /= &
-                    trim(declaration%relative_path)) cycle
+                trim(declaration%relative_path)) cycle
             if (inventory%entries(i)%mode /= declaration%expected_mode) then
                 ierr = 1
                 message = 'declared input mode does not match: '// &
@@ -2219,16 +2224,16 @@ contains
         i = inventory%entry_slots(slot)
         if (i /= 0) then
             if (inventory%entries(i)%kind /= entry%kind .or. &
-                    inventory%entries(i)%mode /= entry%mode .or. &
-                    inventory%entries(i)%content_digest /= entry%content_digest &
-                    .or. inventory%entries(i)%link_target /= entry%link_target) then
+                inventory%entries(i)%mode /= entry%mode .or. &
+                inventory%entries(i)%content_digest /= entry%content_digest &
+                .or. inventory%entries(i)%link_target /= entry%link_target) then
                 ierr = 1
                 message = 'input changed or conflicts during inventory: '// &
                     trim(entry%root_alias)//':'//trim(entry%relative_path)
                 return
             end if
             if (inventory%entries(i)%writable_at_execution .neqv. &
-                    entry%writable_at_execution) then
+                entry%writable_at_execution) then
                 ierr = 1
                 message = 'input mutability conflicts during inventory: '// &
                     trim(entry%root_alias)//':'//trim(entry%relative_path)
@@ -2266,7 +2271,7 @@ contains
         if (allocated(inventory%entry_slots)) then
             capacity = size(inventory%entry_slots)
             if (inventory%indexed_entry_count == inventory%entry_count .and. &
-                    inventory%entry_count < capacity / 2) return
+                inventory%entry_count < capacity / 2) return
         end if
         do while (inventory%entry_count >= capacity / 2)
             capacity = 2 * capacity
@@ -2356,9 +2361,9 @@ contains
         do i = 1, inventory%entry_count
             if (retained > 0) then
                 if (same_entry_key(inventory%entries(retained), &
-                        inventory%entries(i))) then
+                    inventory%entries(i))) then
                     if (.not. same_entry_value(inventory%entries(retained), &
-                            inventory%entries(i))) then
+                        inventory%entries(i))) then
                         ierr = 1
                         message = 'conflicting duplicate input after '// &
                             'root canonicalization'

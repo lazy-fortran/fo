@@ -1268,6 +1268,47 @@ contains
         end do
     end subroutine compiler_implicit_directories
 
+    subroutine mpi_compiler_includes(cache, includes)
+        character(len=*), intent(in) :: cache
+        type(string_t), allocatable, intent(inout) :: includes(:)
+        type(string_t), allocatable :: grown(:)
+        character(:), allocatable :: line, key, kind, value, path
+        character(len=PATH_LEN) :: physical
+        integer :: cursor, first, last, j
+
+        cursor = 1
+        do while (next_cache_line(cache, cursor, line))
+            call cache_entry(line, key, kind, value)
+            select case (key)
+            case ('MPI_C_COMPILER_INCLUDE_DIRS', 'MPI_CXX_COMPILER_INCLUDE_DIRS', &
+                    'MPI_Fortran_COMPILER_INCLUDE_DIRS')
+                ! FindMPI reports native wrapper SDK search roots separately.
+            case default
+                cycle
+            end select
+            first = 1
+            do while (first <= len(value))
+                last = index(value(first:), ';')
+                if (last == 0) then
+                    last = len(value) + 1
+                else
+                    last = first + last - 1
+                end if
+                path = value(first:last - 1)
+                first = last + 1
+                if (.not. fs_path_is_absolute(path)) cycle
+                if (len(path) > PATH_LEN) cycle
+                call canonical_directory(path, physical)
+                allocate(grown(size(includes) + 1))
+                do j = 1, size(includes)
+                    grown(j)%s = includes(j)%s
+                end do
+                grown(size(grown))%s = trim(physical)
+                call move_alloc(grown, includes)
+            end do
+        end do
+    end subroutine mpi_compiler_includes
+
     subroutine validate_cmake_paths(backend, roots, ierr, message, inventory, &
             n_roots, bundles, labels, names)
         type(backend_t), intent(in) :: backend
@@ -1308,6 +1349,7 @@ contains
         cmake_root = ''
         toolchain = ''
         call read_text_file(trim(build)//'/CMakeCache.txt', text)
+        call mpi_compiler_includes(text, implicit_includes)
         cursor = 1
         do while (next_cache_line(text, cursor, line))
             call cache_entry(line, key, kind, value)
