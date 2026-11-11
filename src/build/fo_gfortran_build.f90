@@ -81,6 +81,10 @@ module fo_gfortran_build
     logical, save :: detected_fc_is_executable = .false.
     character(len=512), save :: detected_compiler = ''
     character(len=HASH_LEN), save :: detected_tool_key = ''
+    !! The header the compiler driver pre-includes into every compile, as
+    !! it said for the driver identity preinclude_driver; blank for none.
+    character(len=HASH_LEN), save :: preinclude_driver = ''
+    character(len=512), save :: preinclude_path = ''
     !> The flags the current build was asked for, kept so the baseline can add
     !> its debug-info diet (`-g0`) without overwriting a caller's `-g`.
     !> `--debug` and `--asan` arrive here as request flags, the same reason
@@ -813,14 +817,17 @@ contains
     end subroutine scan_header_dependencies
 
     subroutine unit_cache_key(units, n_units, dag, filename, mod_keys, dirs, &
-            compiler, key_text, depfile, key, complete)
+            module_dir, compiler, key_text, depfile, key, complete)
         !! Action key of one source: its content (and Fortran includes), the
         !! compiler and flags identity, the interface keys of the modules it
         !! uses and, when a dependency file is declared, its header content.
+        !! A module no project source provides counts wherever the compiler
+        !! may find it, in module_dir as in dirs.
         type(scan_unit_t), intent(in) :: units(:)
         integer, intent(in) :: n_units
         type(dag_t), intent(in) :: dag
-        character(len=*), intent(in) :: filename, compiler, key_text, depfile
+        character(len=*), intent(in) :: filename, module_dir, compiler, key_text
+        character(len=*), intent(in) :: depfile
         character(len=HASH_LEN), intent(in) :: mod_keys(MAX_NODES)
         character(len=512), intent(in) :: dirs(:)
         character(len=HASH_LEN), intent(out) :: key
@@ -831,7 +838,7 @@ contains
 
         key = ''
         call collect_dep_keys_source_order(units, n_units, dag, filename, &
-            mod_keys, dirs, size(dirs), dep_keys, n_dep, complete)
+            mod_keys, dirs, size(dirs), dep_keys, n_dep, complete, module_dir)
         if (.not. complete) return
         headers = ''
         if (len(depfile) > 0) call depfile_digest(depfile, headers)
@@ -2698,13 +2705,14 @@ contains
                         end if
                         call unit_cache_key(all_units, n_all, dag, &
                             filenames(node_id), new_mod_keys, &
-                            node_dirs(node_id)%d, compiler, &
-                            node_key_text(node_id)%s, node_depfile(node_id)%s, &
+                            node_dirs(node_id)%d, node_mod_dir(node_id)%s, &
+                            compiler, node_key_text(node_id)%s, &
+                            node_depfile(node_id)%s, &
                             level_source_key, level_complete)
                     else
                         call unit_cache_key(all_units, n_all, dag, &
                             filenames(node_id), new_mod_keys, &
-                            dep_includes(:n_dep_includes), compiler, &
+                            dep_includes(:n_dep_includes), mod_dir, compiler, &
                             trim(source_key_flags(node_id)), '', &
                             level_source_key, level_complete)
                     end if
@@ -2815,8 +2823,9 @@ contains
                         ! includes; the action is keyed by their content.
                         call unit_cache_key(all_units, n_all, dag, &
                             filenames(node_id), new_mod_keys, &
-                            node_dirs(node_id)%d, compiler, &
-                            node_key_text(node_id)%s, node_depfile(node_id)%s, &
+                            node_dirs(node_id)%d, node_mod_dir(node_id)%s, &
+                            compiler, node_key_text(node_id)%s, &
+                            node_depfile(node_id)%s, &
                             post_key, post_complete)
                         if (post_complete) compile_keys(ii) = post_key
                     end if
@@ -3289,10 +3298,10 @@ contains
 
     subroutine collect_dep_keys_source_order(units, n_units, dag, source_path, &
             mod_keys, dep_includes, &
-            n_dep_includes, dep_keys, n_dep, complete)
+            n_dep_includes, dep_keys, n_dep, complete, module_dir)
         type(scan_unit_t), intent(in) :: units(:)
         integer, intent(in) :: n_units, n_dep_includes
-        character(len=*), intent(in) :: source_path
+        character(len=*), intent(in) :: source_path, module_dir
         type(dag_t), intent(in) :: dag
         character(len=HASH_LEN), intent(in) :: mod_keys(MAX_NODES)
         character(len=512), intent(in) :: dep_includes(:)
@@ -3300,12 +3309,14 @@ contains
         integer, intent(out) :: n_dep
         logical, intent(out) :: complete
 
-        integer :: i, j, dep_id
+        integer :: i, j, k, dep_id, n_copies
         character(len=512) :: modpath
+        character(len=HASH_LEN), allocatable :: copies(:)
         logical :: found
 
         n_dep = 0
         complete = .true.
+        allocate (copies(n_dep_includes + 1))
         do i = 1, n_units
             if (trim(units(i)%filename) /= trim(source_path)) cycle
 
@@ -3322,17 +3333,49 @@ contains
                     n_dep = n_dep + 1
                     dep_keys(n_dep) = mod_keys(dep_id)
                 else
-                    call find_dep_mod_file(units(i)%deps(j), dep_includes, &
-                        n_dep_includes, modpath, found)
-                    if (.not. found) cycle
+                    ! Every copy counts: the order of the module directories
+                    ! of a declared command is not known here.
+                    n_copies = 0
+                    do k = 0, n_dep_includes
+                        if (k == 0) then
+                            call mod_file_in(units(i)%deps(j), module_dir, modpath, found)
+                        else
+                            call mod_file_in(units(i)%deps(j), dep_includes(k), modpath, &
+                                found)
+                        end if
+                        if (.not. found) cycle
+                        n_copies = n_copies + 1
+                        call hash_mod_file(modpath, copies(n_copies))
+                    end do
+                    if (n_copies == 0) cycle
                     n_dep = n_dep + 1
-                    call hash_mod_file(modpath, dep_keys(n_dep))
+                    dep_keys(n_dep) = copies(1)
+                    if (n_copies > 1) dep_keys(n_dep) = cache_digest(copies, n_copies)
                 end if
             end do
             return
         end do
         allocate (dep_keys(0))
     end subroutine collect_dep_keys_source_order
+
+    subroutine mod_file_in(modname, dir, modpath, found)
+        character(len=*), intent(in) :: modname, dir
+        character(len=*), intent(out) :: modpath
+        logical, intent(out) :: found
+        integer :: i
+
+        found = .false.
+        modpath = ''
+        if (len_trim(dir) == 0) return
+        modpath = trim(dir)//'/'//trim(modname)//'.mod'
+        i = len_trim(dir) + 2
+        do while (i <= len_trim(modpath) - 4)
+            if (modpath(i:i) >= 'A' .and. modpath(i:i) <= 'Z') &
+                modpath(i:i) = achar(iachar(modpath(i:i)) + 32)
+            i = i + 1
+        end do
+        inquire (file=trim(modpath), exist=found)
+    end subroutine mod_file_in
 
     subroutine find_dep_mod_file(modname, dep_includes, n_dep_includes, modpath, &
             found)
@@ -6019,7 +6062,7 @@ contains
         character(len=:), allocatable :: packed, selected
         integer :: u, iostat, n_args, exitcode
         logical :: memo_hit
-        character(len=HASH_LEN) :: tool_keys(3), tool_key
+        character(len=HASH_LEN) :: tool_keys(4), tool_key
 
         call fc_command_into(selected)
         command = selected
@@ -6027,7 +6070,12 @@ contains
         tool_keys(1) = compiler_tool_key(command)
         tool_keys(2) = compiler_tool_key('gcc')
         tool_keys(3) = compiler_tool_key('g++')
-        tool_key = cache_digest(tool_keys, size(tool_keys))
+        tool_keys(4) = driver_preinclude_key(tool_keys(1))
+        if (len_trim(tool_keys(4)) > 0) then
+            tool_key = cache_digest(tool_keys, 4)
+        else
+            tool_key = cache_digest(tool_keys, 3)
+        end if
         if (trim(command) == trim(detected_fc) .and. &
             len_trim(detected_compiler) > 0 .and. tool_key == detected_tool_key) then
             compiler = detected_compiler
@@ -6062,6 +6110,62 @@ contains
         detected_compiler = compiler
         detected_tool_key = tool_key
     end subroutine detect_compiler
+
+    function driver_preinclude_key(driver) result(key)
+        !! Path and content of the header the gfortran driver passes to the
+        !! compiler proper with -fpre-include, blank when it passes none. On
+        !! glibc systems it is /usr/include/finclude/math-vector-fortran.h,
+        !! whose SIMD declarations decide whether loops call libmvec: the
+        !! same driver compiles other objects on a host with another C
+        !! library. The driver is asked once per process and driver.
+        character(len=HASH_LEN), intent(in) :: driver
+        character(len=HASH_LEN) :: key, content
+        character(len=512) :: parts(3)
+        type(compiler_dialect_t) :: dialect
+        character(len=:), allocatable :: packed, text, line
+        character(len=MAX_PATH) :: log_file
+        character(len=*), parameter :: option = '-fpre-include='
+        integer :: n_args, exitcode, ierr, start, finish
+
+        key = ''
+        if (driver /= preinclude_driver) then
+            preinclude_path = ''
+            dialect = compiler_dialect(fc_command())
+            if (dialect%kind == COMPILER_GFORTRAN) then
+                n_args = 0
+                call append_fc_command(packed, n_args)
+                call argv_push_split(packed, n_args, '-### -x f95 -c /dev/null -o /dev/null')
+                call make_tmpfile('fo_driver_commands', log_file)
+                call process_run_argv_logged('', packed, n_args, log_file, .false., 30, &
+                    exitcode, env_extra='LC_ALL=C')
+                text = ''
+                if (exitcode == 0) call read_text_file_alloc(trim(log_file), text, ierr)
+                call delete_tmpfile(log_file)
+                ! The command of the compiler proper; its last such option
+                ! is the one it uses.
+                finish = index(text, 'f951')
+                if (finish > 0) then
+                    line = text(finish:)
+                    if (index(line, new_line('a')) > 0) &
+                        line = line(:index(line, new_line('a')) - 1)
+                    start = index(line, option, back=.true.)
+                    if (start > 0) then
+                        start = start + len(option)
+                        finish = scan(line(start:), '"'' ')
+                        if (finish == 0) finish = len(line) - start + 2
+                        preinclude_path = line(start:start + finish - 2)
+                    end if
+                end if
+            end if
+            preinclude_driver = driver
+        end if
+        if (len_trim(preinclude_path) == 0) return
+        call cache_file_digest(trim(preinclude_path), content)
+        parts(1) = 'driver-pre-include'
+        parts(2) = preinclude_path
+        parts(3) = content
+        key = cache_digest(parts, size(parts))
+    end function driver_preinclude_key
 
     function compiler_tool_key(command) result(key)
         !! Capture Fo's explicit compiler drivers, without recursing into host tools.

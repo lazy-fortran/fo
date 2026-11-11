@@ -53,6 +53,17 @@ failure detection. The workspace master plan, when present, owns delivery order.
   focused cache, build, dependency, diagnostics, Gremlin and hook tests pass
   (`test_hook_cmake_presets` only when run alone, under load it exceeded its
   time budget); the complete suite was not run.
+- The fpm key also resolves `#include_next`, `#import`, `include` behind `!$`
+  and fixed-form `INCLUDE` with inner blanks, keys the outcome of
+  `__has_include`, keys every copy of a module no source provides in the
+  module and include directories, and holds the header the gfortran driver
+  pre-includes. The eleven new assertions of `test_compile_key_inputs_cli`
+  fail with candidate `cf9823d4` above and pass with candidate SHA256
+  `e64b7ddf9434e03b5e5d45bb9b8300434c69eb8a9c2b4383ff0a66b1889fcb23`, as do 14
+  focused cache, build, CMake, dependency and Gremlin tests. The default
+  suite gives 211 pass, 34 reused, 1 flaky and 2 FAIL
+  (`test_gremlin_capture_pending`, `test_project_model_twin`), which fail the
+  same way with candidate `cf9823d4`.
 - Limits: test programs, coverage, LTO, user include options, consumers of a
   path dependency with an include directory and compilers other than gfortran
   keep the path-bound key.

@@ -18,16 +18,27 @@ For fpm projects, a compile action is keyed by:
   and content: a Fortran `include` inside an included file is looked up next
   to the compiled source, and a header found in neither place comes from the
   compiler's own search list, which includes `CPATH`;
+- the same for the files reached through `#include_next` (searched in that
+  list after the directory the including header came from), `#import`, an
+  `include` line behind the OpenMP sentinel `!$` and a fixed-form `INCLUDE`
+  with blanks inside the keyword, and for each `__has_include(...)` in a
+  directive whether and where the header is found;
 - the name and content of `.mod` and `.smod` files lying in the directory of
   the source, which gfortran reads before those of the module directory, so
   that a stale module file left there by another build changes the key;
 - the compiler identity: its command, the path and content of the compiler
-  driver and its version line;
+  driver and its version line, and the path and content of the header the
+  driver pre-includes into every compile (on glibc systems
+  `/usr/include/finclude/math-vector-fortran.h`, which decides whether loops
+  call the vector math library);
 - fo's baseline flags and the flags of the project and the command line, and
   the values of `COMPILER_PATH`, `GCC_EXEC_PREFIX` and
   `MACOSX_DEPLOYMENT_TARGET` when set;
 - the host CPU identity when a flag ends in `=native`;
-- the interface keys of the modules it uses;
+- the interface keys of the modules it uses, and for a module no project
+  source provides the content of every copy in the module directory
+  (`build/fo/mod`) and the include directories, so that a module file left
+  there by a removed source or another branch counts;
 - the source path and the module and include options as the compiler gets them;
 - the project directory, unless the action is relocatable (see below).
 
@@ -49,10 +60,14 @@ For the CMake backend, a compile action is keyed by:
 With debug information the compile directory is part of the key, and options
 such as `-march=native` add the host CPU identity. If a key cannot be complete,
 the action is not cached; for fpm this includes a header gfortran would look
-up in its own search list when it does not report that list. Compiler and
+up in its own search list when it does not report that list, an include or
+`__has_include` whose file name is a macro, and an `#include_next` in a header
+whose directory gfortran's list does not show. Compiler and
 system modules outside the include
 directories (intrinsic modules, system `.mod` files) count as part of the
-toolchain identity rather than being keyed by content.
+toolchain identity rather than being keyed by content. Module files in the
+project root, which gfortran would read before all others, are removed before
+every fpm build.
 
 ## Relocatable results
 
