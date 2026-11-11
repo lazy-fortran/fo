@@ -3,7 +3,9 @@ program test_remote_cache_cli
     !! (curl reads and writes file:// URLs): a build that may write uploads
     !! what it compiles, and a build on an empty local cache takes those
     !! results and compiles nothing. An archive with a member that is not a
-    !! compile output is refused and the unit is compiled instead.
+    !! compile output is refused and the unit is compiled instead. With
+    !! FO_CACHE_RELOCATABLE=1 a copy of the project in another directory
+    !! compiles nothing either.
     !!
     !! Over HTTP (a stand-in for curl that keeps the store in a directory and
     !! answers like the server) the token and proxy of the login file reach
@@ -23,9 +25,10 @@ program test_remote_cache_cli
 
     character(len=1), parameter :: nl = achar(10)
     character(:), allocatable :: driver, scratch, project, remote, wrapper, log, listing, key
-    character(:), allocatable :: store, requests, login
+    character(:), allocatable :: store, requests, login, copy
     character(len=4096) :: real_fc, path
     type(string_list_t) :: build, exec, writer, reader, http_writer, http_reader
+    type(string_list_t) :: relocatable_writer, relocatable_reader
     type(process_result_t) :: result
     integer :: status, eol
     logical :: located
@@ -37,18 +40,15 @@ program test_remote_cache_cli
     log = join_path(scratch, 'compiles.log')
     call make_directory(remote)
     call make_directory(join_path(remote, 'shared'))
-    call write_text(join_path(project, 'fpm.toml'), 'name = "shared"'//nl)
-    call write_text(join_path(project, 'src/m.f90'), 'module m'//nl// &
-        '    implicit none'//nl//'    integer, parameter :: answer = 42'//nl//'end module'//nl)
-    call write_text(join_path(project, 'app/main.f90'), 'program main'//nl// &
-        '    use m, only: answer'//nl//'    print *, answer'//nl//'end program'//nl)
+    call write_project(project)
 
     ! The compiler under a wrapper that records every compilation of a source.
     call fs_find_executable('gfortran', real_fc, located)
     call assert_true(located, 'a Fortran compiler is installed')
     wrapper = join_path(scratch, 'bin/gfortran')
-    call write_text(wrapper, '#!/bin/sh'//nl//'for a in "$@"; do case "$a" in */project/*.f90) '// &
-        'echo "$a" >> "'//log//'";; esac; done'//nl//'exec "'//trim(real_fc)//'" "$@"'//nl)
+    call write_text(wrapper, '#!/bin/sh'//nl//'for a in "$@"; do case "$a" in *fo_cap_*) ;; '// &
+        '*.f90) echo "$a" >> "'//log//'";; esac; done'//nl// &
+        'exec "'//trim(real_fc)//'" "$@"'//nl)
     call set_mode(wrapper, int(o'755'))
 
     call list_add(build, 'build')
@@ -99,6 +99,35 @@ program test_remote_cache_cli
         'nothing of the refused archive reaches the build')
     call run_fo(driver, exec, project, join_path(scratch, 'cache-third'), result, reader, 120000)
     call assert_contains(result%stdout, '42', 'the program still runs')
+
+    ! Without the checkout path in the key, a copy of the project in another
+    ! directory takes the results of the first one.
+    copy = join_path(scratch, 'elsewhere/copy')
+    call write_project(copy)
+    call make_directory(join_path(scratch, 'remote-relocatable/shared'))
+    call list_add(relocatable_reader, 'FO_FC='//wrapper)
+    call list_add(relocatable_reader, 'FO_CACHE_RELOCATABLE=1')
+    call list_add(relocatable_reader, 'FO_REMOTE_CACHE=file://'// &
+        join_path(scratch, 'remote-relocatable'))
+    relocatable_writer = relocatable_reader
+    call list_add(relocatable_writer, 'FO_REMOTE_CACHE_WRITE=shared')
+    call remove_tree(join_path(project, 'build'))
+    call run_fo(driver, build, project, join_path(scratch, 'cache-relocatable-writer'), &
+        result, relocatable_writer, 120000)
+    call assert_equal_integer(result%exit_code, 0, &
+        'the relocatable writing build succeeds: '//result%stdout//result%stderr)
+    call run_list(argv('ls', join_path(scratch, 'remote-relocatable/shared')), status, listing)
+    call assert_true(status == 0 .and. count_lines(listing) == 2, &
+        'both relocatable units are uploaded: '//listing)
+    call write_text(log, '')
+    call run_fo(driver, exec, copy, join_path(scratch, 'cache-relocatable-reader'), &
+        result, relocatable_reader, 120000)
+    call assert_equal_integer(result%exit_code, 0, &
+        'the build of the copy succeeds: '//result%stdout//result%stderr)
+    call assert_true(len_trim(read_text(log)) == 0, &
+        'a copy at another path compiles nothing through the remote store: '// &
+        read_text(log))
+    call assert_contains(result%stdout, '42', 'the copy built from remote results runs')
 
     ! The same over HTTP, with curl replaced by a store in a directory.
     store = join_path(scratch, 'http-store')
@@ -222,6 +251,17 @@ program test_remote_cache_cli
     call finish_assertions()
 
 contains
+
+    subroutine write_project(root)
+        character(len=*), intent(in) :: root
+
+        call write_text(join_path(root, 'fpm.toml'), 'name = "shared"'//nl)
+        call write_text(join_path(root, 'src/m.f90'), 'module m'//nl// &
+            '    implicit none'//nl//'    integer, parameter :: answer = 42'//nl// &
+            'end module'//nl)
+        call write_text(join_path(root, 'app/main.f90'), 'program main'//nl// &
+            '    use m, only: answer'//nl//'    print *, answer'//nl//'end program'//nl)
+    end subroutine write_project
 
     integer function count_lines(text) result(n)
         character(len=*), intent(in) :: text

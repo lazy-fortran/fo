@@ -13,10 +13,13 @@ For fortyard runners, a local compile-cache miss can ask an HTTP store
 (`FO_REMOTE_CACHE`, see [doc/cache.md](doc/cache.md#remote-store)) and a
 writing build uploads what it compiles. `test_remote_cache_cli` covers the
 store as a directory and, with a stand-in for curl, token scope, checksum
-refusal and a rejecting store. Limits: fpm action keys cover the checkout path,
-so only checkouts at one path share (CMake projects share across paths with
-`FO_CACHE_RELOCATABLE=1`); one sh and curl per lookup; serial uploads; only the
-`shared` namespace is read.
+refusal, a rejecting store and, with `FO_CACHE_RELOCATABLE=1`, a copy of an
+fpm project at another path that compiles nothing. Limits: checkouts at
+different paths share only with that variable set on reader and writer, and
+then not test programs and the other path-bound actions of the section below;
+results with a path-bound key are uploaded although no other checkout can use
+them; one sh and curl per lookup; serial uploads; only the `shared` namespace
+is read.
 
 ## Relocatable fpm compile keys (2026-11-11)
 

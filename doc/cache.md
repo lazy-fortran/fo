@@ -198,10 +198,11 @@ minutes, so a dead store costs one timeout instead of one per unit and never
 fails the build. `curl` and `tar` must be installed.
 
 The keys are those of the local store, so a result is found only where the
-local store would find it. For fpm projects the key covers the absolute paths
-of the project, and builds share results only when their checkouts are at the
-same path. For CMake projects `FO_CACHE_RELOCATABLE=1` removes the location
-from the key, and checkouts at different paths share.
+local store would find it. By default they cover the path of the project, and
+builds share results only when their checkouts are at the same path. Set
+`FO_CACHE_RELOCATABLE=1` on every machine that reads or writes the store (see
+[Relocatable results](#relocatable-results)): checkouts at different paths then
+share, except for the actions listed there as tied to their checkout.
 
 ## Parallelism
 
