@@ -32,6 +32,7 @@ module fo_gfortran_build
     use fo_compdb, only: compdb_write
     use fo_diagnostics, only: COMPILE_DIRECTORY_LINE
     use fx_dag, only: dag_t, dag_find_node, dag_topo_sort, dag_levels, MAX_NODES
+    use fo_remote_cache, only: remote_cache_enabled, remote_cache_fetch, remote_cache_put
     use fo_cache, only: cache_t, cache_init, cache_key_for, &
         cache_restore_action, cache_store_action, hash_mod_file, &
         HASH_LEN, cache_digest, cache_file_digest, &
@@ -2419,6 +2420,8 @@ contains
         character(len=HASH_LEN) :: level_source_key
         integer :: level_dep_count
         logical :: level_complete, level_hit
+        character(len=HASH_LEN) :: level_output_id
+        integer :: level_store_ierr
 
         n_src_objs = 0
         is_prog_arr = .false.
@@ -2683,7 +2686,7 @@ contains
                 !$omp schedule(static) private(node_id, level_dep_keys, &
                 !$omp level_dep_count, level_complete, level_source_key, &
                 !$omp level_obj_path, level_hit, level_depfile_exists, &
-                !$omp level_location)
+                !$omp level_location, level_output_id, level_store_ierr)
                 do i = 1, n_level
                     node_id = level_nodes(i)
                     level_keys(i) = ''
@@ -2729,6 +2732,17 @@ contains
                             level_obj_path, node_mod_dir(node_id)%s, level_hit, &
                             required_mod_names=interfaces(node_id)%modules, &
                             required_smod_names=interfaces(node_id)%submodules)
+                        if (.not. level_hit .and. remote_cache_enabled()) then
+                            ! A result another machine compiled; kept locally too.
+                            call remote_cache_fetch(level_source_key, level_obj_path, &
+                                node_mod_dir(node_id)%s, interfaces(node_id)%modules, &
+                                interfaces(node_id)%submodules, fetched=level_hit)
+                            if (level_hit) call cache_store_action(c, level_source_key, &
+                                level_obj_path, node_mod_dir(node_id)%s, &
+                                interfaces(node_id)%modules, level_output_id, &
+                                level_store_ierr, &
+                                smod_names=interfaces(node_id)%submodules)
+                        end if
                         if (level_hit) then
                             call get_interface_key(interfaces(node_id), &
                                 node_mod_dir(node_id)%s, new_mod_keys(node_id))
@@ -2835,6 +2849,9 @@ contains
                             node_mod_dir(node_id)%s, &
                             interfaces(node_id)%modules, output_id, cache_ierr, &
                             smod_names=interfaces(node_id)%submodules)
+                        if (cache_ierr == 0) call remote_cache_put(compile_keys(ii), &
+                            obj_path, node_mod_dir(node_id)%s, &
+                            interfaces(node_id)%modules, interfaces(node_id)%submodules)
                     end if
                 end do
                 do ii = 1, n_compile
@@ -4119,6 +4136,8 @@ contains
         logical, allocatable :: run_compiled(:)
         integer :: n_order
         logical :: has_cycle, restored
+        character(len=HASH_LEN) :: run_output_id
+        integer :: run_store_ierr
         logical :: allow_cache
         character(len=512) :: obj_path, bin_path
         character(len=:), allocatable :: incl_flag, helper_includes
@@ -4407,7 +4426,8 @@ contains
         team_size = max(1, min(n_run, native_jobs()))
         !$omp parallel do if(n_run > 1) num_threads(team_size) schedule(dynamic) &
         !$omp& private(node_id, fname_local, &
-        !$omp& obj_path, bin_path, tname, log_local, restored)
+        !$omp& obj_path, bin_path, tname, log_local, restored, run_output_id, &
+        !$omp& run_store_ierr)
         do i = 1, n_run
             if (run_build_indices(i) /= i) cycle
             node_id = run_nodes(i)
@@ -4418,6 +4438,12 @@ contains
             if (compile_cache_ierr == 0 .and. len_trim(run_keys(i)) > 0) then
                 call cache_restore_action(compile_cache, run_keys(i), &
                     obj_path, mod_dir, restored)
+                if (.not. restored .and. remote_cache_enabled()) then
+                    call remote_cache_fetch(run_keys(i), obj_path, mod_dir, &
+                        fetched=restored)
+                    if (restored) call cache_store_action(compile_cache, run_keys(i), &
+                        obj_path, mod_dir, NO_MODULE_OUTPUTS, run_output_id, run_store_ierr)
+                end if
             end if
             if (.not. restored) then
                 call compile_f90(project_dir, fname_local, obj_path, incl_flag, &
@@ -4474,6 +4500,8 @@ contains
                     call cache_store_action(compile_cache, run_keys(i), &
                         obj_path, mod_dir, NO_MODULE_OUTPUTS, output_key, &
                         compile_cache_ierr)
+                    if (compile_cache_ierr == 0) call remote_cache_put(run_keys(i), &
+                        obj_path, mod_dir)
                     if (present(n_compiled)) n_compiled = n_compiled + 1
                 end if
             end if
