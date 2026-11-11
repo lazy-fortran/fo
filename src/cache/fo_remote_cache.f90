@@ -6,13 +6,17 @@ module fo_remote_cache
     !!
     !!   FO_REMOTE_CACHE        base URL, e.g. https://host/cache/v1; unset: off
     !!   FO_REMOTE_CACHE_WRITE  namespace to upload to (e.g. shared); unset: read only
-    !!   FO_REMOTE_CACHE_LOGIN  file with token= and proxy= lines
-    !!                          (default ~/.config/fortyard/credentials)
+    !!   FO_REMOTE_CACHE_LOGIN  file with server=, token= and proxy= lines
+    !!                          (default ~/.config/fortyard/credentials); the
+    !!                          token is sent only to URLs below its server
     !!
     !! A result travels as a tar archive of `object`, `mod/NAME.mod` and
     !! `smod/NAME.smod`. A download over HTTP is taken only when its SHA-256
     !! equals the server's X-Content-SHA256 header and it holds nothing but
     !! plain files of those names. Every failure is a miss: the build compiles.
+    !! A store that does not answer, rejects the request or sends no checksum
+    !! is reported once and then left alone for RETRY_SECONDS.
+    use, intrinsic :: iso_fortran_env, only: error_unit, int64
     use fx_hash, only: sha256_file
     use fx_proc, only: proc_exec_silent
     use fo_fs, only: fs_make_dir, fs_remove_tree, fs_rename
@@ -23,14 +27,24 @@ module fo_remote_cache
         remote_cache_put, remote_cache_reset
 
     integer, parameter :: PATH_MAX = 4096
-    logical, save :: loaded = .false.
+    integer, parameter :: RETRY_SECONDS = 300
+    logical, save :: loaded = .false., warned_refused = .false.
+    integer(int64), save :: read_off_until = 0, write_off_until = 0
     character(len=:), allocatable, save :: base_url, write_namespace, login_file
 
     ! Token and proxy of the login file $4, read without starting a process.
+    ! The token is for the server the login names: no other URL $1 gets it.
     character(len=*), parameter :: LOGIN_SCRIPT = &
-        'tok=; proxy=; if [ -r "$4" ]; then while IFS= read -r l || [ -n "$l" ]; do '// &
-        'case $l in token=*) tok=${l#token=};; proxy=*) proxy=${l#proxy=};; esac; '// &
-        'done < "$4"; fi; '
+        'tok=; proxy=; srv=; if [ -r "$4" ]; then '// &
+        'while IFS= read -r l || [ -n "$l" ]; do '// &
+        'case $l in token=*) tok=${l#token=};; proxy=*) proxy=${l#proxy=};; '// &
+        'server=*) srv=${l#server=};; esac; done < "$4"; fi; srv=${srv%/}; '// &
+        'case ${srv:+$1} in "$srv"/*) ;; *) tok=;; esac; '
+
+    ! A server that accepts the connection and then stays silent is given up
+    ! after 15 seconds without a byte, well before max-time.
+    character(len=*), parameter :: STALL = &
+        'connect-timeout = 10\nspeed-time = 15\nspeed-limit = 1\n'
 
     ! The token reaches curl on its standard input, never on a command line.
     character(len=*), parameter :: CURL_AUTH = &
@@ -39,7 +53,7 @@ module fo_remote_cache
 
     ! $1 url, $2 archive, $3 header file, $4 login file
     character(len=*), parameter :: FETCH_SCRIPT = LOGIN_SCRIPT// &
-        '{ printf ''url = "%s"\nsilent\nfail\nmax-time = 60\noutput = "%s"\n'// &
+        '{ printf ''url = "%s"\nsilent\nfail\nmax-time = 60\n'//STALL//'output = "%s"\n'// &
         'dump-header = "%s"\n'' "$1" "$2" "$3"; '//CURL_AUTH
 
     ! $1 archive, $2 existing directory to extract into
@@ -58,25 +72,32 @@ module fo_remote_cache
 
     ! $1 url, $2 archive, $3 its SHA-256, $4 login file
     character(len=*), parameter :: PUT_SCRIPT = LOGIN_SCRIPT// &
-        '{ printf ''url = "%s"\nsilent\nfail\nmax-time = 120\nupload-file = "%s"\n'// &
-        'header = "X-Content-SHA256: %s"\n'' "$1" "$2" "$3"; '//CURL_AUTH//' >/dev/null'
+        '{ printf ''url = "%s"\nsilent\nfail\nmax-time = 120\n'//STALL// &
+        'upload-file = "%s"\ndump-header = "%s.headers"\n'// &
+        'header = "X-Content-SHA256: %s"\n'' "$1" "$2" "$2" "$3"; '// &
+        CURL_AUTH//' >/dev/null'
 
 contains
 
     logical function remote_cache_enabled()
         call load()
         remote_cache_enabled = len(base_url) > 0
+        if (remote_cache_enabled) remote_cache_enabled = now() >= read_off_until
     end function remote_cache_enabled
 
     logical function remote_cache_writes()
         call load()
-        remote_cache_writes = len(base_url) > 0 .and. len(write_namespace) > 0
+        remote_cache_writes = remote_cache_enabled() .and. len(write_namespace) > 0
+        if (remote_cache_writes) remote_cache_writes = now() >= write_off_until
     end function remote_cache_writes
 
     subroutine remote_cache_reset()
         !! Reads the settings again at the next use (for tests).
         !$omp critical(fo_remote_cache_load)
         loaded = .false.
+        read_off_until = 0
+        write_off_until = 0
+        warned_refused = .false.
         !$omp end critical(fo_remote_cache_load)
     end subroutine remote_cache_reset
 
@@ -108,14 +129,26 @@ contains
         if (status /= 0) return
         call run_sh(FETCH_SCRIPT, status, base_url//'/shared/'//trim(key), archive, headers, &
             login_file)
-        if (status == 0) then
-            want = header_value(headers, 'x-content-sha256')
-            ! Without the header only a file:// store (a directory) is trusted.
-            if (len(want) == 0 .and. index(base_url, 'file://') /= 1) status = 1
-            if (status == 0 .and. len(want) > 0) then
-                call sha256_file(archive, got, status)
-                if (status == 0 .and. got /= want) status = 1
+        ! Without the header only a file:// store (a directory) is trusted.
+        want = ''
+        if (status == 0) want = header_value(headers, 'x-content-sha256')
+        if (index(base_url, 'file://') /= 1) then
+            if (status == 0 .and. len(want) == 0) then
+                call store_failed('lookup', 'the answer carries no X-Content-SHA256', &
+                    read_off_until)
+                status = 1
+            else if (status /= 0 .and. .not. (status == 22 .and. &
+                    http_status(headers) == 404)) then
+                call store_failed('lookup', failure(status, headers), read_off_until)
             end if
+        end if
+        if (status /= 0) then
+            call fs_remove_tree(tmp)
+            return
+        end if
+        if (len(want) > 0) then
+            call sha256_file(archive, got, status)
+            if (status == 0 .and. got /= want) status = 1
         end if
         if (status == 0) call run_sh(EXTRACT_SCRIPT, status, archive, tree)
         if (status == 0) then
@@ -130,6 +163,7 @@ contains
                 if (.not. exists) status = 1
             end do
         end if
+        if (status /= 0) call warn_refused(key)
         ! Only the outputs the unit declares leave the archive.
         if (status == 0) call fs_make_dir(trim(mod_dir), status)
         if (status == 0) status = fs_rename(tree//'/object', trim(obj_path))
@@ -184,9 +218,87 @@ contains
         if (status == 0) then
             call run_sh(PUT_SCRIPT, status, base_url//'/'//write_namespace//'/'//trim(key), &
                 tmp//'/a.tar', digest, login_file)
+            if (status /= 0) call store_failed('upload', &
+                failure(status, tmp//'/a.tar.headers'), write_off_until)
         end if
         call fs_remove_tree(tmp)
     end subroutine remote_cache_put
+
+    subroutine store_failed(what, why, off_until)
+        !! One message, then no further request of that kind for a while:
+        !! a store that hangs must not cost its timeout once per unit.
+        character(len=*), intent(in) :: what, why
+        integer(int64), intent(inout) :: off_until
+
+        !$omp critical(fo_remote_cache_load)
+        if (now() >= off_until) then
+            off_until = now() + RETRY_SECONDS
+            write (error_unit, '(a)') 'fo: remote cache '//base_url//': '//what// &
+                ' failed ('//why//'); the build goes on without it'
+        end if
+        !$omp end critical(fo_remote_cache_load)
+    end subroutine store_failed
+
+    subroutine warn_refused(key)
+        character(len=*), intent(in) :: key
+
+        !$omp critical(fo_remote_cache_load)
+        if (.not. warned_refused) then
+            warned_refused = .true.
+            write (error_unit, '(a)') 'fo: remote cache '//base_url//': the result '// &
+                trim(key)//' has a wrong checksum or content and is compiled instead'
+        end if
+        !$omp end critical(fo_remote_cache_load)
+    end subroutine warn_refused
+
+    function failure(status, headers) result(why)
+        !! What went wrong with a request, from curl's exit status and headers.
+        integer, intent(in) :: status
+        character(len=*), intent(in) :: headers
+        character(len=:), allocatable :: why
+        character(len=16) :: number
+        integer :: code
+
+        code = 0
+        if (status == 22) code = http_status(headers)
+        if (code > 0) then
+            write (number, '(i0)') code
+            why = 'HTTP '//trim(number)
+            if (code == 401 .or. code == 403) why = why//', token of '//login_file// &
+                ', which is sent only to its server= address'
+        else
+            write (number, '(i0)') status
+            why = 'curl exit '//trim(number)
+            if (status == 28) why = why//', no answer in time'
+        end if
+    end function failure
+
+    integer function http_status(path) result(code)
+        !! The status of the last answer in a curl header dump, 0 without one.
+        character(len=*), intent(in) :: path
+        character(len=64) :: line
+        integer :: u, ios, blank, value
+
+        code = 0
+        open (newunit=u, file=path, status='old', action='read', iostat=ios)
+        if (ios /= 0) return
+        do
+            read (u, '(a)', iostat=ios) line
+            if (ios /= 0) exit
+            if (line(1:5) /= 'HTTP/') cycle
+            blank = index(line, ' ')
+            read (line(blank + 1:blank + 3), '(i3)', iostat=ios) value
+            if (ios == 0) code = value
+        end do
+        close (u)
+    end function http_status
+
+    integer(int64) function now()
+        integer(int64) :: count, rate
+
+        call system_clock(count, rate)
+        now = count/max(rate, 1_int64)
+    end function now
 
     subroutine load()
         character(len=:), allocatable :: home

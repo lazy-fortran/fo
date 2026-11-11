@@ -7,6 +7,17 @@ Issues define observable success and this plan orders delivery. Apply
 smallest complete change, and preserve supported behaviour and independent
 failure detection. The workspace master plan, when present, owns delivery order.
 
+## Remote tier of the compile cache (2026-11-11)
+
+For fortyard runners, a local compile-cache miss can ask an HTTP store
+(`FO_REMOTE_CACHE`, see [doc/cache.md](doc/cache.md#remote-store)) and a
+writing build uploads what it compiles. `test_remote_cache_cli` covers the
+store as a directory and, with a stand-in for curl, token scope, checksum
+refusal and a rejecting store. Limits: fpm action keys cover the checkout path,
+so only checkouts at one path share (CMake projects share across paths with
+`FO_CACHE_RELOCATABLE=1`); one sh and curl per lookup; serial uploads; only the
+`shared` namespace is read.
+
 ## Relocatable fpm compile keys (2026-11-11)
 
 - With `FO_CACHE_RELOCATABLE=1`, gfortran compiles the library and program

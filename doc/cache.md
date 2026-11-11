@@ -176,6 +176,33 @@ replacement therefore causes a cache miss and a rebuild, never a wrong result.
 Keep the grace period longer than any single build step and the clocks of the
 sharing hosts within a few seconds of each other.
 
+## Remote store
+
+A local miss can ask an HTTP store of compile results, such as the shared build
+cache of a fortyard server, before it compiles. What it gets is kept in the
+local store.
+
+| Variable | Meaning |
+|---|---|
+| `FO_REMOTE_CACHE` | Base URL of the store, for example `https://host/cache/v1`; a `file://` directory also works. Unset: no remote store. |
+| `FO_REMOTE_CACHE_WRITE` | Namespace to upload compiled results to, for example `shared`. Unset: read only. |
+| `FO_REMOTE_CACHE_LOGIN` | File with `server=`, `token=` and `proxy=` lines (default `~/.config/fortyard/credentials`, as `fy login` writes it). |
+
+Results are read from the namespace `shared`. The token is sent only to URLs
+below the `server=` address of the login file. A download is used only when its
+SHA-256 equals the `X-Content-SHA256` header of the answer and it holds nothing
+but the object and the module files of the unit; otherwise fo says so once and
+compiles. A store that does not answer within 15 seconds, rejects the request
+or sends no checksum is named in one message and not asked again for five
+minutes, so a dead store costs one timeout instead of one per unit and never
+fails the build. `curl` and `tar` must be installed.
+
+The keys are those of the local store, so a result is found only where the
+local store would find it. For fpm projects the key covers the absolute paths
+of the project, and builds share results only when their checkouts are at the
+same path. For CMake projects `FO_CACHE_RELOCATABLE=1` removes the location
+from the key, and checkouts at different paths share.
+
 ## Parallelism
 
 The module graph and the selected tests run in OpenMP loops. Each worker has

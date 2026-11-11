@@ -9,7 +9,9 @@ program test_remote_cache_cli
     !! answers like the server) the token and proxy of the login file reach
     !! curl, and a download is taken only when its SHA-256 equals the
     !! X-Content-SHA256 header: without the header, or with another archive
-    !! under the key, the units are compiled.
+    !! under the key, the units are compiled. A store that rejects the request
+    !! is asked once and named in a message, and a login for another server
+    !! does not send its token.
     use fo_fs, only: fs_find_executable
     use fo_test_harness, only: process_result_t, string_list_t, list_add, argv, run_list
     use fo_test_harness, only: make_scratch, join_path, write_text, remove_tree, set_mode
@@ -66,7 +68,7 @@ program test_remote_cache_cli
     call assert_true(status == 0 .and. count_lines(listing) == 2, &
         'both compiled units are uploaded: '//listing)
 
-    ! Another machine: nothing local, the same sources.
+    ! Nothing local, the same sources at the same path (the key covers it).
     call remove_tree(join_path(project, 'build'))
     call write_text(log, '')
     call run_fo(driver, build, project, join_path(scratch, 'cache-reader'), result, reader, 120000)
@@ -118,7 +120,10 @@ program test_remote_cache_cli
         'key=${url##*/}'//nl// &
         'if [ -n "$up" ]; then cp "$up" "$store/$key"; echo "$sum" > "$store/$key.sum"; '// &
         'exit 0; fi'//nl// &
-        '[ -f "$store/$key" ] || exit 22'//nl// &
+        'if [ -f "$store/deny" ]; then echo "HTTP/1.1 401 Unauthorized" > "$hdr"; '// &
+        'exit 22; fi'//nl// &
+        'if [ ! -f "$store/$key" ]; then echo "HTTP/1.1 404 Not Found" > "$hdr"; '// &
+        'exit 22; fi'//nl// &
         'cp "$store/$key" "$out"'//nl// &
         'echo "HTTP/1.1 200 OK" > "$hdr"'//nl// &
         '[ ! -f "$store/$key.sum" ] || '// &
@@ -154,6 +159,34 @@ program test_remote_cache_cli
     call assert_true(len_trim(read_text(log)) == 0, &
         'downloads with a matching checksum are used: '//read_text(log))
 
+    ! A login for another server keeps its token.
+    call write_text(login, 'server=http://store.invalid.example'//nl//'token=sesame'//nl)
+    call write_text(requests, '')
+    call remove_tree(join_path(project, 'build'))
+    call run_fo(driver, build, project, join_path(scratch, 'http-other'), result, &
+        http_reader, 120000)
+    call assert_contains(read_text(requests), 'url = "http://store.invalid/cache/v1/shared/', &
+        'the store is asked with a login for another server')
+    call assert_true(index(read_text(requests), 'sesame') == 0, &
+        'the token of another server is not sent: '//read_text(requests))
+
+    ! A store that rejects the request is asked once, not once per unit.
+    call write_text(join_path(store, 'deny'), '')
+    call write_text(requests, '')
+    call write_text(log, '')
+    call remove_tree(join_path(project, 'build'))
+    call run_fo(driver, build, project, join_path(scratch, 'http-denied'), result, &
+        http_reader, 120000)
+    call assert_equal_integer(result%exit_code, 0, &
+        'the build succeeds beside a rejecting store: '//result%stdout//result%stderr)
+    call assert_true(count_lines(read_text(log)) == 2, &
+        'both units are compiled beside a rejecting store: '//read_text(log))
+    call assert_contains(result%stderr, 'remote cache http://store.invalid/cache/v1: '// &
+        'lookup failed (HTTP 401', 'the rejection is reported')
+    call assert_true(count_text(read_text(requests), 'url = ') == 1, &
+        'the rejecting store is asked once: '//read_text(requests))
+    call run_list(argv('rm', join_path(store, 'deny')), status)
+
     ! A server that sends no checksum is not trusted.
     call run_list(argv('sh', '-c', 'cd "$1" && for f in *.sum; do mv "$f" "$f.off"; done', &
         'sh', store), status)
@@ -179,6 +212,8 @@ program test_remote_cache_cli
         'the build succeeds beside wrong downloads: '//result%stdout//result%stderr)
     call assert_true(count_lines(read_text(log)) == 2, &
         'downloads with another checksum are not used: '//read_text(log))
+    call assert_contains(result%stderr, 'has a wrong checksum or content', &
+        'a refused download is reported')
     call run_fo(driver, exec, project, join_path(scratch, 'http-wrong'), result, &
         http_reader, 120000)
     call assert_contains(result%stdout, '42', 'the program runs after refused downloads')
@@ -197,5 +232,19 @@ contains
             if (text(i:i) == nl) n = n + 1
         end do
     end function count_lines
+
+    integer function count_text(text, part) result(n)
+        character(len=*), intent(in) :: text, part
+        integer :: at, step
+
+        n = 0
+        at = 1
+        do
+            step = index(text(at:), part)
+            if (step == 0) exit
+            n = n + 1
+            at = at + step
+        end do
+    end function count_text
 
 end program test_remote_cache_cli
