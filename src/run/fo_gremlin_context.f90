@@ -500,6 +500,14 @@ contains
         call append_environment_value(context%environment, 'FO_FPM_CONFIG_FILE')
         call append_environment_value(context%environment, 'LIBRARY_PATH')
         call append_environment_value(context%environment, 'OMP_NUM_THREADS')
+        ! These change the compiled code of the tests, as the compile key
+        ! and the build stamp know.
+        call append_environment_value(context%environment, 'FO_CACHE_RELOCATABLE')
+        call append_environment_value(context%environment, 'CPATH')
+        call append_environment_value(context%environment, 'C_INCLUDE_PATH')
+        call append_environment_value(context%environment, 'COMPILER_PATH')
+        call append_environment_value(context%environment, 'GCC_EXEC_PREFIX')
+        call append_environment_value(context%environment, 'MACOSX_DEPLOYMENT_TARGET')
     end subroutine capture_toolchain
 
     subroutine capture_context(project_dir, context, ierr, message)

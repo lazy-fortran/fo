@@ -30,13 +30,16 @@ module fo_gfortran_build
         case_matches, case_run_setup, case_filter_add, NO_PROTOCOL_REASON
     use fx_action_cache, only: cache_set_file_hash_hook
     use fo_compdb, only: compdb_write
+    use fo_diagnostics, only: COMPILE_DIRECTORY_LINE
     use fx_dag, only: dag_t, dag_find_node, dag_topo_sort, dag_levels, MAX_NODES
     use fo_cache, only: cache_t, cache_init, cache_key_for, &
         cache_restore_action, cache_store_action, hash_mod_file, &
-        HASH_LEN, cache_digest, cache_file_digest, cache_source_tree_hash, &
+        HASH_LEN, cache_digest, cache_file_digest, &
         cache_store_binary, cache_restore_binary, cache_binary_matches
+    use fo_compile_inputs, only: include_closure_t, include_closure, &
+        source_dir_modules_digest, project_relative
     use fo_util, only: make_tmpfile, make_sibling_tmpfile, delete_tmpfile, &
-        read_text_file, clean_root_build_artifacts
+        read_text_file, read_text_file_alloc, clean_root_build_artifacts
     use fo_process, only: process_run_logged, process_last_run_meter, &
         process_run_argv_logged, argv_push, argv_push_split, &
         argv_push_split_nl, process_detect_nproc, process_setenv_default
@@ -798,11 +801,10 @@ contains
     end subroutine scan_header_dependencies
 
     subroutine unit_cache_key(units, n_units, dag, filename, mod_keys, dirs, &
-            compiler, key_text, depfile, key, complete, include_providers)
+            compiler, key_text, depfile, key, complete)
         !! Action key of one source: its content (and Fortran includes), the
         !! compiler and flags identity, the interface keys of the modules it
         !! uses and, when a dependency file is declared, its header content.
-        !! With include_providers also which of dirs provides each include.
         type(scan_unit_t), intent(in) :: units(:)
         integer, intent(in) :: n_units
         type(dag_t), intent(in) :: dag
@@ -811,9 +813,8 @@ contains
         character(len=512), intent(in) :: dirs(:)
         character(len=HASH_LEN), intent(out) :: key
         logical, intent(out) :: complete
-        logical, intent(in), optional :: include_providers
         character(len=HASH_LEN), allocatable :: dep_keys(:)
-        character(len=HASH_LEN) :: headers, providers
+        character(len=HASH_LEN) :: headers
         integer :: n_dep
 
         key = ''
@@ -822,35 +823,119 @@ contains
         if (.not. complete) return
         headers = ''
         if (len(depfile) > 0) call depfile_digest(depfile, headers)
-        providers = ''
-        if (present(include_providers)) then
-            if (include_providers) providers = include_provider_digest(filename, dirs)
-        end if
-        key = cache_key_for(filename, compiler, trim(key_text)//headers//providers, &
+        key = cache_key_for(filename, compiler, trim(key_text)//headers, &
             dep_keys, n_dep, include_dirs=dirs)
         if (len_trim(key) == 0) complete = .false.
     end subroutine unit_cache_key
 
-    function include_provider_digest(filename, dirs) result(digest)
-        !! Which directory provides each file the source includes. The key
-        !! holds the content of the includes over all of dirs; the content
-        !! over each shorter leading part of dirs differs as soon as an
-        !! include is found in another directory, also with equal content.
-        !! The compiler writes that directory into __FILE__ and debug
-        !! information. Blank when no directory is searched.
-        character(len=*), intent(in) :: filename
+    subroutine source_key_inputs(project_dir, source, dirs, tokens, closure, &
+            module_files)
+        !! What the compile of source reads beyond the source-tree digest:
+        !! its includes as gfortran resolves them, asked for its search list
+        !! with these command tokens only when an include is not found in
+        !! dirs, and the module files next to the source. Serial code only.
+        character(len=*), intent(in) :: project_dir, source, tokens
         character(len=512), intent(in) :: dirs(:)
-        character(len=HASH_LEN) :: digest
-        character(len=HASH_LEN) :: parts(size(dirs))
-        integer :: k
+        type(include_closure_t), intent(out) :: closure
+        character(len=HASH_LEN), intent(out) :: module_files
+        character(len=512), allocatable :: chain(:)
+        character(len=MAX_PATH), save :: known_dir = ''
+        character(len=HASH_LEN), save :: known_module_files = ''
+        character(len=MAX_PATH) :: dir
 
-        digest = ''
-        if (size(dirs) == 0) return
-        do k = 1, size(dirs)
-            call cache_source_tree_hash(filename, parts(k), dirs(:k - 1))
+        allocate (chain(0))
+        call include_closure(source, project_dir, dirs, chain, .false., closure)
+        if (closure%unresolved) then
+            call compiler_include_chain(project_dir, tokens, chain)
+            call include_closure(source, project_dir, dirs, chain, .true., closure)
+        end if
+        dir = source(:max(1, index(source, '/', back=.true.) - 1))
+        if (dir /= known_dir) then
+            known_module_files = source_dir_modules_digest(trim(dir))
+            known_dir = dir
+        end if
+        module_files = known_module_files
+    end subroutine source_key_inputs
+
+    function key_inputs_text(closure, module_files, relocatable) result(text)
+        !! Key text of source_key_inputs. The includes count when the action
+        !! is relocatable, because their names reach the object through
+        !! __FILE__ and debug information, and otherwise only when the
+        !! compiler reads another file than the source-tree digest holds, so
+        !! that every other key stays what it was.
+        type(include_closure_t), intent(in) :: closure
+        character(len=HASH_LEN), intent(in) :: module_files
+        logical, intent(in) :: relocatable
+        character(len=:), allocatable :: text
+
+        text = ''
+        if ((relocatable .or. closure%differs) .and. len_trim(closure%digest) > 0) &
+            text = new_line('a')//'compiler-includes:'//closure%digest
+        if (len_trim(module_files) > 0) &
+            text = text//new_line('a')//'source-directory-modules:'//module_files
+    end function key_inputs_text
+
+    subroutine compiler_include_chain(project_dir, tokens, chain)
+        !! The directories gfortran searches for `#include <x>` when it gets
+        !! these command tokens, in its order: the include options, CPATH and
+        !! its own directories. Empty for other compilers and when gfortran
+        !! does not say. Serial code only; remembered per tokens.
+        character(len=*), intent(in) :: project_dir, tokens
+        character(len=512), allocatable, intent(out) :: chain(:)
+        type(node_text_t), save :: known_tokens(8)
+        type(node_dirs_t), save :: known_chains(8)
+        integer, save :: n_known = 0
+        type(compiler_dialect_t) :: dialect
+        character(len=:), allocatable :: packed, base_flags, text, line
+        character(len=MAX_PATH) :: log_file
+        integer :: i, n_args, exitcode, ierr, pos, line_end
+        logical :: listing
+
+        do i = 1, n_known
+            if (known_tokens(i)%s /= tokens) cycle
+            chain = known_chains(i)%d
+            return
         end do
-        digest = cache_digest(parts, size(parts))
-    end function include_provider_digest
+        allocate (chain(0))
+        dialect = compiler_dialect(fc_command())
+        if (dialect%kind == COMPILER_GFORTRAN) then
+            n_args = 0
+            call append_fc_command(packed, n_args)
+            call fc_base_flags_into(base_flags)
+            call argv_push_split(packed, n_args, base_flags)
+            call argv_push_split_nl(packed, n_args, tokens)
+            call argv_push_split(packed, n_args, &
+                '-cpp -E -v -x f95-cpp-input /dev/null -o /dev/null')
+            call make_tmpfile('fo_include_chain', log_file)
+            ! The list is found by its untranslated heading.
+            call process_run_argv_logged(project_dir, packed, n_args, log_file, &
+                .false., 30, exitcode, env_extra='LC_ALL=C')
+            text = ''
+            if (exitcode == 0) call read_text_file_alloc(trim(log_file), text, ierr)
+            call delete_tmpfile(log_file)
+            listing = .false.
+            pos = 1
+            do while (pos <= len(text))
+                line_end = index(text(pos:), new_line('a'))
+                if (line_end == 0) line_end = len(text) - pos + 2
+                line = text(pos:pos + line_end - 2)
+                pos = pos + line_end
+                if (index(line, '#include <...>') == 1) then
+                    listing = .true.
+                else if (listing) then
+                    if (len(line) < 2) exit
+                    if (line(1:1) /= ' ') exit
+                    i = index(line, ' (framework directory)')
+                    if (i > 0) line = line(:i - 1)
+                    chain = [chain, [character(len=512) :: line(2:)]]
+                end if
+            end do
+        end if
+        if (n_known >= size(known_tokens)) return
+        n_known = n_known + 1
+        known_tokens(n_known)%s = tokens
+        known_chains(n_known)%d = chain
+    end subroutine compiler_include_chain
 
     logical function gremlin_execution_view_requested() result(requested)
         character(len=MAX_PATH) :: execution_cwd
@@ -917,7 +1002,7 @@ contains
         if (present(flags)) flag_text = flags
         request_flags = flag_text
         build_request_flags = request_flags
-        stamp_request_flags = request_key_flags(request_flags)
+        stamp_request_flags = stamp_mode('')//request_key_flags(request_flags)
         if (present(compiler_id)) then
             compiler = compiler_id
         else
@@ -931,6 +1016,11 @@ contains
         if (allow_cache) then
             call build_stamp_quick_matches(project_dir, compiler, &
                 stamp_request_flags, &
+                stamp_hit, stamp_tests_ready, stamp_apps_ready, stamp_test_dir)
+            ! A tree built with flags for the CPU of its host, which the
+            ! manifest may hold, is up to date only on such a host.
+            if (.not. stamp_hit) call build_stamp_quick_matches(project_dir, &
+                compiler, stamp_mode('=native')//request_key_flags(request_flags), &
                 stamp_hit, stamp_tests_ready, stamp_apps_ready, stamp_test_dir)
         end if
         if (stamp_hit .and. want_apps .and. .not. stamp_apps_ready) &
@@ -1004,8 +1094,10 @@ contains
 
         call find_dep_artifacts(project_dir, config, dep_includes, n_dep_includes, &
             dep_objs, n_dep_objs, .true.)
-        stamp_flags = compile_key_flags(flag_text)
-        if (cache_relocatable()) stamp_flags = 'relocatable:'//stamp_flags
+        stamp_request_flags = stamp_mode(compile_key_flags(flag_text))// &
+            request_key_flags(request_flags)
+        stamp_flags = stamp_mode(compile_key_flags(flag_text))// &
+            compile_key_flags(flag_text)
         allocate (stamp_roots(8 * MAX_RESOLVED))
         call collect_stamp_roots(project_dir, stamp_roots, n_stamp_roots, stamp_ok)
         stamp_hit = .false.
@@ -1359,9 +1451,10 @@ contains
         if (.not. ok) return
         stamp_flags = flags
         call append_array_temporary_warning_flag(fc_command(), stamp_flags)
-        stamp_flags = compile_key_flags(stamp_flags)
-        if (cache_relocatable()) stamp_flags = 'relocatable:'//stamp_flags
-        stamp_request_flags = request_key_flags(request_flags)
+        stamp_request_flags = stamp_mode(compile_key_flags(stamp_flags))// &
+            request_key_flags(request_flags)
+        stamp_flags = stamp_mode(compile_key_flags(stamp_flags))// &
+            compile_key_flags(stamp_flags)
         call detect_compiler(compiler)
         ! Only a complete test preparation can certify every executable for
         ! this source closure. Named or fast-only subsets leave other images
@@ -2247,6 +2340,8 @@ contains
         character(len=:), allocatable :: source_argument, key_tokens, debug_options
         logical :: relocatable_mode, debug_info
         type(compiler_dialect_t) :: dialect
+        type(include_closure_t) :: closure
+        character(len=HASH_LEN) :: module_files
         character(len=HASH_LEN) :: post_key
         integer :: action_index
         logical :: post_complete, with_actions
@@ -2473,9 +2568,17 @@ contains
             else
                 source_key_flags(node_id) = compile_key_flags(source_flags(node_id))
             end if
+            closure = include_closure_t()
+            module_files = ''
+            if (node_fortran(node_id) .and. .not. allocated(node_dirs(node_id)%d)) &
+                call source_key_inputs(project_dir, trim(filenames(node_id)), &
+                dep_includes(:n_dep_includes), node_tokens(node_id)%s, closure, &
+                module_files)
             if (relocatable_mode) then
                 source_argument = project_relative(filenames(node_id), project_dir)
-                node_relocatable(node_id) = location_free_compile( &
+                ! A date or time macro gives every compile another object.
+                node_relocatable(node_id) = .not. closure%time_macros .and. &
+                    location_free_compile( &
                     baseline_flags//' '//trim(source_flags(node_id)), &
                     relative_includes_flag, source_argument, project_dir)
             end if
@@ -2500,13 +2603,21 @@ contains
                     '-fdebug-prefix-map='//trim(project_dir)//'=.'//debug_options
                 source_key_flags(node_id) = trim(source_key_flags(node_id))// &
                     new_line('a')//'source-context:'//relocatable_compile_context( &
-                    source_argument, key_tokens, trim(source_key_flags(node_id)))
+                    source_argument, key_tokens)
             else if (.not. with_actions) then
                 source_key_flags(node_id) = &
                     trim(source_key_flags(node_id))//new_line('a')// &
                     'source-context:'//source_compile_context( &
                     filenames(node_id), project_dir, node_tokens(node_id)%s)
             end if
+            key_tokens = trim(source_key_flags(node_id))// &
+                key_inputs_text(closure, module_files, node_relocatable(node_id))
+            if (len(key_tokens) > len(source_key_flags)) then
+                ! Never cut the inputs off a long key text.
+                call text_digest(key_tokens, module_files)
+                key_tokens = 'long-key-text:'//module_files
+            end if
+            source_key_flags(node_id) = key_tokens
             if (size(interfaces(node_id)%modules) > 1) &
                 source_key_flags(node_id) = trim(source_key_flags(node_id))// &
                 '|fo-interface-vector-v1'
@@ -2573,8 +2684,7 @@ contains
                             filenames(node_id), new_mod_keys, &
                             dep_includes(:n_dep_includes), compiler, &
                             trim(source_key_flags(node_id)), '', &
-                            level_source_key, level_complete, &
-                            include_providers=node_relocatable(node_id))
+                            level_source_key, level_complete)
                     end if
                     if (.not. level_complete) then
                         level_restored(i) = .false.
@@ -2659,6 +2769,9 @@ contains
                 end do
 
                 do ii = 1, n_compile
+                    if (node_relocatable(compile_nodes(ii))) &
+                        call append_compile_directory(trim(per_logs(ii)), &
+                        project_dir, log_file)
                     call append_log_file(trim(per_logs(ii)), log_file)
                 end do
                 ii_failed = 0
@@ -2709,6 +2822,7 @@ contains
                 call save_mod_keys(mod_dir, dag, n_order, topo_order, new_mod_keys)
             end if
         else
+            if (relocatable_mode) call append_compile_directory('', project_dir, log_file)
             do i = 1, n_order
                 node_id = topo_order(i)
                 if (len_trim(filenames(node_id)) == 0) cycle
@@ -3353,6 +3467,23 @@ contains
         end do
     end subroutine remove_shadow_mods
 
+    subroutine append_compile_directory(compile_log, directory, log_file)
+        !! Before the output of a compile that ran in directory with relative
+        !! file names, say so, for readers of the log and of fo's diagnostics.
+        character(len=*), intent(in) :: compile_log, directory, log_file
+        integer :: unit, ios, log_size
+
+        if (len(compile_log) > 0) then
+            inquire (file=compile_log, size=log_size, iostat=ios)
+            if (ios /= 0 .or. log_size <= 0) return
+        end if
+        open (newunit=unit, file=log_file, status='unknown', position='append', &
+            action='write', iostat=ios)
+        if (ios /= 0) return
+        write (unit, '(a)') COMPILE_DIRECTORY_LINE//trim(directory)
+        close (unit)
+    end subroutine append_compile_directory
+
     subroutine append_log_file(src, dst)
         character(len=*), intent(in) :: src, dst
         call fs_append_file(trim(src), trim(dst))
@@ -3940,6 +4071,8 @@ contains
         character(len=1024) :: test_flags
         integer :: dnode
         character(len=:), allocatable :: test_key_flags
+        type(include_closure_t) :: closure
+        character(len=HASH_LEN) :: module_files
         character(len=512), allocatable :: helper_objs(:)
         character(len=512), allocatable :: all_lib_objs(:), link_inputs(:)
         integer :: n_helper_objs, n_all_lib, n_link_inputs, n_link_dep_objs
@@ -4182,9 +4315,12 @@ contains
                 n_dep = n_dep + 1
                 dep_keys(n_dep) = lib_hash
             end if
+            call source_key_inputs(project_dir, trim(filenames(node_id)), &
+                dep_includes(:n_dep_includes), incl_flag, closure, module_files)
             test_key_flags = compile_key_flags(test_flags)//new_line('a')// &
                 'source-context:'//source_compile_context( &
-                filenames(node_id), project_dir, incl_flag)
+                filenames(node_id), project_dir, incl_flag)// &
+                key_inputs_text(closure, module_files, .false.)
             if (len_trim(test_links(i)%digest) > 0) test_key_flags = &
                 trim(test_key_flags)//new_line('a')//'test-link:'// &
                 trim(test_links(i)%digest)
@@ -5650,7 +5786,77 @@ contains
         key_flags = 'manifest-policy:package-v3'//new_line('a')// &
             'compiler-baseline:'//trim(fc_base_flags())//new_line('a')// &
             'project-flags:'//trim(flags)
+        if (native_cpu_flags(key_flags)) key_flags = key_flags//new_line('a')// &
+            'host-cpu:'//host_cpu_key()
+        if (len(compiler_environment_key()) > 0) key_flags = key_flags// &
+            new_line('a')//'compiler-environment:'//compiler_environment_key()
     end function compile_key_flags
+
+    pure logical function native_cpu_flags(flags) result(native)
+        !! -march=native, -mtune=native or -mcpu=native: the object depends
+        !! on the CPU of the compiling host.
+        character(len=*), intent(in) :: flags
+
+        native = index(flags, '=native') > 0
+    end function native_cpu_flags
+
+    function host_cpu_key() result(key)
+        character(len=HASH_LEN) :: key
+
+        call text_digest(host_cpu_identity(), key)
+    end function host_cpu_key
+
+    function environment_key(names) result(key)
+        !! Digest of the set variables among names, blank when none is set.
+        character(len=*), intent(in) :: names(:)
+        character(len=:), allocatable :: key, text, value
+        character(len=HASH_LEN) :: digest
+        integer :: i, length, status
+
+        text = ''
+        do i = 1, size(names)
+            call get_environment_variable(trim(names(i)), length=length, status=status)
+            if (status /= 0 .or. length <= 0) cycle
+            allocate (character(len=length) :: value)
+            call get_environment_variable(trim(names(i)), value)
+            text = text//trim(names(i))//'='//value//new_line('a')
+            deallocate (value)
+        end do
+        key = ''
+        if (len(text) == 0) return
+        call text_digest(text, digest)
+        key = digest
+    end function environment_key
+
+    function compiler_environment_key() result(key)
+        !! Variables that change what gfortran writes for the same command:
+        !! where the driver finds the compiler proper, and the deployment
+        !! target on macOS.
+        character(len=:), allocatable :: key
+
+        key = environment_key([character(len=24) :: 'COMPILER_PATH', &
+            'GCC_EXEC_PREFIX', 'MACOSX_DEPLOYMENT_TARGET'])
+    end function compiler_environment_key
+
+    function stamp_mode(flags) result(mode)
+        !! What a build tree must also agree on to be up to date, put before
+        !! the flags of its stamp: the relocatable mode, whose objects differ,
+        !! the variables above and the include search path of the
+        !! environment, and with flags for the CPU of this host that CPU.
+        character(len=*), intent(in) :: flags
+        character(len=:), allocatable :: mode, environment
+        character(len=HASH_LEN) :: cpu
+
+        mode = ''
+        if (cache_relocatable()) mode = 'relocatable:'
+        environment = environment_key([character(len=24) :: 'COMPILER_PATH', &
+            'GCC_EXEC_PREFIX', 'MACOSX_DEPLOYMENT_TARGET', 'CPATH', 'C_INCLUDE_PATH'])
+        if (len(environment) > 0) mode = mode//'environment-'//environment(:16)//':'
+        if (native_cpu_flags(flags)) then
+            cpu = host_cpu_key()
+            mode = mode//'host-cpu-'//cpu(:16)//':'
+        end if
+    end function stamp_mode
 
     function source_compile_context(source, cwd, tokens) result(context)
         ! Preprocessing and debug records can observe both paths even when
@@ -5667,41 +5873,20 @@ contains
         context = cache_digest(parts, size(parts))
     end function source_compile_context
 
-    function relocatable_compile_context(source_argument, tokens, flags) result(context)
+    function relocatable_compile_context(source_argument, tokens) result(context)
         !! Location-free counterpart of source_compile_context: the source as
         !! passed to the compiler and the command tokens as executed, both
         !! relative to the project root, and no working directory.
-        character(len=*), intent(in) :: source_argument, tokens, flags
+        character(len=*), intent(in) :: source_argument, tokens
         character(len=HASH_LEN) :: context, token_key
-        character(len=MAX_PATH) :: parts(4)
+        character(len=MAX_PATH) :: parts(3)
 
         parts(1) = 'fo-source-context-v3-relocatable'
         parts(2) = source_argument
         call text_digest(tokens, token_key)
         parts(3) = token_key
-        parts(4) = ''
-        if (index(flags, '=native') > 0) then
-            call text_digest(host_cpu_identity(), token_key)
-            parts(4) = 'host-cpu:'//token_key
-        end if
         context = cache_digest(parts, size(parts))
     end function relocatable_compile_context
-
-    pure function project_relative(path, root) result(relative)
-        !! path as the compiler sees it from the project root: relative when
-        !! it lies below the root, unchanged otherwise.
-        character(len=*), intent(in) :: path, root
-        character(len=:), allocatable :: relative
-        integer :: n
-
-        n = len_trim(root)
-        relative = trim(path)
-        if (relative == root(:n)) then
-            relative = '.'
-        else if (len(relative) > n + 1) then
-            if (relative(:n + 1) == root(:n)//'/') relative = relative(n + 2:)
-        end if
-    end function project_relative
 
     pure logical function location_free_compile(flags, tokens, source_argument, &
             root) result(location_free)
@@ -5712,13 +5897,18 @@ contains
         !! flags are the blank-separated baseline and project flags, tokens
         !! the newline-separated module and include options fo generates.
         character(len=*), intent(in) :: flags, tokens, source_argument, root
-        character(len=*), parameter :: bound(*) = [character(len=24) :: &
-            '--coverage', '-coverage', '-fprofile', '-ftest-coverage', &
-            '-fbranch-probabilities', '-fauto-profile', '-flto', &
+        !! `--`: the long spellings, among them --include-directory=DIR.
+        character(len=*), parameter :: bound(*) = [character(len=28) :: &
+            '--', '-coverage', '-fprofile', '-ftest-coverage', &
+            '-fpath-coverage', '-fcondition-coverage', &
+            '-fbranch-probabilities', '-fauto-profile', '-flto', '-foffload', &
             '-gsplit-dwarf', '-fworking-directory', '-fdump', '-save-temps', &
-            '-frecord-gcc-switches', &
-            '-I', '-i', '-J', '-B', '-M', '-o', '--sysroot', '-specs', &
-            '--specs', '-fplugin', '-fpre-include', '-fintrinsic-modules-path', &
+            '-frecord-gcc-switches', '-fcallgraph-info', '-fstack-usage', &
+            '-fsave-optimization-record', '-fopt-info', '-fdiagnostics-format', &
+            '-fdiagnostics-add-output', '-fdiagnostics-set-output', &
+            '-fcompare-debug', '-aux-info', '-d', &
+            '-I', '-i', '-J', '-B', '-M', '-o', '-specs', &
+            '-fplugin', '-fpre-include', '-fintrinsic-modules-path', &
             '-wrapper', '-Wp,', '-Wa,', '-Xpreprocessor', '-Xassembler']
         integer :: i, start, n, k, n_root
 

@@ -10,6 +10,11 @@ module fo_diagnostics
     private
     public :: diagnostic_t, diagnostic_from_log, is_runner_crash
     public :: array_temporary_warnings_from_log
+
+    !> Log line before compiler output whose file names are relative to the
+    !> directory it names (relocatable compiles run in the project root).
+    character(len=*), parameter, public :: COMPILE_DIRECTORY_LINE = &
+        'fo: compile directory: '
     public :: map_fortfront_diagnostic, frontend_diagnostics_from_file
 
     ! Severity values follow FortFront's public diagnostic scale so a mapped
@@ -43,13 +48,14 @@ contains
         type(diagnostic_t), intent(out) :: warnings(:)
         integer, intent(out) :: n_warnings
 
-        character(len=512) :: line
+        character(len=512) :: line, directory
         character(len=256) :: current_file, parsed_file
         integer :: current_line, current_column, parsed_line, parsed_column
         integer :: u, iostat
         logical :: has_location
 
         n_warnings = 0
+        directory = ''
         current_file = ''
         current_line = 0
         current_column = 0
@@ -58,10 +64,11 @@ contains
         do
             read (u, '(a)', iostat=iostat) line
             if (iostat /= 0) exit
+            if (names_compile_directory(line, directory)) cycle
             call parse_location_line(line, parsed_file, parsed_line, &
                 parsed_column, has_location)
             if (has_location) then
-                current_file = parsed_file
+                current_file = file_in_directory(parsed_file, directory)
                 current_line = parsed_line
                 current_column = parsed_column
             end if
@@ -84,7 +91,7 @@ contains
         character(len=*), intent(in) :: kind, log_file, rerun
         type(diagnostic_t), intent(out) :: diag
 
-        character(len=512) :: line, fallback
+        character(len=512) :: line, fallback, directory
         character(len=256) :: current_file, parsed_file
         integer :: current_line, current_column, parsed_line, parsed_column
         integer :: u, iostat, best_priority
@@ -95,6 +102,7 @@ contains
         diag%rerun = rerun
         diag%hint = default_hint(kind)
         fallback = ''
+        directory = ''
         current_file = ''
         current_line = 0
         current_column = 0
@@ -105,11 +113,12 @@ contains
             do
                 read (u, '(a)', iostat=iostat) line
                 if (iostat /= 0) exit
+                if (names_compile_directory(line, directory)) cycle
 
                 call parse_location_line(line, parsed_file, parsed_line, &
                     parsed_column, has_location)
                 if (has_location) then
-                    current_file = parsed_file
+                    current_file = file_in_directory(parsed_file, directory)
                     current_line = parsed_line
                     current_column = parsed_column
                 end if
@@ -150,6 +159,24 @@ contains
             end if
         end if
     end subroutine diagnostic_from_log
+
+    logical function names_compile_directory(line, directory) result(is_directory)
+        character(len=*), intent(in) :: line
+        character(len=*), intent(inout) :: directory
+
+        is_directory = index(line, COMPILE_DIRECTORY_LINE) == 1
+        if (is_directory) directory = line(len(COMPILE_DIRECTORY_LINE) + 1:)
+    end function names_compile_directory
+
+    pure function file_in_directory(file, directory) result(path)
+        !! A diagnostic names its file as fo's caller can open it.
+        character(len=*), intent(in) :: file, directory
+        character(len=256) :: path
+
+        path = file
+        if (len_trim(directory) > 0 .and. file(1:1) /= '/') &
+            path = trim(directory)//'/'//file
+    end function file_in_directory
 
     subroutine parse_location_line(line, file, line_no, column, found)
         character(len=*), intent(in) :: line

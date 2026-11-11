@@ -182,6 +182,19 @@ program test_gremlin_context_provenance
         'LIBRARY_PATH='//scratch//'/lib-two') > 0, &
         'linker search path variation is captured')
     call stop_lane('context-env-two', session)
+    initial_metadata = metadata
+    ! Relocatable compiles give other objects (__FILE__), so the mode is
+    ! part of the generation like the linker search path.
+    call start_lane('context-env-relocatable', 'OMP_NUM_THREADS=1', report, &
+        'LIBRARY_PATH='//scratch//'/lib-two', 'FO_CACHE_RELOCATABLE=1')
+    session = field(report, 'session_id')
+    call wait_generation(session, 'context-env-relocatable', '', generation)
+    call read_generation_manifest(generation, metadata, inventory)
+    call assert_true(metadata%execution_identity /= initial_metadata%execution_identity, &
+        'the relocatable compile mode changes the generation identity')
+    call assert_true(index(metadata%environment, 'FO_CACHE_RELOCATABLE=1') > 0, &
+        'the relocatable compile mode is captured')
+    call stop_lane('context-env-relocatable', session)
 
     ! A distinct compiler path, resolving to the same real gfortran, must still be
     ! represented as a different toolchain identity.
@@ -361,10 +374,10 @@ contains
         end if
     end function first_line
 
-    subroutine start_lane(lane_id, override, value, additional_override)
+    subroutine start_lane(lane_id, override, value, additional_override, third_override)
         character(len=*), intent(in) :: lane_id, override
         type(json_value_t), intent(out) :: value
-        character(len=*), intent(in), optional :: additional_override
+        character(len=*), intent(in), optional :: additional_override, third_override
         type(string_list_t) :: args, extra
         type(process_result_t) :: result
         logical :: valid
@@ -376,6 +389,7 @@ contains
                 call list_add(extra, additional_override)
             end if
         end if
+        if (present(third_override)) call list_add(extra, third_override)
         call gremlin_run(driver, project, cache, state, args, result, extra, 30000)
         call assert_true(result%exit_code == 0, 'starts provenance session '//lane_id)
         if (result%exit_code /= 0) then

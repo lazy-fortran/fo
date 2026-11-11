@@ -14,9 +14,18 @@ For fpm projects, a compile action is keyed by:
 - the content of the source and of every file its `include` or `#include` lines
   resolve to, next to the including file or in an include directory of the
   manifests (`[library] include-dir`);
+- where gfortran finds an include differently, the file it reads by its path
+  and content: a Fortran `include` inside an included file is looked up next
+  to the compiled source, and a header found in neither place comes from the
+  compiler's own search list, which includes `CPATH`;
+- the name and content of `.mod` and `.smod` files lying in the directory of
+  the source, which gfortran reads before those of the module directory;
 - the compiler identity: its command, the path and content of the compiler
   driver and its version line;
-- fo's baseline flags and the flags of the project and the command line;
+- fo's baseline flags and the flags of the project and the command line, and
+  the values of `COMPILER_PATH`, `GCC_EXEC_PREFIX` and
+  `MACOSX_DEPLOYMENT_TARGET` when set;
+- the host CPU identity when a flag ends in `=native`;
 - the interface keys of the modules it uses;
 - the source path and the module and include options as the compiler gets them;
 - the project directory, unless the action is relocatable (see below).
@@ -76,28 +85,37 @@ default in these ways:
   started in the project root (in gdb otherwise with `directory <root>`).
 - A dependency outside the project is shared by consumers at different paths
   and compiled again when it moves itself.
-- The key also covers which include directory provides each included file,
-  because that name is what `__FILE__` in the header and debug information
-  show. With the default key, a header of equal content that moves to another
-  include directory is not noticed.
-- Options such as `-march=native` add the host CPU identity.
+- The key also covers the path, relative to the root when it lies below it,
+  of every file the includes resolve to, because that name is what `__FILE__`
+  in the header and debug information show. With the default key, a header of
+  equal content that moves to another include directory is not noticed.
+- In fo's log, the output of these compiles follows a line
+  `fo: compile directory: <root>`, and the diagnostics of `fo check --json`,
+  the MCP tool and build errors name the files with that directory prepended.
 
 An action keeps absolute paths and the default key, and so stays tied to its
 checkout, when its result is not the same elsewhere or fo cannot tell:
 
 - coverage and profile builds (`--coverage`, `-fprofile-*`, `-ftest-coverage`),
   whose objects write their counters to an absolute path;
-- `-flto` and `-gsplit-dwarf`;
+- `-flto`, `-foffload` and `-gsplit-dwarf`;
 - flags that read or write files the key does not cover (`-I`, `-include`,
-  `-isystem`, `-specs`, `-fplugin`, `-M...`, `-fdump-...` and similar) and any
-  flag word that is not an option. Declare include directories in
-  `[library] include-dir` to have their headers keyed by content;
+  `-isystem`, `-specs`, `-fplugin`, `-M...`, `-fdump-...`, `-fstack-usage`,
+  `-fopt-info`, `-fdiagnostics-format` and similar), every long option
+  (`--...`, among them `--include-directory=DIR`) and any flag word that is not
+  an option. Declare include directories in `[library] include-dir` to have
+  their headers keyed by content;
+- a source or include that uses `__DATE__`, `__TIME__` or `__TIMESTAMP__`,
+  since no two compiles of it agree;
 - a flag or path that contains the project root;
 - compilers other than gfortran (flang writes the absolute source path into
   the object whatever it is passed);
 - test programs, whose key also covers what they are linked with.
 
-Switching the variable in a built tree compiles the tree again.
+Switching the variable in a built tree compiles the tree again, and so does a
+change of `CPATH`, `C_INCLUDE_PATH` or the compiler variables above. A test
+verdict of one mode is not reused in the other, and Gremlin records these
+variables in its context.
 
 ## Size limits
 

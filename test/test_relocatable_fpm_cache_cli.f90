@@ -12,6 +12,9 @@ program test_relocatable_fpm_cache_cli
     !!    build through a symbolic link gives the same objects;
     !!  - coverage builds, user include options and other compilers stay bound
     !!    to their checkout;
+    !!  - switching the variable in a built tree builds it in the other mode,
+    !!    a test verdict of one mode is not reused in the other, and a
+    !!    diagnostic names its file so that it opens from any directory;
     !!  - a fetched dependency and a path dependency outside the project are
     !!    reused by a moved consumer, a moved dependency is compiled again.
     use fo_fs, only: fs_find_executable
@@ -47,6 +50,7 @@ program test_relocatable_fpm_cache_cli
     call include_directories_count()
     call debug_builds_name_no_checkout()
     call bound_builds_stay_bound()
+    call switching_the_mode_rebuilds()
     call dependencies_follow_their_location()
 
     call remove_tree(scratch)
@@ -81,12 +85,13 @@ contains
             '    call names()'//nl//'end program'//nl)
     end subroutine write_project
 
-    subroutine fo(root, words, environment, result, cache_directory)
+    subroutine fo(root, words, environment, result, cache_directory, may_fail)
         !! Run fo with blank-separated words in root and count its compilations.
         character(len=*), intent(in) :: root, words
         type(string_list_t), intent(in) :: environment
         type(process_result_t), intent(out) :: result
         character(len=*), intent(in), optional :: cache_directory
+        logical, intent(in), optional :: may_fail
         type(string_list_t) :: args
         integer :: start, blank
 
@@ -104,6 +109,7 @@ contains
         else
             call run_fo(driver, args, root, cache, result, environment, 120000)
         end if
+        if (present(may_fail)) return
         call assert_equal_integer(result%exit_code, 0, &
             'fo '//words//' in '//root//': '//result%stdout//result%stderr)
     end subroutine fo
@@ -325,6 +331,61 @@ contains
         call fo(second, 'build', other_compiler, result)
         call assert_equal_integer(compiles(), 2, 'a copy of a flang build compiles again')
     end subroutine bound_builds_stay_bound
+
+    subroutine switching_the_mode_rebuilds()
+        character(:), allocatable :: root, own_cache
+        type(string_list_t) :: default_mode, reuse_default, reuse_relocatable
+        type(process_result_t) :: result
+
+        root = join_path(scratch, 'switch')
+        own_cache = join_path(scratch, 'cache-switch')
+        default_mode = plain
+        call list_add(default_mode, 'FO_CACHE_RELOCATABLE=0')
+        call write_project(root, '42', 'print ''(a)'', __FILE__')
+        call fo(root, 'exec reloc', default_mode, result, own_cache)
+        call assert_contains(result%stdout, join_path(root, 'src/m.F90'), &
+            'the default build names the absolute source')
+        call fo(root, 'exec reloc', relocatable, result, own_cache)
+        call assert_contains(result%stdout, '42'//nl//'src/m.F90'//nl, &
+            'the same tree with the variable set is built relocatable')
+        call fo(root, 'exec reloc', default_mode, result, own_cache)
+        call assert_contains(result%stdout, join_path(root, 'src/m.F90'), &
+            'and without it again with the absolute source')
+
+        ! The test passes only on the absolute name of the default mode.
+        call write_text(join_path(root, 'src/m.F90'), 'module m'//nl// &
+            '    implicit none'//nl//'contains'//nl// &
+            '    logical function absolute()'//nl// &
+            '        absolute = index(__FILE__, ''/'') == 1'//nl// &
+            '    end function'//nl//'    integer function answer()'//nl// &
+            '        answer = 42'//nl//'    end function'//nl// &
+            '    subroutine names()'//nl//'    end subroutine'//nl//'end module'//nl)
+        call write_text(join_path(root, 'test/test_absolute.f90'), &
+            'program test_absolute'//nl//'    use m, only: absolute'//nl// &
+            '    implicit none'//nl// &
+            '    if (.not. absolute()) error stop ''the library is relocatable'''//nl// &
+            'end program'//nl)
+        reuse_default = default_mode
+        call list_add(reuse_default, 'FO_TEST_RERUN=0')
+        reuse_relocatable = relocatable
+        call list_add(reuse_relocatable, 'FO_TEST_RERUN=0')
+        call fo(root, 'test', reuse_default, result, own_cache)
+        call assert_contains(result%stdout//result%stderr, '1 pass', &
+            'the test passes in the default mode')
+        call fo(root, 'test', reuse_relocatable, result, own_cache, may_fail=.true.)
+        call assert_true(result%exit_code /= 0, &
+            'its verdict is not reused for the relocatable library: '// &
+            result%stdout//result%stderr)
+
+        ! A compiler message of a relocatable compile, read from another
+        ! directory, still names a file that opens.
+        call write_text(join_path(root, 'src/m.F90'), 'module m'//nl// &
+            '    integer :: broken = undeclared'//nl//'end module'//nl)
+        call fo(join_path(root, 'src'), 'check --json=full', relocatable, result, &
+            own_cache, may_fail=.true.)
+        call assert_contains(result%stdout, '"file":"'//join_path(root, 'src/m.F90')//'"', &
+            'the diagnostic names the source by its absolute path')
+    end subroutine switching_the_mode_rebuilds
 
     subroutine write_library(root, name)
         character(len=*), intent(in) :: root, name

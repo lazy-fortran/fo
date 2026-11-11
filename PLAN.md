@@ -29,9 +29,22 @@ failure detection. The workspace master plan, when present, owns delivery order.
   behaviour, and GCC 12 is not verified. The pre-commit hook sets the
   variable, so its fpm builds are relocatable; there `__FILE__` and compiler
   messages of library and program sources are relative to the project root.
+- The fpm key, in both modes, also covers what gfortran reads beyond fx's
+  include resolution (a Fortran `include` inside an include, headers from the
+  compiler's search list and `CPATH`), module files next to the source,
+  `COMPILER_PATH`, `GCC_EXEC_PREFIX`, `MACOSX_DEPLOYMENT_TARGET` and the host
+  CPU for `=native` flags. Sources using `__DATE__`/`__TIME__`, long options
+  and options writing side files stay path-bound. Relocatable compile output
+  is preceded by `fo: compile directory: <root>` and fo's diagnostics resolve
+  relative names against it; Gremlin records `FO_CACHE_RELOCATABLE`.
+  `test_compile_key_inputs_cli` and the new case of
+  `test_gremlin_context_provenance` fail with candidate `83c5e702` above and pass with
+  candidate SHA256
+  `b39d30c1db314edee1e153028ebf68f85b43da4f29cd088aa6639b07d80f86a4`, as do 30
+  focused cache, build, dependency, diagnostics, Gremlin context and hook
+  tests; the complete suite was not run.
 - Limits: test programs, coverage, LTO, user include options and compilers
-  other than gfortran keep the path-bound key. The fpm key has no host CPU
-  identity for `-march=native` unless the action is relocatable.
+  other than gfortran keep the path-bound key.
 
 ## Gremlin completed epochs and receipt replay
 
