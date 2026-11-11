@@ -8,21 +8,29 @@ program test_compile_key_inputs_cli
     !!  - a module file lying next to a source, which gfortran reads before
     !!    the one fo built;
     !!  - a header found through CPATH, also when only the variable changes
-    !!    in a built tree, and reused where header and place are equal;
+    !!    in a built tree, and reused where header and place are equal; such
+    !!    a header is not cached when gfortran does not tell its search list;
     !!  - a Fortran include inside an included file, which gfortran looks up
     !!    next to the compiled source, not next to the including file, also
     !!    after an edit in place with the default key;
     !!  - options that write files beside the object or name directories in
     !!    their long spelling keep an action bound to its checkout;
     !!  - a compiler proper selected through COMPILER_PATH;
-    !!  - a source that expands __TIME__ is compiled in every checkout.
+    !!  - a source that expands __TIME__ is compiled in every checkout;
+    !!  - a module file that appears next to a source between two builds of
+    !!    one resident MCP server.
     use fo_fs, only: fs_find_executable
     use fo_test_harness, only: process_result_t, string_list_t, list_add, argv
     use fo_test_harness, only: make_scratch, join_path, write_text, remove_tree, set_mode
+    use fo_test_harness, only: remove_path
     use fo_test_harness, only: read_text, file_exists, run_process
     use fo_test_harness, only: assert_true, assert_equal_integer
     use fo_test_harness, only: assert_contains, assert_not_contains, finish_assertions
     use fo_test_cli, only: resolve_driver, run_fo
+    use fo_test_mcp, only: mcp_quote
+    use fo_test_mcp_session, only: mcp_session_t, mcp_session_start, &
+        mcp_session_request, mcp_session_notify, mcp_session_call, mcp_session_shutdown
+    use fo_test_json, only: json_value_t
     implicit none
 
     character(len=1), parameter :: nl = achar(10)
@@ -48,11 +56,13 @@ program test_compile_key_inputs_cli
 
     call module_file_beside_a_source()
     call header_from_the_environment()
+    call header_without_a_search_list()
     call include_inside_an_include()
     call options_with_side_files_stay_bound()
     call long_include_option_stays_bound()
     call compiler_proper_from_the_environment()
     call time_macro_compiles_everywhere()
+    call module_file_between_resident_builds()
 
     call remove_tree(scratch)
     call finish_assertions()
@@ -186,6 +196,38 @@ contains
         call assert_contains(result%stdout, 'value=2', &
             'a built tree follows a changed CPATH')
     end subroutine header_from_the_environment
+
+    subroutine header_without_a_search_list()
+        !! A compiler that does not list its search directories: the header
+        !! found through CPATH cannot be keyed, so the action is not cached.
+        character(len=*), parameter :: body = '#include <site_config.h>'//nl// &
+            '        value = SITE_K'
+        character(:), allocatable :: first, second, quiet
+        type(string_list_t) :: site_one, site_two
+        type(process_result_t) :: result
+
+        quiet = join_path(scratch, 'quiet/gfortran')
+        call write_text(quiet, '#!/bin/sh'//nl// &
+            'for a in "$@"; do [ "$a" = -E ] && exit 1; done'//nl// &
+            'exec "'//join_path(scratch, 'bin/gfortran')//'" "$@"'//nl)
+        call set_mode(quiet, int(o'755'))
+        first = join_path(scratch, 'quiet-a')
+        second = join_path(scratch, 'quiet-b-copy')
+        call write_program(first, 'site', 'main.F90', body)
+        call write_program(second, 'site', 'main.F90', body)
+        call list_add(site_one, 'FO_JOBS=2')
+        call list_add(site_one, 'FO_FC='//quiet)
+        call list_add(site_one, 'FO_CACHE_RELOCATABLE=1')
+        site_two = site_one
+        call list_add(site_one, 'CPATH='//join_path(scratch, 'one'))
+        call list_add(site_two, 'CPATH='//join_path(scratch, 'two'))
+
+        call fo(first, 'exec site', site_one, result, 'cache-quiet')
+        call assert_contains(result%stdout, 'value=1', 'the header on CPATH is used')
+        call fo(second, 'exec site', site_two, result, 'cache-quiet')
+        call assert_contains(result%stdout, 'value=2', &
+            'without the search list a copy compiles with its own header')
+    end subroutine header_without_a_search_list
 
     subroutine write_nested(root, inner)
         !! main.f90 includes sub/a.inc, which includes b.inc: gfortran reads
@@ -324,5 +366,64 @@ contains
             'a source with __TIME__ is compiled in the copy, not replayed')
         call assert_contains(result%stdout, 'value=8', 'and runs')
     end subroutine time_macro_compiles_everywhere
+
+    subroutine module_file_between_resident_builds()
+        !! The MCP server builds in one process. A module file that appears
+        !! next to the sources after its first build must still reach the key
+        !! of its second, or the object compiled against that file is stored
+        !! under the key of a clean tree.
+        character(:), allocatable :: root, cache, stale
+        type(mcp_session_t) :: server
+        type(json_value_t) :: response
+        type(process_result_t) :: result
+        type(string_list_t) :: environment
+        integer :: exit_code
+
+        root = join_path(scratch, 'resident')
+        cache = join_path(scratch, 'cache-resident')
+        call write_text(join_path(root, 'src/kmod.f90'), kmod('1'))
+        call write_consumer(root)
+        ! Only library sources, all in one directory, while the server builds.
+        call remove_tree(join_path(root, 'app'))
+        call mcp_session_start(server, driver, root, cache, &
+            join_path(scratch, 'resident-state'), join_path(scratch, 'resident.stderr'))
+        call mcp_session_request(server, 'initialize', &
+            '{"protocolVersion":"2025-11-25","capabilities":{},'// &
+            '"clientInfo":{"name":"fo-key-inputs-test","version":"1"}}', response)
+        call mcp_session_notify(server, 'notifications/initialized')
+        call mcp_session_call(server, '{"action":"build","dir":'//mcp_quote(root)//'}', &
+            response, 120000)
+
+        stale = join_path(scratch, 'resident-stale/kmod.f90')
+        call write_text(stale, kmod('2'))
+        call run_process(argv(trim(real_fc), '-fsyntax-only', stale), &
+            join_path(root, 'src'), result)
+        call assert_true(file_exists(join_path(root, 'src/kmod.mod')), &
+            'an outdated module file appears next to the sources: '//result%stderr)
+        call write_text(join_path(root, 'src/m.f90'), read_text(join_path(root, &
+            'src/m.f90'))//'! edited'//nl)
+        call mcp_session_call(server, '{"action":"build","dir":'//mcp_quote(root)//'}', &
+            response, 120000)
+        call mcp_session_shutdown(server, exit_code)
+
+        ! The same tree without that file, as a clean checkout has it.
+        call remove_path(join_path(root, 'src/kmod.mod'))
+        call remove_tree(join_path(root, 'build'))
+        call write_consumer_program(root)
+        call list_add(environment, 'FO_JOBS=1')
+        call fo(root, 'exec stray', environment, result, 'cache-resident')
+        call assert_contains(result%stdout, 'value=1', &
+            'a build without the module file does not get the object compiled '// &
+            'against it: '//result%stdout//result%stderr)
+    end subroutine module_file_between_resident_builds
+
+    subroutine write_consumer_program(root)
+        character(len=*), intent(in) :: root
+        character(:), allocatable :: text
+
+        text = read_text(join_path(root, 'src/m.f90'))
+        call write_consumer(root)
+        call write_text(join_path(root, 'src/m.f90'), text)
+    end subroutine write_consumer_program
 
 end program test_compile_key_inputs_cli

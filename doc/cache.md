@@ -19,7 +19,8 @@ For fpm projects, a compile action is keyed by:
   to the compiled source, and a header found in neither place comes from the
   compiler's own search list, which includes `CPATH`;
 - the name and content of `.mod` and `.smod` files lying in the directory of
-  the source, which gfortran reads before those of the module directory;
+  the source, which gfortran reads before those of the module directory, so
+  that a stale module file left there by another build changes the key;
 - the compiler identity: its command, the path and content of the compiler
   driver and its version line;
 - fo's baseline flags and the flags of the project and the command line, and
@@ -47,7 +48,9 @@ For the CMake backend, a compile action is keyed by:
 
 With debug information the compile directory is part of the key, and options
 such as `-march=native` add the host CPU identity. If a key cannot be complete,
-the action is not cached. Compiler and system modules outside the include
+the action is not cached; for fpm this includes a header gfortran would look
+up in its own search list when it does not report that list. Compiler and
+system modules outside the include
 directories (intrinsic modules, system `.mod` files) count as part of the
 toolchain identity rather than being keyed by content.
 
@@ -84,7 +87,13 @@ default in these ways:
   source names relative to it, so a debugger finds the sources when it is
   started in the project root (in gdb otherwise with `directory <root>`).
 - A dependency outside the project is shared by consumers at different paths
-  and compiled again when it moves itself.
+  and compiled again when it moves itself. If it declares an include
+  directory, every unit of the consumer gets that directory as an absolute
+  `-I` and is compiled again as well.
+- A program that opens the file `__FILE__` names finds it only when it runs
+  in the project root. `fo test` runs tests there; Gremlin runs them in a
+  private directory without the sources, where such a test fails, as does
+  any test that opens a project file by a path relative to the root.
 - The key also covers the path, relative to the root when it lies below it,
   of every file the includes resolve to, because that name is what `__FILE__`
   in the header and debug information show. With the default key, a header of

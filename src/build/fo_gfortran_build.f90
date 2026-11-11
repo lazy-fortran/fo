@@ -170,6 +170,18 @@ module fo_gfortran_build
         character(len=512), allocatable :: d(:)
     end type node_dirs_t
 
+    type :: key_inputs_memo_t
+        !! What source_key_inputs learnt during one build. Never kept across
+        !! builds: a resident process (MCP, Gremlin) would miss a module file
+        !! or header search directory that appeared in between.
+        character(len=MAX_PATH) :: dir = ''
+        character(len=HASH_LEN) :: module_files = ''
+        logical :: dir_known = .false.
+        integer :: n_chains = 0
+        type(node_text_t) :: chain_tokens(8)
+        type(node_dirs_t) :: chains(8)
+    end type key_inputs_memo_t
+
     !! Memory admission of the running test team (#364): budget and the sum
     !! of the reservations of the cases that run, in kB.
     integer(8), save :: memory_budget_kb = 0, memory_in_use_kb = 0
@@ -828,7 +840,7 @@ contains
         if (len_trim(key) == 0) complete = .false.
     end subroutine unit_cache_key
 
-    subroutine source_key_inputs(project_dir, source, dirs, tokens, closure, &
+    subroutine source_key_inputs(project_dir, source, dirs, tokens, memo, closure, &
             module_files)
         !! What the compile of source reads beyond the source-tree digest:
         !! its includes as gfortran resolves them, asked for its search list
@@ -836,25 +848,29 @@ contains
         !! dirs, and the module files next to the source. Serial code only.
         character(len=*), intent(in) :: project_dir, source, tokens
         character(len=512), intent(in) :: dirs(:)
+        type(key_inputs_memo_t), intent(inout) :: memo
         type(include_closure_t), intent(out) :: closure
         character(len=HASH_LEN), intent(out) :: module_files
         character(len=512), allocatable :: chain(:)
-        character(len=MAX_PATH), save :: known_dir = ''
-        character(len=HASH_LEN), save :: known_module_files = ''
         character(len=MAX_PATH) :: dir
+        logical :: chain_known
 
         allocate (chain(0))
         call include_closure(source, project_dir, dirs, chain, .false., closure)
         if (closure%unresolved) then
-            call compiler_include_chain(project_dir, tokens, chain)
-            call include_closure(source, project_dir, dirs, chain, .true., closure)
+            call compiler_include_chain(project_dir, tokens, memo, chain, chain_known)
+            ! Still unresolved when gfortran did not tell its search list:
+            ! the caller must not cache the action.
+            call include_closure(source, project_dir, dirs, chain, chain_known, &
+                closure)
         end if
         dir = source(:max(1, index(source, '/', back=.true.) - 1))
-        if (dir /= known_dir) then
-            known_module_files = source_dir_modules_digest(trim(dir))
-            known_dir = dir
+        if (.not. memo%dir_known .or. dir /= memo%dir) then
+            memo%module_files = source_dir_modules_digest(trim(dir))
+            memo%dir = dir
+            memo%dir_known = .true.
         end if
-        module_files = known_module_files
+        module_files = memo%module_files
     end subroutine source_key_inputs
 
     function key_inputs_text(closure, module_files, relocatable) result(text)
@@ -875,27 +891,29 @@ contains
             text = text//new_line('a')//'source-directory-modules:'//module_files
     end function key_inputs_text
 
-    subroutine compiler_include_chain(project_dir, tokens, chain)
+    subroutine compiler_include_chain(project_dir, tokens, memo, chain, known)
         !! The directories gfortran searches for `#include <x>` when it gets
         !! these command tokens, in its order: the include options, CPATH and
-        !! its own directories. Empty for other compilers and when gfortran
-        !! does not say. Serial code only; remembered per tokens.
+        !! its own directories; known is false for other compilers and when
+        !! gfortran does not say. Serial code only; remembered per tokens in
+        !! memo.
         character(len=*), intent(in) :: project_dir, tokens
+        type(key_inputs_memo_t), intent(inout) :: memo
         character(len=512), allocatable, intent(out) :: chain(:)
-        type(node_text_t), save :: known_tokens(8)
-        type(node_dirs_t), save :: known_chains(8)
-        integer, save :: n_known = 0
+        logical, intent(out) :: known
         type(compiler_dialect_t) :: dialect
         character(len=:), allocatable :: packed, base_flags, text, line
         character(len=MAX_PATH) :: log_file
         integer :: i, n_args, exitcode, ierr, pos, line_end
         logical :: listing
 
-        do i = 1, n_known
-            if (known_tokens(i)%s /= tokens) cycle
-            chain = known_chains(i)%d
+        do i = 1, memo%n_chains
+            if (memo%chain_tokens(i)%s /= tokens) cycle
+            chain = memo%chains(i)%d
+            known = .true.
             return
         end do
+        known = .false.
         allocate (chain(0))
         dialect = compiler_dialect(fc_command())
         if (dialect%kind == COMPILER_GFORTRAN) then
@@ -922,6 +940,7 @@ contains
                 pos = pos + line_end
                 if (index(line, '#include <...>') == 1) then
                     listing = .true.
+                    known = .true.
                 else if (listing) then
                     if (len(line) < 2) exit
                     if (line(1:1) /= ' ') exit
@@ -931,10 +950,10 @@ contains
                 end if
             end do
         end if
-        if (n_known >= size(known_tokens)) return
-        n_known = n_known + 1
-        known_tokens(n_known)%s = tokens
-        known_chains(n_known)%d = chain
+        if (.not. known .or. memo%n_chains >= size(memo%chains)) return
+        memo%n_chains = memo%n_chains + 1
+        memo%chain_tokens(memo%n_chains)%s = tokens
+        memo%chains(memo%n_chains)%d = chain
     end subroutine compiler_include_chain
 
     logical function gremlin_execution_view_requested() result(requested)
@@ -2341,6 +2360,7 @@ contains
         logical :: relocatable_mode, debug_info
         type(compiler_dialect_t) :: dialect
         type(include_closure_t) :: closure
+        type(key_inputs_memo_t) :: key_memo
         character(len=HASH_LEN) :: module_files
         character(len=HASH_LEN) :: post_key
         integer :: action_index
@@ -2570,10 +2590,12 @@ contains
             end if
             closure = include_closure_t()
             module_files = ''
-            if (node_fortran(node_id) .and. .not. allocated(node_dirs(node_id)%d)) &
+            if (node_fortran(node_id) .and. .not. allocated(node_dirs(node_id)%d)) then
                 call source_key_inputs(project_dir, trim(filenames(node_id)), &
-                dep_includes(:n_dep_includes), node_tokens(node_id)%s, closure, &
-                module_files)
+                    dep_includes(:n_dep_includes), node_tokens(node_id)%s, &
+                    key_memo, closure, module_files)
+                if (closure%unresolved) smod_cacheable(node_id) = .false.
+            end if
             if (relocatable_mode) then
                 source_argument = project_relative(filenames(node_id), project_dir)
                 ! A date or time macro gives every compile another object.
@@ -4072,6 +4094,7 @@ contains
         integer :: dnode
         character(len=:), allocatable :: test_key_flags
         type(include_closure_t) :: closure
+        type(key_inputs_memo_t) :: key_memo
         character(len=HASH_LEN) :: module_files
         character(len=512), allocatable :: helper_objs(:)
         character(len=512), allocatable :: all_lib_objs(:), link_inputs(:)
@@ -4316,7 +4339,8 @@ contains
                 dep_keys(n_dep) = lib_hash
             end if
             call source_key_inputs(project_dir, trim(filenames(node_id)), &
-                dep_includes(:n_dep_includes), incl_flag, closure, module_files)
+                dep_includes(:n_dep_includes), incl_flag, key_memo, closure, &
+                module_files)
             test_key_flags = compile_key_flags(test_flags)//new_line('a')// &
                 'source-context:'//source_compile_context( &
                 filenames(node_id), project_dir, incl_flag)// &
@@ -4331,6 +4355,7 @@ contains
             run_keys(i) = cache_key_for(filenames(node_id), compiler, &
                 test_key_flags, dep_keys, n_dep, &
                 include_dirs=dep_includes(:n_dep_includes))
+            if (closure%unresolved) run_keys(i) = ''
         end do
 
         run_exits = 0
@@ -4347,7 +4372,7 @@ contains
             log_local = run_logs(i)
             call make_obj_path(fname_local, project_dir, obj_dir, obj_path)
             restored = .false.
-            if (compile_cache_ierr == 0) then
+            if (compile_cache_ierr == 0 .and. len_trim(run_keys(i)) > 0) then
                 call cache_restore_action(compile_cache, run_keys(i), &
                     obj_path, mod_dir, restored)
             end if
@@ -4399,7 +4424,8 @@ contains
                 if (exitcode == 0) exitcode = run_exits(i)
             else
                 call append_log_file(trim(run_logs(i)), log_file)
-                if (compile_cache_ierr == 0 .and. run_compiled(i)) then
+                if (compile_cache_ierr == 0 .and. run_compiled(i) .and. &
+                    len_trim(run_keys(i)) > 0) then
                     call make_obj_path(filenames(run_nodes(i)), project_dir, &
                         obj_dir, obj_path)
                     call cache_store_action(compile_cache, run_keys(i), &

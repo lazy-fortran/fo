@@ -13,7 +13,8 @@ failure detection. The workspace master plan, when present, owns delivery order.
   sources of an fpm project with arguments relative to the project root, and
   their key covers these arguments instead of the project directory
   ([doc/cache.md](doc/cache.md#relocatable-results)). A copy of a project at
-  another path then compiles nothing, as CMake projects already did.
+  another path then takes its library and program objects from the cache, as
+  CMake projects already did; test programs are compiled in each checkout.
 - `test_relocatable_fpm_cache_cli` fails with the unchanged driver and passes
   with candidate SHA256
   `83c5e702cda648a5ed1d5719f2e565a0c89c8decd1eedf11a13daa2fef5ebdf6`. It
@@ -43,8 +44,18 @@ failure detection. The workspace master plan, when present, owns delivery order.
   `b39d30c1db314edee1e153028ebf68f85b43da4f29cd088aa6639b07d80f86a4`, as do 30
   focused cache, build, dependency, diagnostics, Gremlin context and hook
   tests; the complete suite was not run.
-- Limits: test programs, coverage, LTO, user include options and compilers
-  other than gfortran keep the path-bound key.
+- What a compile reads next to its source is found anew in every build, also
+  in a resident MCP or Gremlin process, and a header from the compiler's
+  search list is not cached when gfortran does not report that list. The two
+  new cases of `test_compile_key_inputs_cli` fail with candidate `b39d30c1`
+  above and pass with candidate SHA256
+  `cf9823d4bdafb837de1fcf38bd3381fa0486a0f052dc3cc41a111e69686d3365`; 31
+  focused cache, build, dependency, diagnostics, Gremlin and hook tests pass
+  (`test_hook_cmake_presets` only when run alone, under load it exceeded its
+  time budget); the complete suite was not run.
+- Limits: test programs, coverage, LTO, user include options, consumers of a
+  path dependency with an include directory and compilers other than gfortran
+  keep the path-bound key.
 
 ## Gremlin completed epochs and receipt replay
 
