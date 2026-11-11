@@ -33,7 +33,7 @@ module fo_gfortran_build
     use fx_dag, only: dag_t, dag_find_node, dag_topo_sort, dag_levels, MAX_NODES
     use fo_cache, only: cache_t, cache_init, cache_key_for, &
         cache_restore_action, cache_store_action, hash_mod_file, &
-        HASH_LEN, cache_digest, cache_file_digest, &
+        HASH_LEN, cache_digest, cache_file_digest, cache_source_tree_hash, &
         cache_store_binary, cache_restore_binary, cache_binary_matches
     use fo_util, only: make_tmpfile, make_sibling_tmpfile, delete_tmpfile, &
         read_text_file, clean_root_build_artifacts
@@ -49,7 +49,7 @@ module fo_gfortran_build
         progress_note
     use fo_compiler_dialect, only: compiler_dialect, compiler_dialect_t, &
         selected_compiler_command, COMPILER_NVFORTRAN, COMPILER_IFX, &
-        COMPILER_FLANG
+        COMPILER_FLANG, COMPILER_GFORTRAN
     use fo_compiler_flags, only: append_array_temporary_warning_flag, append_pipe_flag
     use fo_linker_policy, only: select_linker
     use fo_macho_image, only: macho_image_valid
@@ -798,10 +798,11 @@ contains
     end subroutine scan_header_dependencies
 
     subroutine unit_cache_key(units, n_units, dag, filename, mod_keys, dirs, &
-            compiler, key_text, depfile, key, complete)
+            compiler, key_text, depfile, key, complete, include_providers)
         !! Action key of one source: its content (and Fortran includes), the
         !! compiler and flags identity, the interface keys of the modules it
         !! uses and, when a dependency file is declared, its header content.
+        !! With include_providers also which of dirs provides each include.
         type(scan_unit_t), intent(in) :: units(:)
         integer, intent(in) :: n_units
         type(dag_t), intent(in) :: dag
@@ -810,8 +811,9 @@ contains
         character(len=512), intent(in) :: dirs(:)
         character(len=HASH_LEN), intent(out) :: key
         logical, intent(out) :: complete
+        logical, intent(in), optional :: include_providers
         character(len=HASH_LEN), allocatable :: dep_keys(:)
-        character(len=HASH_LEN) :: headers
+        character(len=HASH_LEN) :: headers, providers
         integer :: n_dep
 
         key = ''
@@ -820,10 +822,35 @@ contains
         if (.not. complete) return
         headers = ''
         if (len(depfile) > 0) call depfile_digest(depfile, headers)
-        key = cache_key_for(filename, compiler, trim(key_text)//headers, &
+        providers = ''
+        if (present(include_providers)) then
+            if (include_providers) providers = include_provider_digest(filename, dirs)
+        end if
+        key = cache_key_for(filename, compiler, trim(key_text)//headers//providers, &
             dep_keys, n_dep, include_dirs=dirs)
         if (len_trim(key) == 0) complete = .false.
     end subroutine unit_cache_key
+
+    function include_provider_digest(filename, dirs) result(digest)
+        !! Which directory provides each file the source includes. The key
+        !! holds the content of the includes over all of dirs; the content
+        !! over each shorter leading part of dirs differs as soon as an
+        !! include is found in another directory, also with equal content.
+        !! The compiler writes that directory into __FILE__ and debug
+        !! information. Blank when no directory is searched.
+        character(len=*), intent(in) :: filename
+        character(len=512), intent(in) :: dirs(:)
+        character(len=HASH_LEN) :: digest
+        character(len=HASH_LEN) :: parts(size(dirs))
+        integer :: k
+
+        digest = ''
+        if (size(dirs) == 0) return
+        do k = 1, size(dirs)
+            call cache_source_tree_hash(filename, parts(k), dirs(:k - 1))
+        end do
+        digest = cache_digest(parts, size(parts))
+    end function include_provider_digest
 
     logical function gremlin_execution_view_requested() result(requested)
         character(len=MAX_PATH) :: execution_cwd
@@ -978,6 +1005,7 @@ contains
         call find_dep_artifacts(project_dir, config, dep_includes, n_dep_includes, &
             dep_objs, n_dep_objs, .true.)
         stamp_flags = compile_key_flags(flag_text)
+        if (cache_relocatable()) stamp_flags = 'relocatable:'//stamp_flags
         allocate (stamp_roots(8 * MAX_RESOLVED))
         call collect_stamp_roots(project_dir, stamp_roots, n_stamp_roots, stamp_ok)
         stamp_hit = .false.
@@ -1332,6 +1360,7 @@ contains
         stamp_flags = flags
         call append_array_temporary_warning_flag(fc_command(), stamp_flags)
         stamp_flags = compile_key_flags(stamp_flags)
+        if (cache_relocatable()) stamp_flags = 'relocatable:'//stamp_flags
         stamp_request_flags = request_key_flags(request_flags)
         call detect_compiler(compiler)
         ! Only a complete test preparation can certify every executable for
@@ -2211,6 +2240,13 @@ contains
         type(node_dirs_t), allocatable :: node_dirs(:)
         logical, allocatable :: node_fortran(:)
         integer, allocatable :: node_decl(:)
+        !! Sources compiled with project-relative arguments (FO_CACHE_RELOCATABLE).
+        logical, allocatable :: node_relocatable(:)
+        character(len=512), allocatable :: relative_includes(:)
+        character(len=:), allocatable :: relative_includes_flag, baseline_flags
+        character(len=:), allocatable :: source_argument, key_tokens, debug_options
+        logical :: relocatable_mode, debug_info
+        type(compiler_dialect_t) :: dialect
         character(len=HASH_LEN) :: post_key
         integer :: action_index
         logical :: post_complete, with_actions
@@ -2334,6 +2370,21 @@ contains
         allocate (node_dirs(MAX_NODES), node_fortran(MAX_NODES), node_decl(MAX_NODES))
         node_fortran = .true.
         node_decl = 0
+        allocate (node_relocatable(MAX_NODES))
+        node_relocatable = .false.
+        dialect = compiler_dialect(fc_command())
+        relocatable_mode = .not. with_actions .and. .not. present(declared_flags) &
+            .and. cache_relocatable() .and. dialect%kind == COMPILER_GFORTRAN
+        if (relocatable_mode) then
+            allocate (relative_includes(MAX_DEP_DIRS))
+            relative_includes = ''
+            do i = 1, n_dep_includes
+                relative_includes(i) = project_relative(dep_includes(i), project_dir)
+            end do
+            call make_includes_flag(project_relative(mod_dir, project_dir), &
+                relative_includes, n_dep_includes, relative_includes_flag)
+            call fc_base_flags_into(baseline_flags)
+        end if
         if (present(declared_flags)) then
             do i = 1, n_order
                 node_id = topo_order(i)
@@ -2422,10 +2473,40 @@ contains
             else
                 source_key_flags(node_id) = compile_key_flags(source_flags(node_id))
             end if
-            if (.not. with_actions) source_key_flags(node_id) = &
-                trim(source_key_flags(node_id))//new_line('a')// &
-                'source-context:'//source_compile_context( &
-                filenames(node_id), project_dir, node_tokens(node_id)%s)
+            if (relocatable_mode) then
+                source_argument = project_relative(filenames(node_id), project_dir)
+                node_relocatable(node_id) = location_free_compile( &
+                    baseline_flags//' '//trim(source_flags(node_id)), &
+                    relative_includes_flag, source_argument, project_dir)
+            end if
+            if (node_relocatable(node_id)) then
+                node_location(node_id)%s = source_argument
+                node_tokens(node_id)%s = with_user_flags(relative_includes_flag, &
+                    source_flags(node_id))
+                ! Debug information records the compile directory, the one
+                ! absolute path left. Mapped whatever the flags say, so no
+                ! overlooked debug option can leave it in a shared object.
+                debug_options = ''
+                if (is_macos()) then
+                    ! Darwin's assembler writes its own line table.
+                    call location_free_tokens(node_tokens(node_id)%s, key_tokens, &
+                        debug_info)
+                    if (debug_info) debug_options = new_line('a')// &
+                        '-Wa,-fdebug-compilation-dir=.'
+                end if
+                key_tokens = node_tokens(node_id)%s//new_line('a')// &
+                    '-fdebug-prefix-map=<root>=.'//debug_options
+                node_tokens(node_id)%s = node_tokens(node_id)%s//new_line('a')// &
+                    '-fdebug-prefix-map='//trim(project_dir)//'=.'//debug_options
+                source_key_flags(node_id) = trim(source_key_flags(node_id))// &
+                    new_line('a')//'source-context:'//relocatable_compile_context( &
+                    source_argument, key_tokens, trim(source_key_flags(node_id)))
+            else if (.not. with_actions) then
+                source_key_flags(node_id) = &
+                    trim(source_key_flags(node_id))//new_line('a')// &
+                    'source-context:'//source_compile_context( &
+                    filenames(node_id), project_dir, node_tokens(node_id)%s)
+            end if
             if (size(interfaces(node_id)%modules) > 1) &
                 source_key_flags(node_id) = trim(source_key_flags(node_id))// &
                 '|fo-interface-vector-v1'
@@ -2492,7 +2573,8 @@ contains
                             filenames(node_id), new_mod_keys, &
                             dep_includes(:n_dep_includes), compiler, &
                             trim(source_key_flags(node_id)), '', &
-                            level_source_key, level_complete)
+                            level_source_key, level_complete, &
+                            include_providers=node_relocatable(node_id))
                     end if
                     if (.not. level_complete) then
                         level_restored(i) = .false.
@@ -2549,7 +2631,8 @@ contains
                     call compile_f90(project_dir, fname_local, obj_path, &
                         node_tokens(node_id)%s, per_log_local, compile_exits(ii), &
                         exact_flags=present(declared_flags), &
-                        compiler=node_compiler(node_id)%s)
+                        compiler=node_compiler(node_id)%s, &
+                        relocatable=node_relocatable(node_id))
                     call progress_step()
                 end do
                 !$omp end parallel do
@@ -2571,7 +2654,8 @@ contains
                     call compile_f90(project_dir, fname_local, obj_path, &
                         node_tokens(node_id)%s, per_logs(ii), compile_exits(ii), &
                         exact_flags=present(declared_flags), &
-                        compiler=node_compiler(node_id)%s)
+                        compiler=node_compiler(node_id)%s, &
+                        relocatable=node_relocatable(node_id))
                 end do
 
                 do ii = 1, n_compile
@@ -2642,7 +2726,8 @@ contains
                 call compile_f90(project_dir, fname_local, obj_path, &
                     node_tokens(node_id)%s, log_file, exitcode, &
                     exact_flags=present(declared_flags), &
-                    compiler=node_compiler(node_id)%s)
+                    compiler=node_compiler(node_id)%s, &
+                    relocatable=node_relocatable(node_id))
                 if (exitcode /= 0) then
                     call progress_end()
                     return
@@ -5582,6 +5667,89 @@ contains
         context = cache_digest(parts, size(parts))
     end function source_compile_context
 
+    function relocatable_compile_context(source_argument, tokens, flags) result(context)
+        !! Location-free counterpart of source_compile_context: the source as
+        !! passed to the compiler and the command tokens as executed, both
+        !! relative to the project root, and no working directory.
+        character(len=*), intent(in) :: source_argument, tokens, flags
+        character(len=HASH_LEN) :: context, token_key
+        character(len=MAX_PATH) :: parts(4)
+
+        parts(1) = 'fo-source-context-v3-relocatable'
+        parts(2) = source_argument
+        call text_digest(tokens, token_key)
+        parts(3) = token_key
+        parts(4) = ''
+        if (index(flags, '=native') > 0) then
+            call text_digest(host_cpu_identity(), token_key)
+            parts(4) = 'host-cpu:'//token_key
+        end if
+        context = cache_digest(parts, size(parts))
+    end function relocatable_compile_context
+
+    pure function project_relative(path, root) result(relative)
+        !! path as the compiler sees it from the project root: relative when
+        !! it lies below the root, unchanged otherwise.
+        character(len=*), intent(in) :: path, root
+        character(len=:), allocatable :: relative
+        integer :: n
+
+        n = len_trim(root)
+        relative = trim(path)
+        if (relative == root(:n)) then
+            relative = '.'
+        else if (len(relative) > n + 1) then
+            if (relative(:n + 1) == root(:n)//'/') relative = relative(n + 2:)
+        end if
+    end function project_relative
+
+    pure logical function location_free_compile(flags, tokens, source_argument, &
+            root) result(location_free)
+        !! True when a gfortran compile run in root with these arguments gives
+        !! the same result in any other root: nothing names the root, and no
+        !! option records the working directory, writes an output the cache
+        !! does not hold, or reads a file the key does not cover by content.
+        !! flags are the blank-separated baseline and project flags, tokens
+        !! the newline-separated module and include options fo generates.
+        character(len=*), intent(in) :: flags, tokens, source_argument, root
+        character(len=*), parameter :: bound(*) = [character(len=24) :: &
+            '--coverage', '-coverage', '-fprofile', '-ftest-coverage', &
+            '-fbranch-probabilities', '-fauto-profile', '-flto', &
+            '-gsplit-dwarf', '-fworking-directory', '-fdump', '-save-temps', &
+            '-frecord-gcc-switches', &
+            '-I', '-i', '-J', '-B', '-M', '-o', '--sysroot', '-specs', &
+            '--specs', '-fplugin', '-fpre-include', '-fintrinsic-modules-path', &
+            '-wrapper', '-Wp,', '-Wa,', '-Xpreprocessor', '-Xassembler']
+        integer :: i, start, n, k, n_root
+
+        location_free = .false.
+        n_root = len_trim(root)
+        if (n_root == 0) return
+        ! The compiler is started with PWD=root, in fo's KEY=VALUE;... form.
+        if (scan(root(:n_root), ';'//achar(10)) > 0) return
+        if (index(tokens, root(:n_root)) > 0) return
+        if (index(source_argument, root(:n_root)) > 0) return
+        if (index(flags, root(:n_root)) > 0) return
+        n = len_trim(flags)
+        start = 0
+        do i = 1, n + 1
+            if (i <= n) then
+                if (flags(i:i) /= ' ') then
+                    if (start == 0) start = i
+                    cycle
+                end if
+            end if
+            if (start == 0) cycle
+            ! A word that is no option is a file or an option's argument.
+            if (flags(start:start) /= '-') return
+            do k = 1, size(bound)
+                if (index(flags(start:i - 1), trim(bound(k))) == 1) return
+            end do
+            start = 0
+        end do
+        location_free = .true.
+    end function location_free_compile
+
     subroutine make_includes_flag(mod_dir, dep_includes, n_dep_includes, flag)
         character(len=*), intent(in) :: mod_dir
         character(len=512), intent(in) :: dep_includes(MAX_DEP_DIRS)
@@ -5701,14 +5869,24 @@ contains
         end function compiler_tool_key
 
         recursive subroutine compile_f90(project_dir, source, objfile, includes_flag, log_file, &
-                exitcode, exact_flags, compiler)
+                exitcode, exact_flags, compiler, relocatable)
             character(len=*), intent(in) :: project_dir, source, objfile, includes_flag
             character(len=*), intent(in) :: log_file
             integer, intent(out) :: exitcode
             logical, intent(in), optional :: exact_flags
             character(len=*), intent(in), optional :: compiler
-            character(len=:), allocatable :: packed, base_flags
+            !! source and includes_flag are already relative to project_dir;
+            !! the object is passed relative too, and PWD names project_dir
+            !! as the debug prefix map spells it.
+            logical, intent(in), optional :: relocatable
+            character(len=:), allocatable :: packed, base_flags, environment
             integer :: n_args, n_removed
+            logical :: relative_output
+
+            relative_output = .false.
+            if (present(relocatable)) relative_output = relocatable
+            environment = ''
+            if (relative_output) environment = 'PWD='//trim(project_dir)
 
             ! Build an argv vector and spawn via the async-signal-safe argv runner
             ! (fork+execve, no /bin/sh): it is safe inside the OpenMP parallel
@@ -5737,7 +5915,11 @@ contains
             end if
             call argv_push_split_nl(packed, n_args, includes_flag)
             call argv_push(packed, n_args, '-o')
-            call argv_push(packed, n_args, objfile)
+            if (relative_output) then
+                call argv_push(packed, n_args, project_relative(objfile, project_dir))
+            else
+                call argv_push(packed, n_args, objfile)
+            end if
             call argv_push(packed, n_args, source)
             !$omp end critical (fo_compile_command)
 
@@ -5746,7 +5928,7 @@ contains
             call clear_compiler_object(objfile, log_file, exitcode)
             if (exitcode /= 0) return
             call process_run_argv_logged(project_dir, packed, n_args, log_file, &
-                .true., build_timeout_seconds(), exitcode)
+                .true., build_timeout_seconds(), exitcode, env_extra=environment)
             if (exitcode == 124) call append_build_hang_hint(log_file, &
                 'compile of '//trim(source), build_timeout_seconds())
             call validate_compiler_object(objfile, source, log_file, exitcode)
@@ -5759,7 +5941,7 @@ contains
             call clear_compiler_object(objfile, log_file, exitcode)
             if (exitcode /= 0) return
             call process_run_argv_logged(project_dir, packed, n_args, log_file, &
-                .true., build_timeout_seconds(), exitcode)
+                .true., build_timeout_seconds(), exitcode, env_extra=environment)
             if (exitcode == 124) call append_build_hang_hint(log_file, &
                 'compile of '//trim(source), build_timeout_seconds())
             call validate_compiler_object(objfile, source, log_file, exitcode)

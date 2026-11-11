@@ -7,6 +7,32 @@ Issues define observable success and this plan orders delivery. Apply
 smallest complete change, and preserve supported behaviour and independent
 failure detection. The workspace master plan, when present, owns delivery order.
 
+## Relocatable fpm compile keys (2026-11-11)
+
+- With `FO_CACHE_RELOCATABLE=1`, gfortran compiles the library and program
+  sources of an fpm project with arguments relative to the project root, and
+  their key covers these arguments instead of the project directory
+  ([doc/cache.md](doc/cache.md#relocatable-results)). A copy of a project at
+  another path then compiles nothing, as CMake projects already did.
+- `test_relocatable_fpm_cache_cli` fails with the unchanged driver and passes
+  with candidate SHA256
+  `83c5e702cda648a5ed1d5719f2e565a0c89c8decd1eedf11a13daa2fef5ebdf6`. It
+  covers reuse in a copy, byte identity with an independent compile, the
+  inputs that must compile again (flag, body, header, source name, a header
+  that another include directory provides), debug builds also through a
+  symbolic link, the builds that stay bound to their checkout, and fetched and
+  outside dependencies. Twenty-four focused cache, build, dependency and hook
+  tests pass with it; the complete suite was not run.
+  On macOS 26 (arm64, gfortran 16.2) the test passes with candidate SHA256
+  `2804c8aff6878c63973e80c643a95548a1ffc7672efe143f847c7cd8a746b3c1`.
+- Off by default: `test_compile_cache_paths` fixes the absolute `__FILE__` as
+  behaviour, and GCC 12 is not verified. The pre-commit hook sets the
+  variable, so its fpm builds are relocatable; there `__FILE__` and compiler
+  messages of library and program sources are relative to the project root.
+- Limits: test programs, coverage, LTO, user include options and compilers
+  other than gfortran keep the path-bound key. The fpm key has no host CPU
+  identity for `-march=native` unless the action is relocatable.
+
 ## Gremlin completed epochs and receipt replay
 
 - Completed epochs, including epochs with failing tests, become quiescent until

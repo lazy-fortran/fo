@@ -7,7 +7,7 @@ module fo_cache
         action_cache_init, cache_key_for, cache_lookup, cache_restore_action, &
         cache_store_action, cache_action_mod_key, cache_store_binary, &
         cache_restore_binary, cache_binary_matches, cache_digest, &
-        cache_file_digest, hash_mod_file
+        cache_file_digest, hash_mod_file, cache_source_tree_hash
     use fx_action_result_store, only: action_result_store_policy
     use, intrinsic :: iso_fortran_env, only: int64
     implicit none
@@ -22,7 +22,7 @@ module fo_cache
     public :: cache_key_for, cache_lookup, cache_restore_action, &
         cache_store_action, cache_action_mod_key
     public :: cache_store_binary, cache_restore_binary, cache_binary_matches
-    public :: cache_digest, cache_file_digest, hash_mod_file
+    public :: cache_digest, cache_file_digest, hash_mod_file, cache_source_tree_hash
     public :: cache_env_size
 
 contains

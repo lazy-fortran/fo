@@ -9,6 +9,18 @@ not recompile dependents. Links and successful test runs have their own keys.
 The shared store lives under `~/.cache/fo` by default; set `FO_CACHE_DIR` to use
 another location.
 
+For fpm projects, a compile action is keyed by:
+
+- the content of the source and of every file its `include` or `#include` lines
+  resolve to, next to the including file or in an include directory of the
+  manifests (`[library] include-dir`);
+- the compiler identity: its command, the path and content of the compiler
+  driver and its version line;
+- fo's baseline flags and the flags of the project and the command line;
+- the interface keys of the modules it uses;
+- the source path and the module and include options as the compiler gets them;
+- the project directory, unless the action is relocatable (see below).
+
 For the CMake backend, a compile action is keyed by:
 
 - the content of the source and of every file its `include`, `#include "x"` or
@@ -30,12 +42,62 @@ the action is not cached. Compiler and system modules outside the include
 directories (intrinsic modules, system `.mod` files) count as part of the
 toolchain identity rather than being keyed by content.
 
-Results are therefore tied to the project location by default. With
-`FO_CACHE_RELOCATABLE=1`, sources below the project root are passed relative to
+## Relocatable results
+
+Results are tied to the project location by default: the compiler gets absolute
+paths and writes them into the object (`__FILE__`, run-time error messages,
+debug information), so the key covers them. With `FO_CACHE_RELOCATABLE=1`,
+identical trees at different paths (worktrees, CI checkouts, other machines
+with the same compiler at the same path) share results and produce
+byte-identical objects. A renamed file is still a different action.
+
+For CMake projects, sources below the project root are then passed relative to
 it and, with `-g`, fo adds `-fdebug-prefix-map=<root>=.` and
-`-gno-record-gcc-switches`. Identical trees at different paths (worktrees, CI
-checkouts) then share results and produce byte-identical objects. A renamed
-file is still a different action.
+`-gno-record-gcc-switches`.
+
+For fpm projects compiled with gfortran, fo then runs the compiler in the
+project root with every path below the root relative to it:
+
+```
+gfortran -c ... -J build/fo/mod -I build/fo/mod -I include -o build/fo/obj/src_m.f90.o src/m.f90
+```
+
+Paths outside the root, such as a path dependency elsewhere or an external
+module directory, stay absolute. The key covers these arguments as passed and
+no longer the project directory. What a build then gives differs from the
+default in these ways:
+
+- `__FILE__`, run-time messages (`At line 4 of file src/m.f90`) and compiler
+  diagnostics name files relative to the project root, as fpm does. A fetched
+  dependency is named `build/dependencies/<name>/src/x.f90`.
+- fo adds `-fdebug-prefix-map=<root>=.` and starts the compiler with `PWD` set
+  to the root. Debug information then has the compile directory `.` and the
+  source names relative to it, so a debugger finds the sources when it is
+  started in the project root (in gdb otherwise with `directory <root>`).
+- A dependency outside the project is shared by consumers at different paths
+  and compiled again when it moves itself.
+- The key also covers which include directory provides each included file,
+  because that name is what `__FILE__` in the header and debug information
+  show. With the default key, a header of equal content that moves to another
+  include directory is not noticed.
+- Options such as `-march=native` add the host CPU identity.
+
+An action keeps absolute paths and the default key, and so stays tied to its
+checkout, when its result is not the same elsewhere or fo cannot tell:
+
+- coverage and profile builds (`--coverage`, `-fprofile-*`, `-ftest-coverage`),
+  whose objects write their counters to an absolute path;
+- `-flto` and `-gsplit-dwarf`;
+- flags that read or write files the key does not cover (`-I`, `-include`,
+  `-isystem`, `-specs`, `-fplugin`, `-M...`, `-fdump-...` and similar) and any
+  flag word that is not an option. Declare include directories in
+  `[library] include-dir` to have their headers keyed by content;
+- a flag or path that contains the project root;
+- compilers other than gfortran (flang writes the absolute source path into
+  the object whatever it is passed);
+- test programs, whose key also covers what they are linked with.
+
+Switching the variable in a built tree compiles the tree again.
 
 ## Size limits
 
