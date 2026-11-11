@@ -15,6 +15,7 @@ module fo_remote_cache
     !! plain files of those names. Every failure is a miss: the build compiles.
     use fx_hash, only: sha256_file
     use fx_proc, only: proc_exec_silent
+    use fo_fs, only: fs_make_dir, fs_remove_tree, fs_rename
     implicit none
     private
 
@@ -25,33 +26,40 @@ module fo_remote_cache
     logical, save :: loaded = .false.
     character(len=:), allocatable, save :: base_url, write_namespace, login_file
 
-    character(len=*), parameter :: nl = new_line('a')
+    ! Token and proxy of the login file $4, read without starting a process.
+    character(len=*), parameter :: LOGIN_SCRIPT = &
+        'tok=; proxy=; if [ -r "$4" ]; then while IFS= read -r l || [ -n "$l" ]; do '// &
+        'case $l in token=*) tok=${l#token=};; proxy=*) proxy=${l#proxy=};; esac; '// &
+        'done < "$4"; fi; '
 
-    ! $1 url, $2 archive, $3 header file, $4 login file
-    character(len=*), parameter :: FETCH_SCRIPT = &
-        'tok=; proxy=; if [ -f "$4" ]; then tok=$(sed -n "s/^token=//p" "$4"); '// &
-        'proxy=$(sed -n "s/^proxy=//p" "$4"); fi; '// &
-        '{ printf ''url = "%s"\nsilent\nfail\nmax-time = 60\noutput = "%s"\n'// &
-        'dump-header = "%s"\n'' "$1" "$2" "$3"; '// &
+    ! The token reaches curl on its standard input, never on a command line.
+    character(len=*), parameter :: CURL_AUTH = &
         '[ -z "$tok" ] || printf ''header = "Authorization: Bearer %s"\n'' "$tok"; '// &
         '[ -z "$proxy" ] || printf ''proxy = "%s"\n'' "$proxy"; } | curl -K -'
 
-    ! $1 archive, $2 directory to extract into
+    ! $1 url, $2 archive, $3 header file, $4 login file
+    character(len=*), parameter :: FETCH_SCRIPT = LOGIN_SCRIPT// &
+        '{ printf ''url = "%s"\nsilent\nfail\nmax-time = 60\noutput = "%s"\n'// &
+        'dump-header = "%s"\n'' "$1" "$2" "$3"; '//CURL_AUTH
+
+    ! $1 archive, $2 existing directory to extract into
     character(len=*), parameter :: EXTRACT_SCRIPT = &
-        'set -e; mkdir -p "$2"; '// &
         'if tar -tf "$1" | grep -q -v -E '// &
         '"^(object|mod/[a-z0-9_]+\.mod|smod/[a-z0-9_@]+\.smod)$"; then exit 5; fi; '// &
         'if tar -tvf "$1" | grep -q -v "^-"; then exit 5; fi; '// &
         'tar -xf "$1" -C "$2"'
 
+    ! $1 work directory with s/mod, s/smod and the member list, $2 object,
+    ! $3 module directory
+    character(len=*), parameter :: PACK_SCRIPT = &
+        'set -e; cp "$2" "$1/s/object"; while IFS= read -r f; do case $f in object) ;; '// &
+        '*) cp "$3/${f#*/}" "$1/s/$f";; esac; done < "$1/list"; '// &
+        'tar -cf "$1/a.tar" -C "$1/s" -T "$1/list"'
+
     ! $1 url, $2 archive, $3 its SHA-256, $4 login file
-    character(len=*), parameter :: PUT_SCRIPT = &
-        'tok=; proxy=; if [ -f "$4" ]; then tok=$(sed -n "s/^token=//p" "$4"); '// &
-        'proxy=$(sed -n "s/^proxy=//p" "$4"); fi; '// &
+    character(len=*), parameter :: PUT_SCRIPT = LOGIN_SCRIPT// &
         '{ printf ''url = "%s"\nsilent\nfail\nmax-time = 120\nupload-file = "%s"\n'// &
-        'header = "X-Content-SHA256: %s"\n'' "$1" "$2" "$3"; '// &
-        '[ -z "$tok" ] || printf ''header = "Authorization: Bearer %s"\n'' "$tok"; '// &
-        '[ -z "$proxy" ] || printf ''proxy = "%s"\n'' "$proxy"; } | curl -K - >/dev/null'
+        'header = "X-Content-SHA256: %s"\n'' "$1" "$2" "$3"; '//CURL_AUTH//' >/dev/null'
 
 contains
 
@@ -95,7 +103,8 @@ contains
         archive = tmp//'/a.tar'
         headers = tmp//'/headers'
         tree = tmp//'/x'
-        call run_sh('rm -rf "$1" && mkdir -p "$1"', status, tmp)
+        call fs_remove_tree(tmp)
+        call fs_make_dir(tree, status)
         if (status /= 0) return
         call run_sh(FETCH_SCRIPT, status, base_url//'/shared/'//trim(key), archive, headers, &
             login_file)
@@ -121,12 +130,21 @@ contains
                 if (.not. exists) status = 1
             end do
         end if
-        if (status == 0) call run_sh('set -e; mkdir -p "$3" "$(dirname "$2")"; '// &
-            'mv "$1/object" "$2"; '// &
-            'for f in "$1"/mod/* "$1"/smod/*; do [ -f "$f" ] && mv "$f" "$3/"; done; exit 0', &
-            status, tree, trim(obj_path), trim(mod_dir))
+        ! Only the outputs the unit declares leave the archive.
+        if (status == 0) call fs_make_dir(trim(mod_dir), status)
+        if (status == 0) status = fs_rename(tree//'/object', trim(obj_path))
+        do i = 1, n_mod
+            if (status /= 0) exit
+            want = lower(modules(i))//'.mod'
+            status = fs_rename(tree//'/mod/'//want, trim(mod_dir)//'/'//want)
+        end do
+        do i = 1, n_smod
+            if (status /= 0) exit
+            want = lower(submodules(i))//'.smod'
+            status = fs_rename(tree//'/smod/'//want, trim(mod_dir)//'/'//want)
+        end do
         fetched = status == 0
-        call run_sh('rm -rf "$1"', status, tmp)
+        call fs_remove_tree(tmp)
     end subroutine remote_cache_fetch
 
     subroutine remote_cache_put(key, obj_path, mod_dir, modules, submodules)
@@ -134,7 +152,7 @@ contains
         character(len=*), intent(in) :: key, obj_path, mod_dir
         !! Absent when unallocated at the caller: a unit without such outputs.
         character(len=*), intent(in), optional :: modules(:), submodules(:)
-        character(len=:), allocatable :: tmp, stage, list
+        character(len=:), allocatable :: tmp, stage
         character(len=64) :: digest
         integer :: status, i, u, n_mod, n_smod
 
@@ -146,35 +164,28 @@ contains
         if (.not. key_ok(key)) return
         tmp = trim(obj_path)//'.remote-put'
         stage = tmp//'/s'
-        call run_sh('rm -rf "$1" && mkdir -p "$1/s/mod" "$1/s/smod" && cp "$2" "$1/s/object"', &
-            status, tmp, trim(obj_path))
-        list = 'object'//nl
-        do i = 1, n_mod
-            if (status /= 0) exit
-            call run_sh('cp "$1" "$2"', status, &
-                trim(mod_dir)//'/'//lower(modules(i))//'.mod', stage//'/mod/')
-            list = list//'mod/'//lower(modules(i))//'.mod'//nl
-        end do
-        do i = 1, n_smod
-            if (status /= 0) exit
-            call run_sh('cp "$1" "$2"', status, &
-                trim(mod_dir)//'/'//lower(submodules(i))//'.smod', stage//'/smod/')
-            list = list//'smod/'//lower(submodules(i))//'.smod'//nl
-        end do
+        call fs_remove_tree(tmp)
+        call fs_make_dir(stage//'/mod', status)
+        if (status == 0) call fs_make_dir(stage//'/smod', status)
+        if (status /= 0) return
+        open (newunit=u, file=tmp//'/list', status='replace', action='write', iostat=status)
         if (status == 0) then
-            open (newunit=u, file=tmp//'/list', status='replace', action='write', iostat=status)
-            if (status == 0) then
-                write (u, '(a)', advance='no') list
-                close (u)
-            end if
+            write (u, '(a)') 'object'
+            do i = 1, n_mod
+                write (u, '(a)') 'mod/'//lower(modules(i))//'.mod'
+            end do
+            do i = 1, n_smod
+                write (u, '(a)') 'smod/'//lower(submodules(i))//'.smod'
+            end do
+            close (u)
         end if
-        if (status == 0) call run_sh('tar -cf "$1/a.tar" -C "$1/s" -T "$1/list"', status, tmp)
+        if (status == 0) call run_sh(PACK_SCRIPT, status, tmp, trim(obj_path), trim(mod_dir))
         if (status == 0) call sha256_file(tmp//'/a.tar', digest, status)
         if (status == 0) then
             call run_sh(PUT_SCRIPT, status, base_url//'/'//write_namespace//'/'//trim(key), &
                 tmp//'/a.tar', digest, login_file)
         end if
-        call run_sh('rm -rf "$1"', status, tmp)
+        call fs_remove_tree(tmp)
     end subroutine remote_cache_put
 
     subroutine load()

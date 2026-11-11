@@ -4,6 +4,12 @@ program test_remote_cache_cli
     !! what it compiles, and a build on an empty local cache takes those
     !! results and compiles nothing. An archive with a member that is not a
     !! compile output is refused and the unit is compiled instead.
+    !!
+    !! Over HTTP (a stand-in for curl that keeps the store in a directory and
+    !! answers like the server) the token and proxy of the login file reach
+    !! curl, and a download is taken only when its SHA-256 equals the
+    !! X-Content-SHA256 header: without the header, or with another archive
+    !! under the key, the units are compiled.
     use fo_fs, only: fs_find_executable
     use fo_test_harness, only: process_result_t, string_list_t, list_add, argv, run_list
     use fo_test_harness, only: make_scratch, join_path, write_text, remove_tree, set_mode
@@ -15,8 +21,9 @@ program test_remote_cache_cli
 
     character(len=1), parameter :: nl = achar(10)
     character(:), allocatable :: driver, scratch, project, remote, wrapper, log, listing, key
-    character(len=4096) :: real_fc
-    type(string_list_t) :: build, exec, writer, reader
+    character(:), allocatable :: store, requests, login
+    character(len=4096) :: real_fc, path
+    type(string_list_t) :: build, exec, writer, reader, http_writer, http_reader
     type(process_result_t) :: result
     integer :: status, eol
     logical :: located
@@ -90,6 +97,91 @@ program test_remote_cache_cli
         'nothing of the refused archive reaches the build')
     call run_fo(driver, exec, project, join_path(scratch, 'cache-third'), result, reader, 120000)
     call assert_contains(result%stdout, '42', 'the program still runs')
+
+    ! The same over HTTP, with curl replaced by a store in a directory.
+    store = join_path(scratch, 'http-store')
+    requests = join_path(scratch, 'requests')
+    login = join_path(scratch, 'login')
+    call make_directory(store)
+    call write_text(login, 'server=http://store.invalid'//nl//'token=sesame'//nl// &
+        'proxy=http://proxy.invalid:3128'//nl)
+    call write_text(join_path(scratch, 'fake/curl'), '#!/bin/sh'//nl// &
+        'store="'//store//'"; url=; out=; hdr=; up=; sum='//nl// &
+        'while IFS= read -r l; do'//nl// &
+        '    echo "$l" >> "'//requests//'"'//nl// &
+        '    v=${l#*\"}; v=${v%\"}'//nl// &
+        '    case $l in'//nl// &
+        '    url*) url=$v;; output*) out=$v;; dump-header*) hdr=$v;; upload-file*) up=$v;;'//nl// &
+        '    header*X-Content-SHA256*) sum=${v#*: };;'//nl// &
+        '    esac'//nl// &
+        'done'//nl// &
+        'key=${url##*/}'//nl// &
+        'if [ -n "$up" ]; then cp "$up" "$store/$key"; echo "$sum" > "$store/$key.sum"; '// &
+        'exit 0; fi'//nl// &
+        '[ -f "$store/$key" ] || exit 22'//nl// &
+        'cp "$store/$key" "$out"'//nl// &
+        'echo "HTTP/1.1 200 OK" > "$hdr"'//nl// &
+        '[ ! -f "$store/$key.sum" ] || '// &
+        'echo "X-Content-SHA256: $(cat "$store/$key.sum")" >> "$hdr"'//nl)
+    call set_mode(join_path(scratch, 'fake/curl'), int(o'755'))
+    call get_environment_variable('PATH', path)
+    call list_add(http_writer, 'FO_FC='//wrapper)
+    call list_add(http_writer, 'PATH='//join_path(scratch, 'fake')//':'//trim(path))
+    call list_add(http_writer, 'FO_REMOTE_CACHE=http://store.invalid/cache/v1')
+    call list_add(http_writer, 'FO_REMOTE_CACHE_LOGIN='//login)
+    http_reader = http_writer
+    call list_add(http_writer, 'FO_REMOTE_CACHE_WRITE=shared')
+
+    call remove_tree(join_path(project, 'build'))
+    call run_fo(driver, build, project, join_path(scratch, 'http-writer'), result, &
+        http_writer, 120000)
+    call assert_equal_integer(result%exit_code, 0, &
+        'the writing build over HTTP succeeds: '//result%stdout//result%stderr)
+    call run_list(argv('ls', store), status, listing)
+    call assert_true(status == 0 .and. count_lines(listing) == 4, &
+        'both units are uploaded with their checksums: '//listing)
+    call assert_contains(read_text(requests), 'header = "Authorization: Bearer sesame"', &
+        'the token of the login file is sent')
+    call assert_contains(read_text(requests), 'proxy = "http://proxy.invalid:3128"', &
+        'the proxy of the login file is used')
+
+    call remove_tree(join_path(project, 'build'))
+    call write_text(log, '')
+    call run_fo(driver, build, project, join_path(scratch, 'http-reader'), result, &
+        http_reader, 120000)
+    call assert_equal_integer(result%exit_code, 0, &
+        'the reading build over HTTP succeeds: '//result%stdout//result%stderr)
+    call assert_true(len_trim(read_text(log)) == 0, &
+        'downloads with a matching checksum are used: '//read_text(log))
+
+    ! A server that sends no checksum is not trusted.
+    call run_list(argv('sh', '-c', 'cd "$1" && for f in *.sum; do mv "$f" "$f.off"; done', &
+        'sh', store), status)
+    call remove_tree(join_path(project, 'build'))
+    call write_text(log, '')
+    call run_fo(driver, build, project, join_path(scratch, 'http-bare'), result, &
+        http_reader, 120000)
+    call assert_equal_integer(result%exit_code, 0, &
+        'the build succeeds without checksums: '//result%stdout//result%stderr)
+    call assert_true(count_lines(read_text(log)) == 2, &
+        'downloads without a checksum are not used: '//read_text(log))
+
+    ! Each key now answers with the other unit's archive and its own checksum.
+    call run_list(argv('sh', '-c', 'cd "$1" && for f in *.off; do mv "$f" "${f%.off}"; done '// &
+        '&& set -- $(ls | grep -v sum) && mv "$1" t && mv "$2" "$1" && mv t "$2"', &
+        'sh', store), status)
+    call assert_equal_integer(status, 0, 'the stored archives are exchanged')
+    call remove_tree(join_path(project, 'build'))
+    call write_text(log, '')
+    call run_fo(driver, build, project, join_path(scratch, 'http-wrong'), result, &
+        http_reader, 120000)
+    call assert_equal_integer(result%exit_code, 0, &
+        'the build succeeds beside wrong downloads: '//result%stdout//result%stderr)
+    call assert_true(count_lines(read_text(log)) == 2, &
+        'downloads with another checksum are not used: '//read_text(log))
+    call run_fo(driver, exec, project, join_path(scratch, 'http-wrong'), result, &
+        http_reader, 120000)
+    call assert_contains(result%stdout, '42', 'the program runs after refused downloads')
 
     call remove_tree(scratch)
     call finish_assertions()
