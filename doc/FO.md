@@ -298,6 +298,25 @@ fo test --cases FILE|- [--rerun] [--junit PATH]
   it prints `CHANGED NAME` and the command exits 1, so the planner can replan.
   An unknown name exits 1 before anything is built. Names, `--only-changed`,
   `--random` and `--list` cannot be combined with it.
+  With `--json=full` the run prints one object: `tests[]` holds every listed
+  case with `name`, `status` (`pass`, `fail`, `flaky`, `timeout`, `limit`,
+  `skip`, `reused` for a recorded PASS that was not run again, `changed`),
+  `seconds` (wall), `output` and, where known, `closure_digest` (the digest
+  the case ran under; for `changed` the current one), `cpu_seconds`,
+  `peak_rss_kb` and `write_bytes`; `targets` names the targets built,
+  `summary` the counts and `exit_code` the status. `--json` prints the compact
+  report with the same `targets`, listing only the cases that did not pass.
+- A `closure_digest` is a SHA-256 over the case name, labels and properties,
+  the path and content of every project file that can affect the case (the
+  sources its executable reaches through module use and linking, its declared
+  inputs, the build descriptions, and sources or other files that no target or
+  case owns), every input outside the project such as dependency sources, the
+  path and version line of the compiler, the manifest flags, the profile and
+  `--flag` text, the compiler and build environment variables (`FC`, `FO_FC`,
+  `FFLAGS`, `FPM_FC`, `FPM_FFLAGS`, `FO_FPM_CONFIG_FILE`, `LIBRARY_PATH`,
+  `OMP_NUM_THREADS`; CMake: the `FO_CMAKE_*` settings) and the SHA-256 of the
+  fo executable. Documentation files do not count. It is empty, and the case
+  is never reused, when the input inventory is incomplete.
 - Running (CMake, also plain `fo test`): select, plan, build, run. CMake is
   configured once and the loaded model is reused. Only the plan targets are
   built (merged with `FO_CMAKE_BUILD_TARGETS`). A case whose command maps to no

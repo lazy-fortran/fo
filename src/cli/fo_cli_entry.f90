@@ -51,6 +51,7 @@ module fo_cli_entry
     use fo_progress, only: progress_suppress
     use fo_test_cache, only: test_cache_run, test_case_digests
     use fo_case_list, only: case_list_read, case_list_parse
+    use fo_json_object, only: json_object_member
     use fo_junit, only: junit_write
     use fo_case_filter, only: partition_parse, partition_keep
     implicit none
@@ -544,6 +545,9 @@ contains
             write (out, '(a)') '  --junit PATH    also write JUnit XML of the results to PATH'
             write (out, '(a)') '  --partition hash:K/N | count:K/N'
             write (out, '(a)') '                  run only part K of N of the selected cases'
+            write (out, '(a)') '  --cases FILE    run exactly the cases of a --list --json object'
+            write (out, '(a)') '                  (- reads standard input); with --json=full every'
+            write (out, '(a)') '                  result carries its closure_digest'
             write (out, '(a)') '  --list          print the selection and build plan; no build'
             write (out, '(a)') '                  (cases of built executables are listed)'
             write (out, '(a)') '  --retries N     retry a failed test N times; pass after fail is FLAKY'
@@ -1209,7 +1213,8 @@ contains
             character(len=64), allocatable :: digests(:)
             character(len=:), allocatable :: cases_path
             type(string_t), allocatable :: listed_names(:), listed_digests(:)
-            integer :: n_changed
+            integer, allocatable :: changed(:)
+            character(len=:), allocatable :: targets_json
             integer(8), allocatable :: listed_cpu(:), listed_peak(:)
 
             allocate (test_names(MAX_NODES), random_candidates(MAX_NODES))
@@ -1508,9 +1513,24 @@ contains
                     stop 1
                 end if
             end if
-            n_changed = 0
-            if (len(cases_path) > 0) call drop_changed_cases(b, model, selection, &
-                all_flags, listed_names, listed_digests, n_changed)
+            allocate (changed(0))
+            if (len(cases_path) > 0) then
+                call drop_changed_cases(b, model, selection, all_flags, listed_names, &
+                    listed_digests, digests, changed, quiet=use_json)
+                if (size(changed) > 0 .and. size(selection%cases) == 0) then
+                    ! Nothing is left to run; --json still reports the cases.
+                    if (use_json) then
+                        call make_tmpfile('fo-test', test_log)
+                        open (newunit=i, file=trim(test_log), status='replace')
+                        close (i)
+                        exitcode = 1
+                        call report_test_result(exitcode, test_log, .true., use_json, &
+                            json_full=json_full, model=model, digests=digests, &
+                            changed=changed, targets_json='[]')
+                    end if
+                    call process_exit(1)
+                end if
+            end if
             if (random_count > 0) then
                 ! Candidates are the model's default selection.
                 if (size(selection%cases) > size(random_candidates)) then
@@ -1574,8 +1594,12 @@ contains
                 call delete_tmpfile(test_log)
                 return
             end if
-            if (len(cases_path) > 0) then
+            targets_json = ''
+            if (len(cases_path) > 0 .and. use_json) then
                 ! The planner sees which targets the listed cases build.
+                call project_list_json(model, selection, text)
+                call json_object_member(text, 'targets', targets_json, i, ierr)
+            else if (len(cases_path) > 0) then
                 call project_list_text(model, selection, text)
                 i = index(text, 'plan targets:')
                 if (i > 0) write (output_unit, '(a)') &
@@ -1586,15 +1610,17 @@ contains
                     test_log, exitcode, selection)
             else
                 call test_cache_run(b, model, selection%cases, all_flags, no_build, &
-                    test_log, exitcode, rerun .or. random_count > 0, selection)
+                    test_log, exitcode, rerun .or. random_count > 0, selection, digests)
             end if
+            if (size(changed) > 0 .and. use_json) exitcode = 1
             call report_test_result(exitcode, test_log, &
                 (random_count == 0 .and. n_arg_names == 0 .and. .not. filtered .and. &
                 .not. verbose .and. .not. only_changed) .or. quiet, use_json, &
                 require_results=.true., json_full=json_full, full_text=verbose, &
-                junit_path=junit_path, project_dir=b%project_dir)
+                junit_path=junit_path, project_dir=b%project_dir, model=model, &
+                digests=digests, changed=changed, targets_json=targets_json)
             call delete_tmpfile(test_log)
-            if (n_changed > 0) call process_exit(1)
+            if (size(changed) > 0) call process_exit(1)
         end subroutine cmd_test
 
         subroutine recorded_costs(model, project_dir, cpu_ms, peak_kb)
@@ -1646,22 +1672,25 @@ contains
         end subroutine cases_from_list
 
         subroutine drop_changed_cases(b, model, selection, flags, listed_names, &
-                listed_digests, n_changed)
+                listed_digests, current, changed, quiet)
             !! A listed case whose input closure digest now differs from the
             !! listed one is not run: it is reported CHANGED and makes the
             !! command fail, so a scheduler replans instead of reading a
-            !! verdict for inputs it did not plan.
+            !! verdict for inputs it did not plan. current: the digest of
+            !! every model case now; changed: the model cases not run.
             type(backend_t), intent(inout) :: b
             type(project_model_t), intent(in) :: model
             type(model_selection_t), intent(inout) :: selection
             character(len=*), intent(in) :: flags
             type(string_t), intent(in) :: listed_names(:), listed_digests(:)
-            integer, intent(out) :: n_changed
-            character(len=64), allocatable :: current(:)
+            character(len=64), allocatable, intent(out) :: current(:)
+            integer, allocatable, intent(out) :: changed(:)
+            !! The caller reports the changed cases itself (--json).
+            logical, intent(in) :: quiet
             logical, allocatable :: keep(:)
             integer :: k, c, j
 
-            n_changed = 0
+            allocate (changed(0))
             if (.not. allocated(selection%cases)) return
             call test_case_digests(b, model, flags, current)
             allocate (keep(size(selection%cases)))
@@ -1673,13 +1702,13 @@ contains
                     if (len(listed_digests(j)%s) == 0) exit
                     if (listed_digests(j)%s == trim(current(c))) exit
                     keep(k) = .false.
-                    n_changed = n_changed + 1
-                    write (output_unit, '(a)') 'CHANGED '//model%cases(c)%name
+                    changed = [changed, c]
+                    if (.not. quiet) write (output_unit, '(a)') &
+                        'CHANGED '//model%cases(c)%name
                     exit
                 end do
             end do
             selection%cases = pack(selection%cases, keep)
-            if (n_changed > 0 .and. size(selection%cases) == 0) call process_exit(1)
         end subroutine drop_changed_cases
 
         subroutine narrow_to_partition(model, selection, by_hash, part, parts)
@@ -1761,10 +1790,14 @@ contains
         end function env_flag
 
         subroutine report_test_result(exitcode, test_log, summary_mode, use_json, &
-                require_results, json_full, full_text, junit_path, project_dir)
+                require_results, json_full, full_text, junit_path, project_dir, &
+                model, digests, changed, targets_json)
             !! One report for a run: compact JSON by default for --json, the legacy
             !! full JSON for --json=full, and human text that ends in the verdict
             !! line. Failure output is excerpted unless full_text (--verbose).
+            !! JSON only: digests (one per model case) gives each result its
+            !! input closure digest, changed (model cases) adds a CHANGED
+            !! result per case, targets_json (an array) the targets built.
             integer, intent(inout) :: exitcode
             character(len=*), intent(in) :: test_log
             logical, intent(in) :: summary_mode
@@ -1772,9 +1805,13 @@ contains
             logical, intent(in), optional :: require_results, json_full, full_text
             character(len=*), intent(in), optional :: junit_path
             character(len=*), intent(in), optional :: project_dir
+            type(project_model_t), intent(in), optional :: model
+            character(len=64), allocatable, intent(in), optional :: digests(:)
+            integer, intent(in), optional :: changed(:)
+            character(len=*), intent(in), optional :: targets_json
 
-            type(test_result_entry_t), allocatable :: entries(:)
-            integer :: n_entries, parse_ierr
+            type(test_result_entry_t), allocatable :: entries(:), with_changed(:)
+            integer :: n_entries, parse_ierr, c
             character(len=:), allocatable :: json_output, human_output
             logical :: compact, bounded
             type(diagnostic_t) :: diag
@@ -1799,6 +1836,30 @@ contains
             end if
             if (present(junit_path)) then
                 if (len(junit_path) > 0) call write_junit(junit_path, test_log)
+            end if
+            if (use_json .and. present(model)) then
+                if (present(changed)) then
+                    allocate (with_changed(n_entries + size(changed)))
+                    with_changed(1:n_entries) = entries(1:n_entries)
+                    do i = 1, size(changed)
+                        n_entries = n_entries + 1
+                        with_changed(n_entries)%name = model%cases(changed(i))%name
+                        with_changed(n_entries)%status = 'CHANGED'
+                        with_changed(n_entries)%reason = &
+                            'inputs changed since the case list was written'
+                        with_changed(n_entries)%seconds = 0.0
+                        with_changed(n_entries)%exit_code = 0
+                    end do
+                    call move_alloc(with_changed, entries)
+                end if
+                if (present(digests)) then
+                    if (allocated(digests)) then
+                        do i = 1, n_entries
+                            c = model_find_case(model, trim(entries(i)%name))
+                            if (c > 0) entries(i)%digest = digests(c)
+                        end do
+                    end if
+                end if
             end if
 
             if (present(require_results)) then
@@ -1832,6 +1893,11 @@ contains
                 if (present(json_full)) compact = .not. json_full
                 call format_test_results_json(entries, n_entries, exitcode, &
                     json_output, test_log, compact, project_dir)
+                if (present(targets_json)) then
+                    if (len(targets_json) > 0) json_output = &
+                        json_output(1:len(json_output) - 1)//',"targets":'// &
+                        targets_json//'}'
+                end if
                 write (output_unit, '(a)') json_output
             else if (n_entries > 0) then
                 bounded = .true.

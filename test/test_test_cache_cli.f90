@@ -12,7 +12,9 @@ program test_test_cache_cli
     !!  - `fo test --list --json` reports, without starting a test process,
     !!    the digest under which the first run records each PASS (#362);
     !!  - `fo test --cases FILE` runs exactly the listed cases and reports a
-    !!    case whose inputs changed since the listing as CHANGED (#363).
+    !!    case whose inputs changed since the listing as CHANGED (#363);
+    !!  - with --json that run prints one object: every result with the
+    !!    digest it ran under, the CHANGED cases and the targets built.
     !! Runs the driver named by FO.
     use fo_test_harness, only: process_result_t, string_list_t, list_add
     use fo_test_harness, only: make_scratch, join_path, write_text, read_text
@@ -114,11 +116,39 @@ contains
             'the edited case is reported CHANGED: '//result%stdout)
         call expect_runs(a0, b0, c0 + 2, 'a CHANGED case does not run, the other does')
 
+        call fo_test([character(len=256) :: '--rerun', '--json=full', '--cases', &
+            plan], result)
+        call assert_true(result%exit_code /= 0, 'a changed case fails the JSON run')
+        listed = reported_cases(result%stdout)
+        call assert_contains(listed, 'case_c=pass='//digest_c//';', &
+            'a result carries the digest it ran under: '//result%stdout)
+        call assert_contains(listed, 'case_a=changed=', &
+            'the report lists the changed case: '//result%stdout)
+        call assert_not_contains(listed, 'case_a=changed=;', &
+            'a changed case carries its current digest: '//result%stdout)
+        call assert_not_contains(listed, 'case_a=changed='//digest_a, &
+            'the current digest differs from the listed one: '//result%stdout)
+        call assert_contains(listed, 'targets=', &
+            'the report names the targets built: '//result%stdout)
+        call assert_contains(listed(index(listed, 'targets='):), 'case_c,', &
+            'the target of the case run is built: '//result%stdout)
+        call assert_not_contains(listed(index(listed, 'targets='):), 'case_a', &
+            'the target of the changed case is not planned: '//result%stdout)
+        call expect_runs(a0, b0, c0 + 3, 'the JSON run starts only the unchanged case')
+
+        call write_text(plan, '{"cases":[{"name":"case_a","closure_digest":"'// &
+            digest_a//'"}]}')
+        call fo_test([character(len=256) :: '--json', '--cases', plan], result)
+        call assert_true(result%exit_code /= 0, 'only changed cases fail the run')
+        call assert_contains(result%stdout, '"st":"changed"', &
+            'a run of only changed cases still reports them: '//result%stdout)
+        call expect_runs(a0, b0, c0 + 3, 'a run of only changed cases starts nothing')
+
         call write_text(plan, '{"cases":[{"name":"no_such_case"}]}')
         call fo_test([character(len=256) :: '--cases', plan], result)
         call assert_true(result%exit_code /= 0, 'an unknown case fails: '// &
             result%stdout//result%stderr)
-        call expect_runs(a0, b0, c0 + 2, 'an unknown case runs nothing')
+        call expect_runs(a0, b0, c0 + 3, 'an unknown case runs nothing')
     end subroutine check_case_list
 
     function listed_digests(json) result(text)
@@ -139,6 +169,34 @@ contains
                 json_string_value(json_member(entry, 'closure_digest'))//';'
         end do
     end function listed_digests
+
+    function reported_cases(json) result(text)
+        !! 'name=status=digest;' for every result of a --json=full report,
+        !! then 'targets=' and 'name,' for every target; '' unless the
+        !! output is one JSON object.
+        character(len=*), intent(in) :: json
+        character(:), allocatable :: text, message
+        type(json_value_t) :: report, items, entry
+        logical :: valid
+        integer :: i
+
+        text = 'targets='
+        call json_parse(json, report, valid, message)
+        if (.not. valid) return
+        text = ''
+        items = json_member(report, 'tests')
+        do i = 1, json_size(items)
+            entry = json_element(items, i)
+            text = text//json_string_value(json_member(entry, 'name'))//'='// &
+                json_string_value(json_member(entry, 'status'))//'='// &
+                json_string_value(json_member(entry, 'closure_digest'))//';'
+        end do
+        text = text//'targets='
+        items = json_member(report, 'targets')
+        do i = 1, json_size(items)
+            text = text//json_string_value(json_element(items, i))//','
+        end do
+    end function reported_cases
 
     function recorded_digests(dir, listed) result(text)
         !! 'name=digest;' for the cases of listed, in that order, as the

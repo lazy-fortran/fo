@@ -33,6 +33,8 @@ module fo_test_results
         !! CPU time (ms), peak resident memory (kB) and bytes written of the
         !! run, from its TEST_COST line; -1 where unknown (#364).
         integer(c_long_long) :: cpu_ms = -1, peak_rss_kb = -1, write_bytes = -1
+        !! Input closure digest of the case in this run; '' when unknown.
+        character(len=64) :: digest = ''
     end type test_result_entry_t
 
 contains
@@ -688,6 +690,8 @@ contains
                 if (len(entries(i)%reason) > 0) output = output//',"reason":"'// &
                     json_escape_string(entries(i)%reason)//'"'
             end if
+            if (len_trim(entries(i)%digest) > 0) output = output// &
+                ',"closure_digest":"'//trim(entries(i)%digest)//'"'
             if (entries(i)%cpu_ms >= 0) output = output//',"cpu_seconds":'// &
                 format_seconds(real(entries(i)%cpu_ms, real64)/1000.0_real64)
             if (entries(i)%peak_rss_kb >= 0) output = output//',"peak_rss_kb":'// &
@@ -707,6 +711,8 @@ contains
         output = trim(output)//',"skipped":'//trim(json_int(n_skip))
         if (count_reused(entries, n_entries) > 0) output = output//',"reused":'// &
             trim(json_int(count_reused(entries, n_entries)))
+        if (count_changed(entries, n_entries) > 0) output = output//',"changed":'// &
+            trim(json_int(count_changed(entries, n_entries)))
         if (n_untested > 0) output = output//',"untested":'//trim(json_int(n_untested))
         output = trim(output)//',"total_seconds":'//format_seconds(total_secs)
         output = trim(output)//'}'
@@ -768,6 +774,8 @@ contains
         if (n_flaky > 0) output = output//',"flaky":'//trim(json_int(n_flaky))
         if (count_reused(entries, n_entries) > 0) output = output//',"reused":'// &
             trim(json_int(count_reused(entries, n_entries)))
+        if (count_changed(entries, n_entries) > 0) output = output//',"changed":'// &
+            trim(json_int(count_changed(entries, n_entries)))
         if (wall >= 0.0_real64) then
             output = output//',"wall_s":'//format_seconds(wall)
         else
@@ -847,8 +855,9 @@ contains
             select case (trim(entries(i)%status))
             case ('PASS')
                 n_pass = n_pass + 1
-            case ('REUSED')
-                ! Counted by count_reused: neither run nor skipped.
+            case ('REUSED', 'CHANGED')
+                ! Counted by count_reused and count_changed: neither run
+                ! nor skipped.
             case ('FLAKY')
                 n_flaky = n_flaky + 1
             case ('FAIL', 'TIMEOUT', 'LIMIT')
@@ -871,6 +880,18 @@ contains
             if (trim(entries(i)%status) == 'REUSED') n = n + 1
         end do
     end function count_reused
+
+    integer function count_changed(entries, n_entries) result(n)
+        !! Cases of a case list not run because their inputs changed.
+        type(test_result_entry_t), intent(in) :: entries(:)
+        integer, intent(in) :: n_entries
+        integer :: i
+
+        n = 0
+        do i = 1, n_entries
+            if (trim(entries(i)%status) == 'CHANGED') n = n + 1
+        end do
+    end function count_changed
 
     function verdict_line(n_pass, n_fail, n_skip, n_untested, n_flaky, wall, &
             total_secs, n_reused) result(line)

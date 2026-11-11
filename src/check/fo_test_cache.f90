@@ -32,7 +32,7 @@ module fo_test_cache
 contains
 
     subroutine test_cache_run(b, model, cases, flags, no_build, log_file, exitcode, &
-            rerun, selection)
+            rerun, selection, case_digests)
         !! project_run_cases for the cases that need to run, plus a REUSED
         !! result line for every case whose recorded PASS is current. rerun
         !! runs every case. log_file receives all results.
@@ -44,6 +44,8 @@ contains
         integer, intent(out) :: exitcode
         !! The case filters of executables not listed yet (project_run_cases).
         type(model_selection_t), intent(in), optional :: selection
+        !! test_case_digests of the model: used when allocated, else returned.
+        character(len=64), allocatable, intent(inout), optional :: case_digests(:)
         character(len=64), allocatable :: digests(:)
         type(test_index_t) :: recorded
         character(len=:), allocatable :: dir, text, reused_lines
@@ -53,7 +55,11 @@ contains
         logical :: reused
 
         call system_clock(clock0, rate)
-        call test_case_digests(b, model, flags, digests)
+        if (present(case_digests)) then
+            if (allocated(case_digests)) digests = case_digests
+        end if
+        if (.not. allocated(digests)) call test_case_digests(b, model, flags, digests)
+        if (present(case_digests)) case_digests = digests
         dir = test_index_dir(model, trim(b%project_dir))
         call test_index_load(dir, recorded)
         allocate (to_run(size(cases)))
