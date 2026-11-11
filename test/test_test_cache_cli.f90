@@ -14,10 +14,14 @@ program test_test_cache_cli
     !!  - `fo test --cases FILE` runs exactly the listed cases and reports a
     !!    case whose inputs changed since the listing as CHANGED (#363);
     !!  - with --json that run prints one object: every result with the
-    !!    digest it ran under, the CHANGED cases and the targets built.
+    !!    digest it ran under, the CHANGED cases and the targets built;
+    !!    a listed case that could not be built is in it with the build
+    !!    log, an empty list runs nothing, a changed case is reported in
+    !!    one partition and an unknown name is an error object.
     !! Runs the driver named by FO.
     use fo_test_harness, only: process_result_t, string_list_t, list_add
     use fo_test_harness, only: make_scratch, join_path, write_text, read_text
+    use fo_test_harness, only: make_directory, run_process
     use fo_test_harness, only: remove_tree, assert_equal_integer
     use fo_test_harness, only: assert_contains, assert_not_contains, assert_true
     use fo_test_harness, only: finish_assertions, assert_equal_string
@@ -82,12 +86,15 @@ contains
 
     subroutine check_case_list()
         type(process_result_t) :: result
-        character(:), allocatable :: listed, plan, digest_a, digest_c
-        integer :: a0, b0, c0
+        type(string_list_t) :: arguments, private_tmp
+        character(:), allocatable :: listed, plan, digest_a, digest_b, digest_c
+        character(:), allocatable :: digest_d, tmp
+        integer :: a0, b0, c0, part
 
         call fo_test([character(len=16) :: '--list', '--json'], result)
         listed = listed_digests(result%stdout)
         digest_a = listed(index(listed, 'case_a=') + 7:index(listed, 'case_a=') + 70)
+        digest_b = listed(index(listed, 'case_b=') + 7:index(listed, 'case_b=') + 70)
         digest_c = listed(index(listed, 'case_c=') + 7:index(listed, 'case_c=') + 70)
         a0 = runs('case_a')
         b0 = runs('case_b')
@@ -143,12 +150,89 @@ contains
         call assert_contains(result%stdout, '"st":"changed"', &
             'a run of only changed cases still reports them: '//result%stdout)
         call expect_runs(a0, b0, c0 + 3, 'a run of only changed cases starts nothing')
+        call assert_contains(result%stdout, '1 changed', &
+            'the verdict counts the changed case: '//result%stdout)
+        call assert_not_contains(result%stdout, '"log"', &
+            'a run that started nothing retains no log: '//result%stdout)
+
+        tmp = join_path(scratch, 'private-tmp')
+        call make_directory(tmp)
+        private_tmp = env
+        call list_add(private_tmp, 'TMPDIR='//tmp)
+        call list_add(arguments, 'test')
+        call list_add(arguments, '--json=full')
+        call list_add(arguments, '--cases')
+        call list_add(arguments, plan)
+        call run_fo(driver, arguments, project, cache, result, private_tmp, 240000)
+        call assert_contains(reported_cases(result%stdout), 'case_a=changed=', &
+            'the full report of only changed cases: '//result%stdout)
+        arguments = string_list_t()
+        call list_add(arguments, '/bin/ls')
+        call list_add(arguments, '-A')
+        call list_add(arguments, tmp)
+        call run_process(arguments, scratch, result)
+        call assert_equal_integer(len_trim(result%stdout), 0, &
+            'a run of only changed cases leaves no temporary file: '//result%stdout)
+
+        call write_text(plan, '{"cases":[{"name":"case_a","closure_digest":"'// &
+            digest_a//'"},{"name":"case_b","closure_digest":"'//digest_b// &
+            '"},{"name":"case_c","closure_digest":"'//digest_c//'"}]}')
+        listed = ''
+        do part = 1, 2
+            call fo_test([character(len=256) :: '--json=full', '--cases', plan, &
+                '--partition', 'count:'//achar(48 + part)//'/2'], result)
+            listed = listed//reported_cases(result%stdout)
+        end do
+        part = index(listed, 'case_a=changed=')
+        call assert_true(part > 0, 'a partition reports the changed case: '//listed)
+        call assert_not_contains(listed(part + 1:), 'case_a=changed=', &
+            'only one partition reports the changed case: '//listed)
+        call assert_contains(listed, 'case_b=', &
+            'an unchanged listed case is in a partition: '//listed)
+        call assert_contains(listed, 'case_c=', &
+            'the other unchanged listed case is in a partition: '//listed)
+
+        ! A listed case that does not compile, next to a changed one.
+        call write_text(join_path(project, 'test/case_d.f90'), 'program case_d'//nl// &
+            'implicit none'//nl//'print *, no_such_variable'//nl//'end program'//nl)
+        call fo_test([character(len=16) :: '--list', '--json'], result)
+        listed = listed_digests(result%stdout)
+        digest_d = listed(index(listed, 'case_d=') + 7:index(listed, 'case_d=') + 70)
+        call write_text(plan, '{"cases":[{"name":"case_a","closure_digest":"'// &
+            digest_a//'"},{"name":"case_d","closure_digest":"'//digest_d//'"}]}')
+        call fo_test([character(len=256) :: '--json=full', '--cases', plan], result)
+        call assert_true(result%exit_code /= 0, 'a case that does not build fails')
+        listed = reported_cases(result%stdout)
+        call assert_contains(listed, 'case_a=changed=', &
+            'the changed case is reported next to the build failure: '//result%stdout)
+        call assert_contains(listed, 'case_d=untested='//digest_d//';', &
+            'the case that was not built has a result: '//result%stdout)
+        call assert_contains(result%stdout, 'no_such_variable', &
+            'the report carries the compiler error: '//result%stdout)
+        call fo_test([character(len=256) :: '--json', '--cases', plan], result)
+        call assert_contains(result%stdout, 'no_such_variable', &
+            'the compact report carries the compiler error: '//result%stdout)
+        call assert_contains(result%stdout, '"st":"untested"', &
+            'the compact report lists the case not built: '//result%stdout)
+        call remove_file(join_path(project, 'test/case_d.f90'))
+
+        call write_text(plan, '{"cases":[]}')
+        call fo_test([character(len=256) :: '--rerun', '--json=full', '--cases', &
+            plan], result)
+        call assert_equal_integer(result%exit_code, 0, 'an empty case list succeeds: '// &
+            result%stdout//result%stderr)
+        call assert_contains(result%stdout, '"tests":[]', &
+            'an empty case list reports no case: '//result%stdout)
+        call expect_runs(a0, b0, c0 + 3, 'an empty case list runs nothing')
 
         call write_text(plan, '{"cases":[{"name":"no_such_case"}]}')
         call fo_test([character(len=256) :: '--cases', plan], result)
         call assert_true(result%exit_code /= 0, 'an unknown case fails: '// &
             result%stdout//result%stderr)
         call expect_runs(a0, b0, c0 + 3, 'an unknown case runs nothing')
+        call fo_test([character(len=256) :: '--json=full', '--cases', plan], result)
+        call assert_contains(result%stdout, '"error":"unknown test: no_such_case"', &
+            'an unknown case is a JSON error: '//result%stdout//result%stderr)
     end subroutine check_case_list
 
     function listed_digests(json) result(text)

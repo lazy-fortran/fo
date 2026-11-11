@@ -717,10 +717,12 @@ contains
         output = trim(output)//',"total_seconds":'//format_seconds(total_secs)
         output = trim(output)//'}'
         output = trim(output)//',"exit_code":'//trim(json_int(exit_code))
-        if (n_entries == 0 .and. exit_code /= 0 .and. present(log_file)) then
+        if (none_ran(entries, n_entries) .and. exit_code /= 0 .and. &
+            present(log_file)) then
             call read_text_file_alloc(log_file, captured, read_error)
             if (read_error == 0) then
-                output = output//',"output":"'//json_escape_string(captured)//'"'
+                if (n_entries == 0 .or. len(captured) > 0) output = output// &
+                    ',"output":"'//json_escape_string(captured)//'"'
             else
                 output = output//',"error":"could not read test diagnostics"'
             end if
@@ -761,7 +763,8 @@ contains
             if (len(handle) > 0) source_log = handle
         end if
         output = '{"v":"'//verdict_line(n_pass, n_fail, n_skip, n_untested, &
-            n_flaky, wall, total_secs, count_reused(entries, n_entries))//'"'
+            n_flaky, wall, total_secs, count_reused(entries, n_entries), &
+            count_changed(entries, n_entries))//'"'
         if (exit_code == 0 .and. n_fail == 0) then
             output = output//',"ok":true'
         else
@@ -820,9 +823,12 @@ contains
             end do
             output = output//']'
         end if
-        if (n_entries == 0 .and. exit_code /= 0 .and. len(source_log) > 0) then
+        if (none_ran(entries, n_entries) .and. exit_code /= 0 .and. &
+            len(source_log) > 0) then
             call read_text_file_alloc(source_log, log_text, read_error)
-            if (read_error == 0) then
+            if (read_error == 0 .and. n_entries > 0 .and. len(log_text) == 0) then
+                ! Only changed cases: nothing was built or run.
+            else if (read_error == 0) then
                 call find_location(log_text, at, msg)
                 if (len(at) > 0) output = output//',"at":"'//json_escape_string(at)//'"'
                 call bounded_excerpt(log_text, excerpt, cut)
@@ -893,8 +899,25 @@ contains
         end do
     end function count_changed
 
+    logical function none_ran(entries, n_entries)
+        !! No entry is the verdict of a case that ran, so a failure is
+        !! explained by the log (a failed build) and not by a case.
+        type(test_result_entry_t), intent(in) :: entries(:)
+        integer, intent(in) :: n_entries
+        integer :: i
+
+        none_ran = .true.
+        do i = 1, n_entries
+            select case (trim(entries(i)%status))
+            case ('REUSED', 'CHANGED', 'UNTESTED')
+            case default
+                none_ran = .false.
+            end select
+        end do
+    end function none_ran
+
     function verdict_line(n_pass, n_fail, n_skip, n_untested, n_flaky, wall, &
-            total_secs, n_reused) result(line)
+            total_secs, n_reused, n_changed) result(line)
         !! `12 pass, 1 FAIL, 2 skip (4.10s wall)`. Zero counts other than pass
         !! are omitted. The time is the run's wall clock when known, otherwise
         !! the sum of the per-case times, and says which.
@@ -902,6 +925,8 @@ contains
         real(real64), intent(in) :: wall, total_secs
         !! Cases not run: their PASS at an unchanged input closure was reused.
         integer, intent(in), optional :: n_reused
+        !! Cases of a case list not run: their inputs changed since the listing.
+        integer, intent(in), optional :: n_changed
         character(len=:), allocatable :: line
 
         line = trim(json_int(n_pass))//' pass'
@@ -913,6 +938,9 @@ contains
         if (n_skip > 0) line = line//', '//trim(json_int(n_skip))//' skip'
         if (n_untested > 0) line = line//', '//trim(json_int(n_untested))// &
             ' untested'
+        if (present(n_changed)) then
+            if (n_changed > 0) line = line//', '//trim(json_int(n_changed))//' changed'
+        end if
         if (wall >= 0.0_real64) then
             line = line//' ('//format_seconds(wall)//'s wall)'
         else
@@ -965,7 +993,7 @@ contains
 
         handle = ''
         call read_text_file_alloc(log_file, text, ierr)
-        if (ierr /= 0) return
+        if (ierr /= 0 .or. len(text) == 0) return
         if (present(log_dir)) then
             dir = trim(log_dir)//'/build/fo/test-logs'
         else

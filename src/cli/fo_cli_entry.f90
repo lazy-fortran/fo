@@ -52,6 +52,7 @@ module fo_cli_entry
     use fo_test_cache, only: test_cache_run, test_case_digests
     use fo_case_list, only: case_list_read, case_list_parse
     use fo_json_object, only: json_object_member
+    use fx_json_build, only: json_escape_string
     use fo_junit, only: junit_write
     use fo_case_filter, only: partition_parse, partition_keep
     implicit none
@@ -1485,6 +1486,11 @@ contains
                 call cases_from_list(cases_path, test_names, n_arg_names, &
                     listed_names, listed_digests)
                 include_all = .true.
+                if (n_arg_names == 0) then
+                    ! No names would select every case; an empty list runs none.
+                    call report_nothing_run(0, use_json, json_full, junit_path)
+                    return
+                end if
             end if
             allocate (request%names(n_arg_names))
             do i = 1, n_arg_names
@@ -1496,6 +1502,9 @@ contains
                 widen_reasons, ierr, message, configured=no_build)
             if (ierr /= 0) then
                 write (error_unit, '(a)') 'fo: '//message
+                if (len(cases_path) > 0 .and. use_json) write (output_unit, '(a)') &
+                    '{"tests":[],"exit_code":1,"error":"'// &
+                    json_escape_string(message)//'"}'
                 stop 1
             end if
             do i = 1, size(widen_reasons)
@@ -1511,24 +1520,6 @@ contains
                 if (ierr /= 0) then
                     write (error_unit, '(a)') 'fo: '//message
                     stop 1
-                end if
-            end if
-            allocate (changed(0))
-            if (len(cases_path) > 0) then
-                call drop_changed_cases(b, model, selection, all_flags, listed_names, &
-                    listed_digests, digests, changed, quiet=use_json)
-                if (size(changed) > 0 .and. size(selection%cases) == 0) then
-                    ! Nothing is left to run; --json still reports the cases.
-                    if (use_json) then
-                        call make_tmpfile('fo-test', test_log)
-                        open (newunit=i, file=trim(test_log), status='replace')
-                        close (i)
-                        exitcode = 1
-                        call report_test_result(exitcode, test_log, .true., use_json, &
-                            json_full=json_full, model=model, digests=digests, &
-                            changed=changed, targets_json='[]')
-                    end if
-                    call process_exit(1)
                 end if
             end if
             if (random_count > 0) then
@@ -1561,6 +1552,11 @@ contains
             end if
             if (len(partition_text) > 0 .and. selection%status /= SELECT_EMPTY) &
                 call narrow_to_partition(model, selection, by_hash, part, parts)
+            ! After the partition: a changed case is reported in its part only.
+            allocate (changed(0))
+            if (len(cases_path) > 0) call drop_changed_cases(b, model, selection, &
+                all_flags, listed_names, listed_digests, digests, changed, &
+                quiet=use_json)
             if (list_mode) then
                 if (use_json) then
                     call test_case_digests(b, model, all_flags, digests)
@@ -1585,6 +1581,17 @@ contains
                 end if
                 write (error_unit, '(a)') 'fo: '//selection%message
                 stop 1
+            end if
+            if (size(changed) > 0 .and. size(selection%cases) == 0) then
+                ! Nothing is left to run; --json still reports the cases.
+                if (use_json) call report_nothing_run(1, use_json, json_full, &
+                    junit_path, model, digests, changed)
+                call process_exit(1)
+            end if
+            if (size(selection%cases) == 0 .and. len(cases_path) > 0 .and. use_json) then
+                ! No listed case in this partition: an empty report.
+                call report_nothing_run(0, use_json, json_full, junit_path)
+                return
             end if
             call make_tmpfile('fo-test', test_log)
             if (size(selection%cases) == 0) then
@@ -1618,10 +1625,34 @@ contains
                 .not. verbose .and. .not. only_changed) .or. quiet, use_json, &
                 require_results=.true., json_full=json_full, full_text=verbose, &
                 junit_path=junit_path, project_dir=b%project_dir, model=model, &
-                digests=digests, changed=changed, targets_json=targets_json)
+                digests=digests, changed=changed, targets_json=targets_json, &
+                listed=len(cases_path) > 0, expected=selection%cases)
             call delete_tmpfile(test_log)
             if (size(changed) > 0) call process_exit(1)
         end subroutine cmd_test
+
+        subroutine report_nothing_run(status, use_json, json_full, junit_path, &
+                model, digests, changed)
+            !! The report of a case list of which no case runs: empty, or its
+            !! changed cases only. Nothing is built and no log is kept.
+            integer, intent(in) :: status
+            logical, intent(in) :: use_json, json_full
+            character(len=*), intent(in) :: junit_path
+            type(project_model_t), intent(in), optional :: model
+            character(len=64), allocatable, intent(in), optional :: digests(:)
+            integer, intent(in), optional :: changed(:)
+            character(len=512) :: empty_log
+            integer :: unit, code
+
+            call make_tmpfile('fo-test', empty_log)
+            open (newunit=unit, file=trim(empty_log), status='replace')
+            close (unit)
+            code = status
+            call report_test_result(code, empty_log, .true., use_json, &
+                json_full=json_full, junit_path=junit_path, model=model, &
+                digests=digests, changed=changed, targets_json='[]')
+            call delete_tmpfile(empty_log)
+        end subroutine report_nothing_run
 
         subroutine recorded_costs(model, project_dir, cpu_ms, peak_kb)
             !! The last recorded CPU time and peak memory of every model case
@@ -1791,13 +1822,15 @@ contains
 
         subroutine report_test_result(exitcode, test_log, summary_mode, use_json, &
                 require_results, json_full, full_text, junit_path, project_dir, &
-                model, digests, changed, targets_json)
+                model, digests, changed, targets_json, listed, expected)
             !! One report for a run: compact JSON by default for --json, the legacy
             !! full JSON for --json=full, and human text that ends in the verdict
             !! line. Failure output is excerpted unless full_text (--verbose).
             !! JSON only: digests (one per model case) gives each result its
             !! input closure digest, changed (model cases) adds a CHANGED
             !! result per case, targets_json (an array) the targets built.
+            !! With listed (a --cases run) every case of expected (model
+            !! cases) that left no result is reported UNTESTED.
             integer, intent(inout) :: exitcode
             character(len=*), intent(in) :: test_log
             logical, intent(in) :: summary_mode
@@ -1809,8 +1842,11 @@ contains
             character(len=64), allocatable, intent(in), optional :: digests(:)
             integer, intent(in), optional :: changed(:)
             character(len=*), intent(in), optional :: targets_json
+            logical, intent(in), optional :: listed
+            integer, intent(in), optional :: expected(:)
 
             type(test_result_entry_t), allocatable :: entries(:), with_changed(:)
+            integer, allocatable :: absent(:)
             integer :: n_entries, parse_ierr, c
             character(len=:), allocatable :: json_output, human_output
             logical :: compact, bounded
@@ -1838,9 +1874,29 @@ contains
                 if (len(junit_path) > 0) call write_junit(junit_path, test_log)
             end if
             if (use_json .and. present(model)) then
+                allocate (absent(0))
+                if (present(listed) .and. present(expected)) then
+                    do i = 1, merge(size(expected), 0, listed)
+                        do c = 1, n_entries
+                            if (trim(entries(c)%name) == &
+                                model%cases(expected(i))%name) exit
+                        end do
+                        if (c > n_entries) absent = [absent, expected(i)]
+                    end do
+                end if
                 if (present(changed)) then
-                    allocate (with_changed(n_entries + size(changed)))
+                    allocate (with_changed(n_entries + size(absent) + size(changed)))
                     with_changed(1:n_entries) = entries(1:n_entries)
+                    do i = 1, size(absent)
+                        ! Its build failed or the run ended before the case.
+                        n_entries = n_entries + 1
+                        with_changed(n_entries)%name = model%cases(absent(i))%name
+                        with_changed(n_entries)%status = 'UNTESTED'
+                        with_changed(n_entries)%reason = &
+                            'no result: the build or the run failed before this case'
+                        with_changed(n_entries)%seconds = 0.0
+                        with_changed(n_entries)%exit_code = 0
+                    end do
                     do i = 1, size(changed)
                         n_entries = n_entries + 1
                         with_changed(n_entries)%name = model%cases(changed(i))%name
@@ -1928,7 +1984,11 @@ contains
                 write (error_unit, '(a,a)') 'fo: log: ', trim(test_log)
             end if
 
-            if (exitcode /= 0) call process_exit(1)
+            if (exitcode /= 0) then
+                ! The JSON report holds what it needs of the log.
+                if (use_json) call delete_tmpfile(test_log)
+                call process_exit(1)
+            end if
         end subroutine report_test_result
 
         subroutine cmd_graph()

@@ -296,27 +296,46 @@ fo test --cases FILE|- [--rerun] [--junit PATH]
   optional `cases[].closure_digest` are read, and default exclusions do not
   apply. A listed case whose digest differs from the current one is not run:
   it prints `CHANGED NAME` and the command exits 1, so the planner can replan.
-  An unknown name exits 1 before anything is built. Names, `--only-changed`,
-  `--random` and `--list` cannot be combined with it.
+  An unknown name exits 1 before anything is built. An empty list runs
+  nothing and exits 0. Names, `--only-changed`, `--random` and `--list` cannot
+  be combined with it.
   With `--json=full` the run prints one object: `tests[]` holds every listed
   case with `name`, `status` (`pass`, `fail`, `flaky`, `timeout`, `limit`,
-  `skip`, `reused` for a recorded PASS that was not run again, `changed`),
-  `seconds` (wall), `output` and, where known, `closure_digest` (the digest
-  the case ran under; for `changed` the current one), `cpu_seconds`,
-  `peak_rss_kb` and `write_bytes`; `targets` names the targets built,
-  `summary` the counts and `exit_code` the status. `--json` prints the compact
-  report with the same `targets`, listing only the cases that did not pass.
+  `skip`, `reused` for a recorded PASS that was not run again, `changed`,
+  `untested` for a case without a result), `seconds` (wall), `output`,
+  `closure_digest` (the digest the case ran under; for `changed` the current
+  one; absent when the case has none) and, where fo measured them,
+  `cpu_seconds`, `peak_rss_kb` and `write_bytes`; `targets` names the targets built,
+  `summary` the counts and `exit_code` the status. When the build fails, no
+  case runs: every case to be run is `untested` and the top-level `output`
+  holds the build log. `--json` prints the compact report with the same
+  `targets`, listing only the cases that did not pass, with the build log
+  excerpt in `at` and `out`. With `--partition`, the report covers the listed
+  cases of that part, a changed case included. An unknown name prints
+  `{"tests":[],"exit_code":1,"error":"unknown test: NAME"}`. Without
+  `--cases`, the results of a `--json=full` run carry `closure_digest` too,
+  except with `--no-cache`, which computes none.
 - A `closure_digest` is a SHA-256 over the case name, labels and properties,
-  the path and content of every project file that can affect the case (the
-  sources its executable reaches through module use and linking, its declared
-  inputs, the build descriptions, and sources or other files that no target or
-  case owns), every input outside the project such as dependency sources, the
+  the path and content of every inventoried project file that can affect the
+  case (the sources its executable reaches through module use and linking, its
+  declared inputs, the build descriptions, and sources or other files that no
+  target or case owns), every input outside the project such as dependency
+  sources, the
   path and version line of the compiler, the manifest flags, the profile and
   `--flag` text, the compiler and build environment variables (`FC`, `FO_FC`,
   `FFLAGS`, `FPM_FC`, `FPM_FFLAGS`, `FO_FPM_CONFIG_FILE`, `LIBRARY_PATH`,
   `OMP_NUM_THREADS`; CMake: the `FO_CMAKE_*` settings) and the SHA-256 of the
   fo executable. Documentation files do not count. It is empty, and the case
   is never reused, when the input inventory is incomplete.
+  The inventory of a CMake project is its whole source tree outside the build
+  directory. The inventory of an fpm project is `fpm.toml`, `fpm.lock`, the
+  trees of the manifest's source, app, test and example directories,
+  `test-support`, the include directories and the `[[extra.fo.inputs]]` rows.
+  A file elsewhere in an fpm project, such as a data file at the project root
+  that a test opens, is in no digest until an `[[extra.fo.inputs]]` row
+  declares it: a change to it alone leaves the keys equal and a recorded PASS
+  is reused. Environment variables other than the listed ones do not count
+  either.
 - Running (CMake, also plain `fo test`): select, plan, build, run. CMake is
   configured once and the loaded model is reused. Only the plan targets are
   built (merged with `FO_CMAKE_BUILD_TARGETS`). A case whose command maps to no
@@ -433,9 +452,11 @@ fo test --cases FILE|- [--rerun] [--junit PATH]
   digest is Gremlin's `closure_digest` (the same code: the case's input closure
   files, the files that affect every case, labels and attributes, the toolchain
   identity and the fo driver), plus the build profile and `--flag` text. An
-  undeclared project file (data), a manifest or any input outside the project
-  files changes every digest, so every case runs; an incomplete or unknown
-  input leaves the case without a digest and it always runs. Only a `PASS`
+  inventoried project file that no target or case owns (data), a manifest or
+  any input outside the project files changes every digest, so every case
+  runs (which files are inventoried: see `closure_digest` above); an
+  incomplete or unknown input leaves the case without a digest and it always
+  runs. Only a `PASS`
   records a digest: FAIL, TIMEOUT and FLAKY record their status (for
   `failed()`) and are never reused, and a successful build is never a PASS.
   `--rerun` (MCP `rerun`, or `FO_TEST_RERUN=1`) runs every selected case; `--random` always does.
