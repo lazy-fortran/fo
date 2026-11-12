@@ -1,8 +1,9 @@
 program test_case_meter_cli
     !! Cost of each test case in the JSON report (#364): a case that touches
     !! 300 MB and writes 8 MB to a file reports at least that peak resident
-    !! memory and, on Linux outside tmpfs, those bytes written; a trivial case
-    !! reports far less memory. Under a 100 MB limit from [extra.fo]
+    !! memory and, on Linux outside tmpfs, those bytes written, also when it
+    !! writes them just before it ends, between two samples of the meter; a
+    !! trivial case reports far less memory. Under a 100 MB limit from [extra.fo]
     !! test-memory-limit the large case alone ends as LIMIT, and
     !! FO_TEST_MEMORY_LIMIT overrides the manifest. Runs the driver named by FO.
     use fo_test_harness, only: process_result_t, string_list_t, list_add
@@ -38,6 +39,7 @@ program test_case_meter_cli
         'allocate (a(37500000))'//nl// &
         'a = 1.0d0'//nl// &
         'block = repeat("x", len(block))'//nl// &
+        'call sleep(1)'//nl// &
         'open (newunit=u, file="meter_out.bin", access="stream", status="replace")'//nl// &
         'do k = 1, 8'//nl// &
         '    write (u) block'//nl// &

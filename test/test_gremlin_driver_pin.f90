@@ -12,7 +12,7 @@ program test_gremlin_driver_pin
     use fo_test_harness, only: assert_true, assert_equal_string, finish_assertions
     use fo_test_gremlin_oracle, only: gremlin_setup, gremlin_start_args
     use fo_test_gremlin_oracle, only: gremlin_run, gremlin_json, gremlin_field, &
-        gremlin_wait_ms
+        gremlin_wait_ms, gremlin_stop_lane
     use fo_test_json, only: json_value_t, json_parse, json_member, json_element, &
         json_size
     use fo_test_json, only: json_number, json_number_value
@@ -154,7 +154,7 @@ contains
         call wait_for_pass(driver_a, project, cache, state, lane, session, '', &
             generation, document)
         if (len(generation) == 0) then
-            call stop_lane(driver_a, project, cache, state, lane, session)
+            call gremlin_stop_lane(driver_a, project, cache, state, lane, session)
             return
         end if
         call assert_true(gremlin_field(document, 'driver_digest') == expected_digest, &
@@ -168,7 +168,7 @@ contains
         call wait_for_pass(driver_a, project, cache, state, lane, session, generation, &
             next_generation, document)
         if (len(next_generation) == 0) then
-            call stop_lane(driver_a, project, cache, state, lane, session)
+            call gremlin_stop_lane(driver_a, project, cache, state, lane, session)
             return
         end if
         call assert_true(next_generation /= generation, &
@@ -235,7 +235,7 @@ contains
         call assert_true(matched, 'new generation has a durable PASS receipt')
         call assert_true(.not. file_exists(marker), &
             'replaced public B marker was never invoked for build or test')
-        call stop_lane(driver_a, project, cache, state, lane, session)
+        call gremlin_stop_lane(driver_a, project, cache, state, lane, session)
     end subroutine run_driver_pin_oracles
 
     subroutine startup_fd_oracle(scratch, b_binary)
@@ -432,23 +432,6 @@ contains
         call assert_true(.false., &
             'A campaign publishes a PASS receipt for its current generation')
     end subroutine wait_for_pass
-
-    subroutine stop_lane(driver, project, cache, state, lane, session)
-        character(len=*), intent(in) :: driver, project, cache, state, lane, session
-        type(string_list_t) :: args
-        type(process_result_t) :: process
-        type(json_value_t) :: document
-        args = string_list_t()
-        call list_add(args, 'gremlin')
-        call list_add(args, 'stop')
-        call list_add(args, '--dir')
-        call list_add(args, project)
-        call list_add(args, '--lane')
-        call list_add(args, lane)
-        call list_add(args, '--session')
-        call list_add(args, session)
-        call gremlin_json(driver, project, cache, state, args, document, process, 30000)
-    end subroutine stop_lane
 
     subroutine copy_file(source, destination)
         character(len=*), intent(in) :: source, destination
