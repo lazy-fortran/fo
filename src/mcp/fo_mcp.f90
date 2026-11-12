@@ -90,7 +90,11 @@ contains
             else
                 call mcp_read_message(line, MAX_LINE, framing, eof_flag, read_status)
             end if
-            if (eof_flag) exit
+            if (eof_flag) then
+                ! The client stops writing but may still read: answer as shutdown does.
+                call deferred_settle(async_state, framing)
+                exit
+            end if
             if (read_status /= 0) cycle
             if (len_trim(line) == 0) cycle
             request = trim(line)

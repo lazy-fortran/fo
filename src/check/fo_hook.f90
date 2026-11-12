@@ -43,6 +43,11 @@ module fo_hook
             character(kind=c_char), intent(in) :: root(*), view(*), reuse(*)
             integer(c_int), value :: cap, offline
         end function c_prepare
+        integer(c_int) function c_identity_env(caller) &
+                bind(C, name='fo_c_hook_identity_env')
+            import :: c_int
+            integer(c_int), value :: caller
+        end function c_identity_env
         ! A blocking close-on-exec flock: it ends with the process, so a
         ! killed commit never blocks the next one.
         integer(c_int) function c_hook_lock(path) bind(C, name='fo_sys_lock_fixture')
@@ -533,8 +538,11 @@ contains
             end if
             call sha256_file(trim(driver), driver_digest, status)
             identity_ok = .false.
+            ! Key the evidence as a resident lane of this checkout would.
+            if (status == 0) status = c_identity_env(1_c_int)
             if (status == 0) call case_identity_capture(backend, driver_digest, '', &
                 generation, identity_ok, configured=.true.)
+            if (status == 0) status = c_identity_env(0_c_int)
             if (identity_ok) key = hook_input_key(generation)
             prepared_key = hook_prepared_key(trim(key), model, request)
             if (identity_ok .and. model%complete) then

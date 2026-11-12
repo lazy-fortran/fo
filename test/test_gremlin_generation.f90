@@ -133,6 +133,8 @@ program test_gremlin_generation
     call fs_make_dir(trim(project)//'/.bzr')
     call fs_make_dir(trim(dependency)//'/src')
     call fs_write_text(trim(project)//'/src/main.f90', 'program version_one')
+    ! A default ACL may grant more than the umask; later steps restore this mode.
+    chmod_rc = c_chmod(trim(project)//'/src/main.f90'//c_null_char, MODE_NONEXEC)
     alternate_source = trim(project)//'/src/alternate.f90'
     call fs_write_text(trim(alternate_source), 'program version_one')
     call fs_write_text(trim(project)//'/src/build/fo_gremlin_provider.f90', &
@@ -293,6 +295,7 @@ program test_gremlin_generation
     call check(symlink_rc == 0, 'original relative link is restored')
 
     call fs_write_text(trim(project)//'/src/main.f90', 'program version_two')
+    chmod_rc = c_chmod(trim(project)//'/src/main.f90'//c_null_char, MODE_NONEXEC)
     call capture_generation(trim(project), trim(cache), context, source_changed, &
         race_ierr, message)
     call check(race_ierr == 0 .and. source_changed%identity /= first%identity, &

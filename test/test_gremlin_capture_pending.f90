@@ -355,9 +355,11 @@ contains
         session = field(cli_json, 'session_id')
         call cli('stop --session '//trim(session), cli_json, exitcode)
         call check(exitcode == 0, 'stops capture-pending fixture owner through the CLI')
+        ! Status of an exited owner reports its final state, so poll for it.
         do attempt = 1, 100
-            call cli('status', cli_json, exitcode)
+            call cli('status --session '//trim(session), cli_json, exitcode)
             if (exitcode /= 0) return
+            if (field(cli_json, 'state') == 'stopped') return
             exitcode = pause_microseconds(50000_c_int)
         end do
         call check(.false., 'fixture owner releases after public stop')

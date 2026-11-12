@@ -1,0 +1,10 @@
+#!/bin/sh
+# fo's tests exercise the fo that runs them, so they run with the fo this
+# commit builds rather than the one in the runner image.
+set -eu
+fo build
+dir=$(mktemp -d "${TMPDIR:-/tmp}/fo-check.XXXXXX")
+trap 'rm -rf "$dir"' EXIT
+cp build/fo/app/fo "$dir/fo"
+chmod 555 "$dir/fo"
+PATH="$dir:$PATH" "$dir/fo" test "$@"

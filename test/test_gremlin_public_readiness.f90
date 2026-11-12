@@ -222,11 +222,13 @@ contains
         call cli('stop --session '//trim(session), cli_json, status)
         if (status /= 0) return
         ! Status of an exited owner reports its final state, so poll for it;
-        ! the bound matches this oracle's other 60 s safety deadlines.
+        ! the bound matches this oracle's other 60 s safety deadlines. An owner
+        ! that a repeated infrastructure error ended reports error instead.
         do attempt = 1, 1200
             call cli('status --session '//trim(session), cli_json, exitcode)
             if (exitcode /= 0) return
-            if (field(cli_json, 'state') == 'stopped') return
+            if (field(cli_json, 'state') == 'stopped' .or. &
+                field(cli_json, 'state') == 'error') return
             exitcode = pause_microseconds(50000_c_int)
         end do
         status = 1

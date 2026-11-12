@@ -552,6 +552,9 @@ contains
         if (len(path) == 0) return
         if (index(path, '.f90') > 0) then
             call append_text(join_path(dir, path), '! edited'//new_line('a'))
+        else if (index(path, 'CMakeLists.txt') > 0) then
+            ! A comment-only listfile edit selects nothing; a command widens.
+            call append_text(join_path(dir, path), 'set(TW_EDITED ON)'//new_line('a'))
         else
             call append_text(join_path(dir, path), '# edited'//new_line('a'))
         end if

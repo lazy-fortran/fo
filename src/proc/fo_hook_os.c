@@ -21,6 +21,39 @@ static int append_once(char *dst, size_t size, const char *addition) {
     return 0;
 }
 
+/* The hook builds relocatably to share the checkout's cache, but its evidence
+   key must use the caller's FO_CACHE_RELOCATABLE, as a resident lane of the
+   same checkout does. The first prepare saves it ("-" unset, "+value"); a
+   bounded hook's child inherits the saved value. */
+#define CALLER_RELOCATABLE "FO_HOOK_CALLER_RELOCATABLE"
+
+static int put_env(const char *name, const char *value) {
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    return _putenv_s(name, value ? value : "") ? EINVAL : 0;
+#else
+    if (!value) return unsetenv(name) ? errno : 0;
+    return setenv(name, value, 1) ? errno : 0;
+#endif
+}
+
+static int save_caller_relocatable(void) {
+    char saved[4096];
+    const char *value = getenv("FO_CACHE_RELOCATABLE");
+    if (getenv(CALLER_RELOCATABLE)) return 0;
+    if (value && strlen(value) + 2 > sizeof(saved)) return ENAMETOOLONG;
+    snprintf(saved, sizeof(saved), value ? "+%s" : "-", value);
+    return put_env(CALLER_RELOCATABLE, saved);
+}
+
+/* caller != 0 restores the caller's value for an identity capture; 0 sets
+   the hook's own relocatable mode again. */
+int fo_c_hook_identity_env(int caller) {
+    const char *saved = getenv(CALLER_RELOCATABLE);
+    if (!caller) return put_env("FO_CACHE_RELOCATABLE", "1");
+    if (!saved || (saved[0] != '+' && saved[0] != '-')) return 0;
+    return put_env("FO_CACHE_RELOCATABLE", saved[0] == '+' ? saved + 1 : NULL);
+}
+
 /* Hook-local policy; the process exits after checking the snapshot. An
    offline view builds against reused dependency roots and fetches nothing; the
    shared CMake view fetches what the staged commit pins. */
@@ -63,6 +96,8 @@ int fo_c_hook_prepare(const char *root, const char *view, int build_cap,
 #endif
     }
     snprintf(seconds, sizeof(seconds), "%d", build_cap);
+    status = save_caller_relocatable();
+    if (status) return status;
 #if defined(_WIN32) && !defined(__CYGWIN__)
     if (_putenv_s("FO_CACHE_RELOCATABLE", "1") ||
         _putenv_s("FO_BUILD_TIMEOUT", seconds) ||

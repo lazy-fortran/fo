@@ -139,7 +139,7 @@ contains
     subroutine test_surfaces()
         !! Out-of-range values are refused, and in-range ones are not, with the
         !! same message on the CLI and over MCP.
-        integer :: i
+        integer :: i, reply_of(max_probes + 1)
         type(gremlin_option_t) :: option
         type(json_value_t), allocatable :: replies(:)
         type(process_result_t) :: result, cli_result
@@ -186,6 +186,10 @@ contains
         call mcp_exchange(driver, project, cache, input, .false., replies, result)
         call assert_equal_integer(size(replies), n + 1, 'every option probe is answered')
         if (size(replies) /= n + 1) return
+        ! A deferred request may be answered after later ones; match by id.
+        do i = 1, n + 1
+            reply_of(nint(json_number_value(json_member(replies(i), 'id')))) = i
+        end do
         do i = 1, n
             arguments = string_list_t()
             call list_add(arguments, 'gremlin')
@@ -198,7 +202,7 @@ contains
             call json_parse(cli_result%stdout, document, ok, parse_message)
             cli_error = json_string_value(json_member(document, 'error'))
             call json_parse(json_string_value(json_member(json_element(json_member( &
-                json_member(replies(i + 1), 'result'), 'content'), 1), 'text')), &
+                json_member(replies(reply_of(i + 1)), 'result'), 'content'), 1), 'text')), &
                 document, ok, parse_message)
             mcp_error = json_string_value(json_member(document, 'error'))
             call assert_equal_string(mcp_error, cli_error, &

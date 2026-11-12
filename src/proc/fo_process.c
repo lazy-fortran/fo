@@ -1552,10 +1552,13 @@ static int run_argv(const char *cwd, char *const argv[], const char *log_file,
                 meter_finish(budget, &usage);
                 if (budget != NULL) {
                     if (report_fd >= 0) {
-                        long long reported;
-                        if (read_exact(report_fd, &reported,
-                                       sizeof(reported)) == 0)
-                            own = reported;
+                        long long reported[2];
+                        if (read_exact(report_fd, reported,
+                                       sizeof(reported)) == 0) {
+                            own = reported[0];
+                            if (reported[1] > budget->write_bytes)
+                                budget->write_bytes = reported[1];
+                        }
                     }
                     if (own < 0) {
                         own = (long long)usage.ru_utime.tv_sec * 1000LL +
@@ -4100,7 +4103,16 @@ static int monitor_run(int argc, char **argv) {
 #else
     (void)capture_monitor;
 #endif
-    (void)write_exact(FO_MONITOR_FD, &cpu_ms, sizeof(cpu_ms));
+    {
+        /* The program's writes, which the parent cannot read once the
+           program is reaped: a container denies it a zombie's counters, but
+           this process's own include every child it reaped. */
+        long long report[2] = {cpu_ms, -1};
+#ifdef __linux__
+        report[1] = proc_number("/proc/self/io", "write_bytes:", 0);
+#endif
+        (void)write_exact(FO_MONITOR_FD, report, sizeof(report));
+    }
     close(FO_MONITOR_FD);
     if (target_signal > 0 && code != 126) {
         struct sigaction default_action = {0};

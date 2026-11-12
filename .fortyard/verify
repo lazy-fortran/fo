@@ -1,0 +1,3 @@
+#!/bin/sh
+# Verification of main reruns every case instead of reusing earlier passes.
+FO_TEST_RERUN=1 exec "$(dirname "$0")/check" "$@"

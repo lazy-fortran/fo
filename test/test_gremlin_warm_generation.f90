@@ -104,7 +104,9 @@ program test_gremlin_warm_generation
     call generation_manifest_materialize_stats(.true., cloned, copied)
     write (*, '(a,i0,a,i0,a,i0)') 'warm capture copied bytes=', bytes, &
         ' cloned blobs=', cloned, ' copied blobs=', copied
-    call require(bytes <= 2_c_long * PAYLOAD_LEN, &
+    ! Without block clones the counter also holds the bundle's byte copy of
+    ! each blob, at most one payload each.
+    call require(bytes <= 2_c_long * PAYLOAD_LEN + int(copied, c_long) * PAYLOAD_LEN, &
         'warm capture copies at most the changed file for payload capture')
     ! Whatever the filesystem offers, the bundle must not be re-copied more
     ! than the clone-incapable fallback allows; when clone works it is free.
