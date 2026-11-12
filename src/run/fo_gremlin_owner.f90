@@ -1285,6 +1285,9 @@ contains
         call release_generation_lease(o%candidate_lease, o%have_candidate_lease, &
             status, detail)
         if (status /= 0) o%fatal_message = detail
+        ! Restart the pin grace so the stopped lane keeps its last generation.
+        if (o%active_pinned .and. o%have_active_lease) &
+            call gremlin_generation_pin_at(o%active%root, .true., status, detail)
         call release_generation_lease(o%active_lease, o%have_active_lease, status, detail)
         if (status /= 0) o%fatal_message = detail
         call release_heavy_work_slot(o%heavy, o%have_heavy, status, detail, drain=.true.)

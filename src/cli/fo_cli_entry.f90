@@ -2394,10 +2394,28 @@ contains
         subroutine clean_gremlin()
             use fo_gremlin_retention, only: gremlin_trim_cache
             use fo_gremlin_context, only: common_generation_cas_root
+            use fo_gremlin_state, only: gremlin_generation_prune_inactive
             character(len=4096) :: root, message
-            integer :: ierr, removed
+            character(len=*), parameter :: ANCHOR = '/gremlin/generations-v2/'// &
+                '0000000000000000000000000000000000000000000000000000000000000000'
+            integer :: ierr, removed, pruned, generations, round
 
+            generations = 0
             call common_generation_cas_root(root, ierr, message)
+            ! Candidates come in batches; stop when a batch frees nothing.
+            do round = 1, 100000
+                if (ierr /= 0) exit
+                call gremlin_generation_prune_inactive(trim(root)//ANCHOR, ierr, &
+                    message, pruned=pruned)
+                generations = generations + pruned
+                if (pruned == 0) exit
+            end do
+            if (ierr /= 0) then
+                write (error_unit, '(a)') 'fo clean --gremlin: '//trim(message)
+                call process_exit(1)
+            end if
+            write (output_unit, '(a,i0)') 'inactive Gremlin generations removed: ', &
+                generations
             if (ierr == 0) then
                 ! The trim service derives the common state root from a lane path.
                 removed = gremlin_trim_cache('', trim(root)// &

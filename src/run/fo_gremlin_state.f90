@@ -4,6 +4,7 @@ module fo_gremlin_state
     use fo_generation_manifest, only: generation_manifest_release
     use fx_immutable_store, only: IMMUTABLE_OK
     use fo_fs, only: fs_sleep_ms
+    use fo_cache, only: cache_env_size
     implicit none
     private
 
@@ -252,20 +253,21 @@ module fo_gremlin_state
             integer(c_int) :: ierr
         end function c_generation_pin_at
 
-        function c_generation_prune_at(root) &
+        function c_generation_prune_at(root, pin_grace) &
                 bind(C, name='fo_gremlin_generation_prune_at') result(ierr)
             import :: c_char, c_int
             character(kind=c_char), intent(in) :: root(*)
+            integer(c_int), value :: pin_grace
             integer(c_int) :: ierr
         end function c_generation_prune_at
 
         function c_generation_prune_candidates(root, paths, slot_size, limit, &
-                min_age) bind(C, name='fo_gremlin_generation_prune_candidates') &
-                result(count)
+                min_age, pin_grace) &
+                bind(C, name='fo_gremlin_generation_prune_candidates') result(count)
             import :: c_char, c_int
             character(kind=c_char), intent(in) :: root(*)
             character(kind=c_char), intent(out) :: paths(*)
-            integer(c_int), value :: slot_size, limit, min_age
+            integer(c_int), value :: slot_size, limit, min_age, pin_grace
             integer(c_int) :: count
         end function c_generation_prune_candidates
 
@@ -744,15 +746,18 @@ contains
         message = error_text(ierr)
     end subroutine gremlin_generation_pin_at
 
-    subroutine gremlin_generation_prune_at(root, ierr, message)
+    subroutine gremlin_generation_prune_at(root, ierr, message, pin_grace)
+        !! pin_grace: seconds after which a pin no longer protects an unleased
+        !! generation; absent or negative keeps every pin.
         character(len=*), intent(in) :: root
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
+        integer, intent(in), optional :: pin_grace
         character(len=PATH_LEN) :: lock_path, store_root
         character(len=ID_LEN) :: root_owner
         character(kind=c_char) :: c_store(PATH_LEN), c_owner(ID_LEN)
         integer(c_int) :: c_error, lock_fd
-        integer :: slash, locator_status
+        integer :: slash, locator_status, grace
         logical :: has_manifest, exists, pending
 
         ierr = 1
@@ -816,7 +821,10 @@ contains
         end if
 
         if (exists) then
-            c_error = c_generation_prune_at(trim(root)//c_null_char)
+            grace = -1
+            if (present(pin_grace)) grace = pin_grace
+            c_error = c_generation_prune_at(trim(root)//c_null_char, &
+                int(grace, c_int))
             ierr = int(c_error)
             message = error_text(ierr)
         else
@@ -838,22 +846,35 @@ contains
         call c_generation_unlock(lock_fd)
     end subroutine gremlin_generation_prune_at
 
-    subroutine gremlin_generation_prune_inactive(anchor, ierr, message, min_age)
+    subroutine gremlin_generation_prune_inactive(anchor, ierr, message, min_age, &
+            pin_grace, pruned)
+        !! Pins of stopped or abandoned lanes expire after pin_grace seconds
+        !! (default FO_GREMLIN_PIN_GRACE, 7 days); live lanes hold a lease.
         character(len=*), intent(in) :: anchor
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
-        integer, intent(in), optional :: min_age
+        integer, intent(in), optional :: min_age, pin_grace
+        integer, intent(out), optional :: pruned
         integer, parameter :: LIMIT = 8
         character(kind=c_char) :: roots(PATH_LEN * LIMIT)
         integer(c_int) :: count
-        integer :: age, i, status
+        integer :: age, grace, i, status, removed
+        integer(int64) :: env_grace
+        logical :: ok
         character(len=PATH_LEN) :: root, detail
 
         age = 60
         if (present(min_age)) age = min_age
+        env_grace = 7_int64 * 86400_int64
+        call cache_env_size('FO_GREMLIN_PIN_GRACE', env_grace, ok)
+        grace = int(min(env_grace, int(huge(grace), int64)))
+        if (present(pin_grace)) grace = pin_grace
+        removed = 0
+        if (present(pruned)) pruned = 0
         roots = c_null_char
         count = c_generation_prune_candidates(trim(anchor)//c_null_char, roots, &
-            int(PATH_LEN, c_int), int(LIMIT, c_int), int(age, c_int))
+            int(PATH_LEN, c_int), int(LIMIT, c_int), int(age, c_int), &
+            int(grace, c_int))
         ierr = 0
         message = ''
         if (count < 0_c_int) then
@@ -863,7 +884,9 @@ contains
         end if
         do i = 1, int(count)
             root = c_string(roots((i - 1) * PATH_LEN + 1:i * PATH_LEN))
-            call gremlin_generation_prune_at(trim(root), status, detail)
+            call gremlin_generation_prune_at(trim(root), status, detail, grace)
+            if (status == 0) removed = removed + 1
+            if (present(pruned)) pruned = removed
             if (status == 0 .or. status == 2 .or. status == 16) cycle
             if (ierr == 0) then
                 ierr = status

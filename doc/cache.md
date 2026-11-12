@@ -162,8 +162,11 @@ a rescan.
 The continuous mode (`fo gremlin`) keeps per-session working trees with a
 separate soft budget, `FO_GREMLIN_CACHE_MAX_SIZE` (default `8G`, `0` disables
 eviction). When a session is idle, fo removes the oldest inactive trees down to
-80 % of the budget, sparing recent and in-use ones. `fo clean --gremlin` runs
-this pass immediately. This state is host-local.
+80 % of the budget, sparing recent and in-use ones. Each lane pins its last
+built generation. A running lane keeps it through its lease; after the lane
+stops, the pin protects it for `FO_GREMLIN_PIN_GRACE` seconds (default one
+week), and idle sessions then prune it.
+`fo clean --gremlin` runs both passes immediately. This state is host-local.
 
 ## Shared filesystems
 

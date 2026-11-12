@@ -1395,12 +1395,24 @@ static int generation_state_path(const char *root, char *dir, size_t cap,
     return e;
 }
 
+/* A pin outlives its lane only for the grace period (negative: forever), so
+   stopped and abandoned lanes cannot retain generations indefinitely. A live
+   lane still protects its generation through the lease. 1 held, 0 free, -errno. */
+static int pin_holds(const char *pin, int grace_seconds) {
+    struct stat st;
+    if (lstat(pin, &st) != 0) return errno == ENOENT ? 0 : -errno;
+    if (grace_seconds < 0) return 1;
+    time_t now = time(NULL);
+    return now < st.st_mtime || now - st.st_mtime < grace_seconds;
+}
+
 /* Return at most limit inactive candidates from this materialization's store.
    Each path occupies one PATH_MAX-sized slot in roots.  The pruning operation
    rechecks the guard, pin, and lease after this advisory scan. */
 int fo_gremlin_generation_prune_candidates(const char *anchor, char *roots,
                                            int slot_size, int limit,
-                                           int min_age_seconds) {
+                                           int min_age_seconds,
+                                           int pin_grace_seconds) {
     char dir[PATH_MAX], canonical[PATH_MAX], base[PATH_MAX];
     int e = generation_state_path(anchor, dir, sizeof(dir), canonical,
                                   sizeof(canonical));
@@ -1440,7 +1452,7 @@ int fo_gremlin_generation_prune_candidates(const char *anchor, char *roots,
         if (lstat(record, &st) == 0 && S_ISREG(st.st_mode)) {
             if (now < st.st_mtime || now - st.st_mtime < min_age_seconds) continue;
         } else if (!has_pending) continue;
-        if (lstat(pinned, &st) == 0) continue;
+        if (pin_holds(pinned, pin_grace_seconds) != 0) continue;
         if (read_generation_root(sidecar, stored, sizeof(stored)) != 0) continue;
         char expected[PATH_MAX];
         if (snprintf(expected, sizeof(expected), "%.*s/%s",
@@ -1573,7 +1585,7 @@ static int generation_pin_path(const char *root, int pinned) {
     return e;
 }
 
-static int generation_prune_path(const char *root) {
+static int generation_prune_path(const char *root, int pin_grace) {
     char dir[PATH_MAX], canonical[PATH_MAX], pin[PATH_MAX], registered[PATH_MAX];
     int e = generation_state_path(root, dir, sizeof(dir), canonical, sizeof(canonical));
     if (e) return e;
@@ -1587,9 +1599,8 @@ static int generation_prune_path(const char *root) {
         fo_sys_unlock(gfd);
         return ENOENT;
     }
-    struct stat pin_stat;
-    if (lstat(pin, &pin_stat) == 0) { fo_sys_unlock(gfd); return EBUSY; }
-    if (errno != ENOENT) { e = errno; fo_sys_unlock(gfd); return e; }
+    int held = pin_holds(pin, pin_grace);
+    if (held != 0) { fo_sys_unlock(gfd); return held > 0 ? EBUSY : -held; }
     int lfd = lock_in(dir, "lease.lock", LOCK_EX | LOCK_NB);
     if (lfd < 0) {
         e = -lfd;
@@ -1598,6 +1609,7 @@ static int generation_prune_path(const char *root) {
     }
     e = rm_tree(canonical);
     if (e == 0 && unlink(registered) != 0 && errno != ENOENT) e = errno;
+    if (e == 0 && unlink(pin) != 0 && errno != ENOENT) e = errno;
     if (e == 0) e = fo_sys_sync_dir(dir);
     fo_sys_unlock(lfd);
     fo_sys_unlock(gfd);
@@ -1700,6 +1712,6 @@ int fo_gremlin_generation_pin_at(const char *root, int pinned) {
     return generation_pin_path(root, pinned);
 }
 
-int fo_gremlin_generation_prune_at(const char *root) {
-    return generation_prune_path(root);
+int fo_gremlin_generation_prune_at(const char *root, int pin_grace) {
+    return generation_prune_path(root, pin_grace);
 }

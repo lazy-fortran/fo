@@ -84,10 +84,11 @@ program test_gremlin_manifest
             import :: c_char, c_int
             character(kind=c_char), intent(in) :: path(*), store(*), owner(*)
         end function c_mark_release
-        integer(c_int) function c_raw_prune(path) &
+        integer(c_int) function c_raw_prune(path, pin_grace) &
                 bind(C, name='fo_gremlin_generation_prune_at')
             import :: c_char, c_int
             character(kind=c_char), intent(in) :: path(*)
+            integer(c_int), value :: pin_grace
         end function c_raw_prune
     end interface
 
@@ -680,7 +681,8 @@ contains
             trim(crash_worktree%store_root)//c_null_char, &
             trim(failed_owner)//c_null_char)
         call require(local_status == 0, 'prune records pending Fx release')
-        local_status = c_raw_prune(trim(crash_worktree%root)//c_null_char)
+        local_status = c_raw_prune(trim(crash_worktree%root)//c_null_char, &
+            -1_c_int)
         call require(local_status == 0, 'simulated crash follows materialization prune')
         call assert_root_owner(store, failed_owner, .true., &
             'crash window retains pending durable root')

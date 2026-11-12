@@ -142,6 +142,7 @@ program test_gremlin_state
     call test_nested_host_admission(trim(executable))
     call test_generation_pins(trim(executable))
     call test_bounded_generation_prune()
+    call test_expired_pin_prune()
     call test_root(root)
     call fs_remove_tree(trim(root))
 
@@ -798,6 +799,51 @@ contains
         end do
         call assert(remaining == 0, 'later scan retires remaining generation')
     end subroutine test_bounded_generation_prune
+
+    subroutine test_expired_pin_prune()
+        !! A stopped lane's pin expires after the grace period; a leased
+        !! generation stays even with an expired pin.
+        character(len=1024) :: root, base, kept, leased
+        character(len=256) :: message
+        type(gremlin_lease_t) :: lease, held
+        integer :: ierr, pruned
+        logical :: exists
+
+        call test_root(root)
+        base = trim(root)//'/pinned-generations'
+        kept = trim(base)//'/stopped'
+        leased = trim(base)//'/live'
+        call fs_make_dir(trim(base)//'/.locks')
+        call fs_make_dir(trim(kept))
+        call fs_make_dir(trim(leased))
+        call set_mode(trim(kept), int(o'555'))
+        call set_mode(trim(leased), int(o'555'))
+        call gremlin_generation_register_lease_at(trim(kept), lease, ierr, message)
+        if (ierr == 0) call gremlin_lease_release(lease, ierr, message)
+        if (ierr == 0) call gremlin_generation_register_lease_at(trim(leased), &
+            held, ierr, message)
+        if (ierr == 0) call gremlin_generation_pin_at(trim(kept), .true., ierr, message)
+        if (ierr == 0) call gremlin_generation_pin_at(trim(leased), .true., ierr, &
+            message)
+        call assert(ierr == 0, 'pinned fixture generations register')
+        if (ierr /= 0) return
+
+        call gremlin_generation_prune_inactive(trim(kept), ierr, message, &
+            min_age=0, pruned=pruned)
+        call assert(ierr == 0 .and. pruned == 0, 'fresh pins survive default grace')
+        call gremlin_generation_prune_inactive(trim(kept), ierr, message, &
+            min_age=0, pin_grace=-1, pruned=pruned)
+        call assert(ierr == 0 .and. pruned == 0, 'negative grace keeps every pin')
+        call gremlin_generation_prune_inactive(trim(kept), ierr, message, &
+            min_age=0, pin_grace=0, pruned=pruned)
+        call assert(ierr == 0 .and. pruned == 1, 'expired unleased pin is pruned')
+        inquire (file=trim(kept), exist=exists)
+        call assert(.not. exists, 'expired pinned generation leaves disk')
+        inquire (file=trim(leased), exist=exists)
+        call assert(exists, 'leased generation outlives its expired pin')
+        call gremlin_lease_release(held, ierr, message)
+        call fs_remove_tree(trim(root))
+    end subroutine test_expired_pin_prune
 
     subroutine generation_lease_child(snapshot_root, ready_file, gate_file, result_file)
         character(len=*), intent(in) :: snapshot_root, ready_file, gate_file
