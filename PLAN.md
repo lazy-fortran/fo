@@ -7,6 +7,17 @@ Issues define observable success and this plan orders delivery. Apply
 smallest complete change, and preserve supported behaviour and independent
 failure detection. The workspace master plan, when present, owns delivery order.
 
+## Native C++ runtime links
+
+For fpm projects, Fo infers libc++ or libstdc++ from the C++ compiler's headers
+when linking compiled C++ sources from the project's library, dependency packages
+or test helpers. Explicit manifest libraries remain in the link; CMake's declared
+link arguments remain authoritative. `test_native_cxx_runtime_cli` covers C++
+sources in the project's library and in dependencies separately, using static
+and shared libraries with fresh and reused build outputs.
+`test_test_c_helpers_cli` also exercises a C++ standard-library call alongside
+an explicit runtime library in the manifest.
+
 ## Relocatable fpm compile keys (2026-11-11)
 
 - With `FO_CACHE_RELOCATABLE=1`, gfortran compiles the library and program

@@ -18,6 +18,7 @@ program test_test_c_helpers_cli
     call list_add(environment, 'FO_JOBS=1')
     call write_text(join_path(consumer, 'fpm.toml'), &
         'name = "test_c_helpers"' // nl // &
+        '[build]' // nl // 'link = ["stdc++"]' // nl // &
         '[[test]]' // nl // 'name = "declared"' // nl // &
         'source-dir = "checks/custom"' // nl // 'main = "probe.f90"' // nl // &
         '[[test]]' // nl // 'name = "c_main"' // nl // &
@@ -39,7 +40,8 @@ program test_test_c_helpers_cli
         'int main(void) { return 99; }' // nl)
     call write_text(join_path(consumer, 'test/second/helper.cpp'), &
         '#ifndef __cplusplus' // nl // '#error C++ compiler required' // nl // &
-        '#endif' // nl // 'extern "C" int helper(void) { return 42; }' // nl)
+        '#endif' // nl // '#include <string>' // nl // &
+        'extern "C" int helper(void) { return std::stoi(std::string("42")); }' // nl)
     call write_text(join_path(consumer, 'checks/custom/helper.c'), &
         'int helper(void) { return 63; }' // nl)
     call write_text(join_path(consumer, 'app/production.f90'), &

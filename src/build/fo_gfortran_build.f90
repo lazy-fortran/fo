@@ -81,6 +81,8 @@ module fo_gfortran_build
     logical, save :: detected_fc_is_executable = .false.
     character(len=512), save :: detected_compiler = ''
     character(len=HASH_LEN), save :: detected_tool_key = ''
+    character(len=HASH_LEN), save :: cxx_runtime_tool = ''
+    character(len=16), save :: cxx_runtime = ''
     !! The header the compiler driver pre-includes into every compile, as
     !! it said for the driver identity preinclude_driver; blank for none.
     character(len=HASH_LEN), save :: preinclude_driver = ''
@@ -93,6 +95,7 @@ module fo_gfortran_build
 
     type, private :: test_link_inputs_t
         character(len=512), allocatable :: objects(:)
+        character(len=:), allocatable :: flags
         character(len=HASH_LEN) :: digest = ''
     end type test_link_inputs_t
 
@@ -3595,7 +3598,7 @@ contains
         character(len=512) :: prog_obj, bin_path, app_bin_path
         character(len=512) :: archive_path, link_inputs(1)
         character(len=128) :: prog_name
-        character(len=512) :: link_flags
+        character(len=:), allocatable :: link_flags
         type(cache_t) :: c
         integer :: cache_ierr
         character(len=HASH_LEN) :: base_digest
@@ -3623,6 +3626,8 @@ contains
                 lib_objs(n_lib) = src_objs(i)
             end if
         end do
+
+        link_flags = with_cxx_runtime(link_flags, lib_objs(:n_lib), dep_objs(:n_dep_objs))
 
         ! Precompute the shared link inputs digest once, then link each program
         ! through the link cache (a relink is skipped on a digest hit).
@@ -4339,7 +4344,9 @@ contains
             if (manifest_config%link_shared) then
                 call shared_library(project_dir, all_lib_objs, n_all_lib, &
                     archive_path, log_file, exitcode, test_dep_objs, n_test_dep_objs, &
-                    link_libs, n_link_libs, test_flags, link_base)
+                    link_libs, n_link_libs, &
+                    with_cxx_runtime(test_flags, all_lib_objs(:n_all_lib), &
+                    test_dep_objs(:n_test_dep_objs)), link_base)
                 if (is_macos()) n_link_dep_objs = 0
             else
                 call archive_objects(project_dir, all_lib_objs, n_all_lib, &
@@ -4366,6 +4373,10 @@ contains
                 manifest_config, link_inputs(:n_link_inputs), log_file, &
                 test_links(i)%objects, exitcode)
             if (exitcode /= 0) return
+            test_links(i)%flags = with_cxx_runtime( &
+                with_cxx_runtime(test_flags, all_lib_objs(:n_all_lib), &
+                test_dep_objs(:n_test_dep_objs)), test_links(i)%objects, &
+                test_dep_objs(:n_link_dep_objs))
             test_links(i)%digest = link_base
             if (cache_ierr == 0 .and. &
                 size(test_links(i)%objects) > n_link_inputs) then
@@ -4391,6 +4402,8 @@ contains
             if (len_trim(test_links(i)%digest) > 0) test_key_flags = &
                 trim(test_key_flags)//new_line('a')//'test-link:'// &
                 trim(test_links(i)%digest)
+            test_key_flags = trim(test_key_flags)//new_line('a')// &
+                'test-link-flags:'//test_links(i)%flags
             if (len_trim(run_args(i)) > 0) then
                 test_key_flags = trim(test_key_flags)//new_line('a')// &
                     'test-args:'//trim(run_args(i))
@@ -4429,7 +4442,7 @@ contains
                 call link_binary(project_dir, obj_path, test_links(i)%objects, &
                     size(test_links(i)%objects), test_dep_objs, n_link_dep_objs, &
                     link_libs, n_link_libs, bin_path, log_local, run_exits(i), &
-                    test_flags, c, test_links(i)%digest, &
+                    test_links(i)%flags, c, test_links(i)%digest, &
                     compiler_identity=compiler)
             end if
         end do
@@ -4758,6 +4771,8 @@ contains
             call argv_push(packed, n_args, '-Wl,--no-whole-archive')
             call argv_push(packed, n_args, '-o')
             call argv_push(packed, n_args, stage_so)
+            call argv_push_split(packed, n_args, &
+                cxx_runtime_flags(objects(:n_objects), dep_objs(:n_dep_objs)))
         end if
         call process_run_argv_logged(project_dir, packed, n_args, log_file, &
             .true., build_timeout_seconds(), exitcode)
@@ -6176,332 +6191,421 @@ contains
         logical :: found
 
         program = adjustl(command)
-            space = index(trim(program), ' ')
-            if (space > 0) program = program(:space - 1)
-            call fs_find_executable(trim(command), executable, found)
-            if (.not. found) call fs_find_executable(trim(program), executable, found)
-            executable_key = ''
-            if (found) call cache_file_digest(trim(executable), executable_key)
-            parts(1) = command
-            parts(2) = executable
-            parts(3) = executable_key
-            key = cache_digest(parts, size(parts))
-        end function compiler_tool_key
+        space = index(trim(program), ' ')
+        if (space > 0) program = program(:space - 1)
+        call fs_find_executable(trim(command), executable, found)
+        if (.not. found) call fs_find_executable(trim(program), executable, found)
+        executable_key = ''
+        if (found) call cache_file_digest(trim(executable), executable_key)
+        parts(1) = command
+        parts(2) = executable
+        parts(3) = executable_key
+        key = cache_digest(parts, size(parts))
+    end function compiler_tool_key
 
-        recursive subroutine compile_f90(project_dir, source, objfile, includes_flag, log_file, &
-                exitcode, exact_flags, compiler, relocatable)
-            character(len=*), intent(in) :: project_dir, source, objfile, includes_flag
-            character(len=*), intent(in) :: log_file
-            integer, intent(out) :: exitcode
-            logical, intent(in), optional :: exact_flags
-            character(len=*), intent(in), optional :: compiler
-            !! source and includes_flag are already relative to project_dir;
-            !! the object is passed relative too, and PWD names project_dir
-            !! as the debug prefix map spells it.
-            logical, intent(in), optional :: relocatable
-            character(len=:), allocatable :: packed, base_flags, environment
-            integer :: n_args, n_removed
-            logical :: relative_output
+    recursive subroutine compile_f90(project_dir, source, objfile, includes_flag, log_file, &
+            exitcode, exact_flags, compiler, relocatable)
+        character(len=*), intent(in) :: project_dir, source, objfile, includes_flag
+        character(len=*), intent(in) :: log_file
+        integer, intent(out) :: exitcode
+        logical, intent(in), optional :: exact_flags
+        character(len=*), intent(in), optional :: compiler
+        !! source and includes_flag are already relative to project_dir;
+        !! the object is passed relative too, and PWD names project_dir
+        !! as the debug prefix map spells it.
+        logical, intent(in), optional :: relocatable
+        character(len=:), allocatable :: packed, base_flags, environment
+        integer :: n_args, n_removed
+        logical :: relative_output
 
-            relative_output = .false.
-            if (present(relocatable)) relative_output = relocatable
-            environment = ''
-            if (relative_output) environment = 'PWD='//trim(project_dir)
+        relative_output = .false.
+        if (present(relocatable)) relative_output = relocatable
+        environment = ''
+        if (relative_output) environment = 'PWD='//trim(project_dir)
 
-            ! Build an argv vector and spawn via the async-signal-safe argv runner
-            ! (fork+execve, no /bin/sh): it is safe inside the OpenMP parallel
-            ! compile/test loops, where system()/fork from a multithreaded process
-            ! corrupts libgomp, and it is quote-proof, unlike a shell command line.
-            !$omp critical (fo_compile_command)
-            n_args = 0
-            if (present(compiler)) then
-                if (len(compiler) > 0) then
-                    call argv_push(packed, n_args, compiler)
-                else
-                    call append_fc_command(packed, n_args)
-                end if
+        ! Build an argv vector and spawn via the async-signal-safe argv runner
+        ! (fork+execve, no /bin/sh): it is safe inside the OpenMP parallel
+        ! compile/test loops, where system()/fork from a multithreaded process
+        ! corrupts libgomp, and it is quote-proof, unlike a shell command line.
+        !$omp critical (fo_compile_command)
+        n_args = 0
+        if (present(compiler)) then
+            if (len(compiler) > 0) then
+                call argv_push(packed, n_args, compiler)
             else
                 call append_fc_command(packed, n_args)
             end if
-            call argv_push(packed, n_args, '-c')
-            if (present(exact_flags)) then
-                if (.not. exact_flags) then
-                    call fc_base_flags_into(base_flags)
-                    call argv_push_split(packed, n_args, base_flags)
-                end if
-            else
+        else
+            call append_fc_command(packed, n_args)
+        end if
+        call argv_push(packed, n_args, '-c')
+        if (present(exact_flags)) then
+            if (.not. exact_flags) then
                 call fc_base_flags_into(base_flags)
                 call argv_push_split(packed, n_args, base_flags)
             end if
-            call argv_push_split_nl(packed, n_args, includes_flag)
-            call argv_push(packed, n_args, '-o')
-            if (relative_output) then
-                call argv_push(packed, n_args, project_relative(objfile, project_dir))
-            else
-                call argv_push(packed, n_args, objfile)
-            end if
-            call argv_push(packed, n_args, source)
-            !$omp end critical (fo_compile_command)
-
-            ! A successful process must produce this action's output; an old object
-            ! cannot establish that the compiler actually compiled the new source.
-            call clear_compiler_object(objfile, log_file, exitcode)
-            if (exitcode /= 0) return
-            call process_run_argv_logged(project_dir, packed, n_args, log_file, &
-                .true., build_timeout_seconds(), exitcode, env_extra=environment)
-            if (exitcode == 124) call append_build_hang_hint(log_file, &
-                'compile of '//trim(source), build_timeout_seconds())
-            call validate_compiler_object(objfile, source, log_file, exitcode)
-            if (exitcode == 0) return
-            if (.not. looks_like_stale_mod_failure(log_file)) return
-
-            call clean_root_build_artifacts(project_dir, n_removed)
-            call append_stale_mod_hint(log_file, n_removed)
-
-            call clear_compiler_object(objfile, log_file, exitcode)
-            if (exitcode /= 0) return
-            call process_run_argv_logged(project_dir, packed, n_args, log_file, &
-                .true., build_timeout_seconds(), exitcode, env_extra=environment)
-            if (exitcode == 124) call append_build_hang_hint(log_file, &
-                'compile of '//trim(source), build_timeout_seconds())
-            call validate_compiler_object(objfile, source, log_file, exitcode)
-        end subroutine compile_f90
-
-        subroutine clear_compiler_object(objfile, log_file, exitcode)
-            character(len=*), intent(in) :: objfile, log_file
-            integer, intent(out) :: exitcode
-            integer :: unit, ios
-            logical :: exists
-
-            call fs_remove_file(objfile)
-            inquire (file=trim(objfile), exist=exists)
-            exitcode = 0
-            if (.not. exists) return
-            exitcode = 1
-            open (newunit=unit, file=trim(log_file), position='append', &
-                status='unknown', action='write', iostat=ios)
-            if (ios /= 0) return
-            write (unit, '(a)') 'fo: cannot remove previous compiler object: '//trim(objfile)
-            close (unit)
-        end subroutine clear_compiler_object
-
-        subroutine validate_compiler_object(objfile, source, log_file, exitcode)
-            character(len=*), intent(in) :: objfile, source, log_file
-            integer, intent(inout) :: exitcode
-            integer(int64) :: bytes
-            integer :: unit, ios
-            logical :: exists
-            character(len=:), allocatable :: command
-
-            if (exitcode /= 0) return
-            inquire (file=trim(objfile), exist=exists, size=bytes, iostat=ios)
-            if (ios == 0) then
-                if (exists) then
-                    if (bytes > 0) return
-                end if
-            end if
-            exitcode = 1
-            call fs_remove_file(objfile)
-            open (newunit=unit, file=trim(log_file), position='append', &
-                status='unknown', action='write', iostat=ios)
-            if (ios /= 0) return
-            write (unit, '(a)') 'fo: compiler produced no nonempty object: '//trim(objfile)
-            call fc_executable_command_into(command)
-            write (unit, '(a)') 'fo: compiler: '//command
-            write (unit, '(a)') 'fo: source: '//trim(source)
-            close (unit)
-        end subroutine validate_compiler_object
-
-        logical function looks_like_stale_mod_failure(log_file) result(matches)
-            character(len=*), intent(in) :: log_file
-
-            character(len=8192) :: text
-
-            call read_text_file(log_file, text)
-            matches = index(text, 'is not a GNU Fortran module file') > 0 .or. &
-                index(text, 'created by a different version of GNU Fortran') > 0 .or. &
-                index(text, 'Cannot open module file') > 0 .or. &
-                index(text, 'Fatal Error: Cannot read module file') > 0
-        end function looks_like_stale_mod_failure
-
-        subroutine append_stale_mod_hint(log_file, n_removed)
-            character(len=*), intent(in) :: log_file
-            integer, intent(in) :: n_removed
-
-            integer :: u, ios
-
-            open (newunit=u, file=trim(log_file), status='old', position='append', &
-                iostat=ios)
-            if (ios /= 0) return
-            write (u, '(a)') 'fo: possible stale root build artifacts detected.'
-            write (u, '(a)') 'fo: .mod/.smod/.o files in the project root can shadow build/fo/mod.'
-            write (u, '(a)') 'fo: VS Code Modern Fortran linting can create these files; set ' // &
-                'fortran.linter.modOutput outside the project root.'
-            if (n_removed > 0) then
-                write (u, '(a,i0,a)') 'fo: removed ', n_removed, &
-                    ' root build artifacts and retried once.'
-                write (error_unit, '(a,i0,a)') 'fo: removed ', n_removed, &
-                    ' stale root .mod, .smod, and .o build artifacts; retried once'
-            else
-                write (u, '(a)') 'fo: no root build artifacts were found to clean.'
-                write (error_unit, '(a)') &
-                    'fo: stale-module-like failure; root artifacts may already be clean'
-            end if
-            write (error_unit, '(a)') &
-                'fo: VS Code Modern Fortran users: set fortran.linter.modOutput outside the project root'
-            close (u)
-        end subroutine append_stale_mod_hint
-
-        subroutine collect_c_family(root, items, n_items)
-            !! Collect C and C++ sources under root into one list. A project that
-            !! binds a C++ library needs a shim compiled by a C++ compiler; keeping
-            !! the two extensions in one list means every call site that already
-            !! handled .c handles .cpp without a second loop.
-            character(len=*), intent(in) :: root
-            character(len=512), intent(out) :: items(:)
-            integer, intent(out) :: n_items
-
-            integer :: n_cxx
-
-            call fs_collect_files(root, '', '.c', '', items, n_items)
-            if (n_items >= size(items)) return
-            call fs_collect_files(root, '', '.cpp', '', &
-                items(n_items + 1:), n_cxx)
-            n_items = n_items + n_cxx
-        end subroutine collect_c_family
-
-        logical function is_cxx_source(path) result(is_cxx)
-            !! True for a C++ source, which must go to the C++ driver: g++ finds the
-            !! C++ standard headers and links the C++ runtime, gcc does neither.
-            character(len=*), intent(in) :: path
-            integer :: n
-            n = len_trim(path)
-            is_cxx = .false.
-            if (n >= 4) is_cxx = path(n - 3:n) == '.cpp'
-        end function is_cxx_source
-
-        subroutine compile_c_family(source, objfile, package_dir, log_file, exitcode, &
-                include_dev_deps)
-            character(len=*), intent(in) :: source, objfile, package_dir, log_file
-            integer, intent(out) :: exitcode
-            logical, intent(in) :: include_dev_deps
-            type(fpm_config_t), allocatable :: config
-            character(len=512) :: directories(MAX_DEP_DIRS), objects(MAX_DEP_OBJS)
-            character(:), allocatable :: packed
-            integer :: n_args, n_directories, n_objects, i
-
-            call fpm_config_allocate(config)
-            call fpm_config_parse(package_dir, config, exitcode)
-            if (exitcode /= 0) return
-            ! Dependency libraries consume their regular closure. Only sources
-            ! owned by the root may receive that root's development headers.
-            call find_dep_artifacts(package_dir, config, directories, n_directories, &
-                objects, n_objects, include_dev_deps)
-            n_args = 0
-            if (is_cxx_source(source)) then
-                call argv_push(packed, n_args, 'g++')
-                call argv_push(packed, n_args, '-std=c++17')
-                call argv_push(packed, n_args, '-fPIC')
-            else
-                call argv_push(packed, n_args, 'gcc')
-            end if
-            call argv_push(packed, n_args, '-c')
-            do i = 1, n_directories
-                call argv_push(packed, n_args, '-I')
-                call argv_push(packed, n_args, trim(directories(i)))
-            end do
-            call argv_push(packed, n_args, '-o')
+        else
+            call fc_base_flags_into(base_flags)
+            call argv_push_split(packed, n_args, base_flags)
+        end if
+        call argv_push_split_nl(packed, n_args, includes_flag)
+        call argv_push(packed, n_args, '-o')
+        if (relative_output) then
+            call argv_push(packed, n_args, project_relative(objfile, project_dir))
+        else
             call argv_push(packed, n_args, objfile)
-            call argv_push(packed, n_args, source)
-            call process_run_argv_logged('', packed, n_args, log_file, .true., &
-                build_timeout_seconds(), exitcode)
-        end subroutine compile_c_family
+        end if
+        call argv_push(packed, n_args, source)
+        !$omp end critical (fo_compile_command)
 
-        subroutine link_binary(project_dir, prog_obj, lib_objs, n_lib_objs, dep_objs, n_dep_objs, &
-                link_libs, n_link_libs, output, log_file, exitcode, flags, &
-                cache, base_digest, exact_flags, compiler_identity)
-            character(len=*), intent(in) :: project_dir
-            character(len=*), intent(in) :: prog_obj, output, log_file
-            character(len=512), intent(in) :: lib_objs(:)
-            integer, intent(in) :: n_lib_objs
-            character(len=512), intent(in) :: dep_objs(MAX_DEP_OBJS)
-            integer, intent(in) :: n_dep_objs
-            character(len=128), intent(in) :: link_libs(*)
-            integer, intent(in) :: n_link_libs
-            integer, intent(out) :: exitcode
-            ! user flags forwarded to linker (e.g. -fsanitize=address needs to be
-            ! present at link time so the runtime library is linked in)
-            character(len=*), intent(in), optional :: flags
-            ! Link-cache handle and the precomputed digest of all shared link
-            ! inputs (library + dep objects + resolved archives). When both are
-            ! present, the link is an action keyed by (toolchain, flags, base_digest,
-            ! this program object): a cache hit restores the binary instead of
-            ! relinking. Linking is the dominant warm-build cost otherwise.
-            type(cache_t), intent(in), optional :: cache
-            character(len=*), intent(in), optional :: base_digest
-            logical, intent(in), optional :: exact_flags
-            character(len=*), intent(in), optional :: compiler_identity
+        ! A successful process must produce this action's output; an old object
+        ! cannot establish that the compiler actually compiled the new source.
+        call clear_compiler_object(objfile, log_file, exitcode)
+        if (exitcode /= 0) return
+        call process_run_argv_logged(project_dir, packed, n_args, log_file, &
+            .true., build_timeout_seconds(), exitcode, env_extra=environment)
+        if (exitcode == 124) call append_build_hang_hint(log_file, &
+            'compile of '//trim(source), build_timeout_seconds())
+        call validate_compiler_object(objfile, source, log_file, exitcode)
+        if (exitcode == 0) return
+        if (.not. looks_like_stale_mod_failure(log_file)) return
 
-            character(len=:), allocatable :: packed
-            character(len=8) :: debug_links
-            integer :: debug_status
-            integer :: n_args
-            logical :: do_cache, restored, use_lld
-            character(len=HASH_LEN) :: action_id, prog_key
-            character(len=512) :: key_parts(8), lld_log, compiler
-            character(len=1024) :: stage_dir, staged_output, restore_bin
-            character(len=:), allocatable :: flags_str, command, lib_flags, display
-            integer :: store_ierr, reserve_rc, copy_rc, rename_rc
-            logical :: valid_image
+        call clean_root_build_artifacts(project_dir, n_removed)
+        call append_stale_mod_hint(log_file, n_removed)
 
-            flags_str = ''
-            if (present(flags)) flags_str = trim(flags)
-            exitcode = 1
-            call fc_command_into(command)
-            call select_linker(command, use_lld)
-            if (present(exact_flags)) then
-                if (exact_flags) use_lld = .false.
+        call clear_compiler_object(objfile, log_file, exitcode)
+        if (exitcode /= 0) return
+        call process_run_argv_logged(project_dir, packed, n_args, log_file, &
+            .true., build_timeout_seconds(), exitcode, env_extra=environment)
+        if (exitcode == 124) call append_build_hang_hint(log_file, &
+            'compile of '//trim(source), build_timeout_seconds())
+        call validate_compiler_object(objfile, source, log_file, exitcode)
+    end subroutine compile_f90
+
+    subroutine clear_compiler_object(objfile, log_file, exitcode)
+        character(len=*), intent(in) :: objfile, log_file
+        integer, intent(out) :: exitcode
+        integer :: unit, ios
+        logical :: exists
+
+        call fs_remove_file(objfile)
+        inquire (file=trim(objfile), exist=exists)
+        exitcode = 0
+        if (.not. exists) return
+        exitcode = 1
+        open (newunit=unit, file=trim(log_file), position='append', &
+            status='unknown', action='write', iostat=ios)
+        if (ios /= 0) return
+        write (unit, '(a)') 'fo: cannot remove previous compiler object: '//trim(objfile)
+        close (unit)
+    end subroutine clear_compiler_object
+
+    subroutine validate_compiler_object(objfile, source, log_file, exitcode)
+        character(len=*), intent(in) :: objfile, source, log_file
+        integer, intent(inout) :: exitcode
+        integer(int64) :: bytes
+        integer :: unit, ios
+        logical :: exists
+        character(len=:), allocatable :: command
+
+        if (exitcode /= 0) return
+        inquire (file=trim(objfile), exist=exists, size=bytes, iostat=ios)
+        if (ios == 0) then
+            if (exists) then
+                if (bytes > 0) return
             end if
+        end if
+        exitcode = 1
+        call fs_remove_file(objfile)
+        open (newunit=unit, file=trim(log_file), position='append', &
+            status='unknown', action='write', iostat=ios)
+        if (ios /= 0) return
+        write (unit, '(a)') 'fo: compiler produced no nonempty object: '//trim(objfile)
+        call fc_executable_command_into(command)
+        write (unit, '(a)') 'fo: compiler: '//command
+        write (unit, '(a)') 'fo: source: '//trim(source)
+        close (unit)
+    end subroutine validate_compiler_object
 
-            do_cache = present(cache) .and. present(base_digest)
-            if (do_cache) do_cache = len_trim(base_digest) > 0
-            if (do_cache) then
-                call cache_file_digest(prog_obj, prog_key)
-                key_parts(1) = 'fo-link-4'
-                if (present(exact_flags)) then
-                    if (exact_flags) key_parts(1) = 'fo-declared-link-2'
+    logical function looks_like_stale_mod_failure(log_file) result(matches)
+        character(len=*), intent(in) :: log_file
+
+        character(len=8192) :: text
+
+        call read_text_file(log_file, text)
+        matches = index(text, 'is not a GNU Fortran module file') > 0 .or. &
+            index(text, 'created by a different version of GNU Fortran') > 0 .or. &
+            index(text, 'Cannot open module file') > 0 .or. &
+            index(text, 'Fatal Error: Cannot read module file') > 0
+    end function looks_like_stale_mod_failure
+
+    subroutine append_stale_mod_hint(log_file, n_removed)
+        character(len=*), intent(in) :: log_file
+        integer, intent(in) :: n_removed
+
+        integer :: u, ios
+
+        open (newunit=u, file=trim(log_file), status='old', position='append', &
+            iostat=ios)
+        if (ios /= 0) return
+        write (u, '(a)') 'fo: possible stale root build artifacts detected.'
+        write (u, '(a)') 'fo: .mod/.smod/.o files in the project root can shadow build/fo/mod.'
+        write (u, '(a)') 'fo: VS Code Modern Fortran linting can create these files; set ' // &
+            'fortran.linter.modOutput outside the project root.'
+        if (n_removed > 0) then
+            write (u, '(a,i0,a)') 'fo: removed ', n_removed, &
+                ' root build artifacts and retried once.'
+            write (error_unit, '(a,i0,a)') 'fo: removed ', n_removed, &
+                ' stale root .mod, .smod, and .o build artifacts; retried once'
+        else
+            write (u, '(a)') 'fo: no root build artifacts were found to clean.'
+            write (error_unit, '(a)') &
+                'fo: stale-module-like failure; root artifacts may already be clean'
+        end if
+        write (error_unit, '(a)') &
+            'fo: VS Code Modern Fortran users: set fortran.linter.modOutput outside the project root'
+        close (u)
+    end subroutine append_stale_mod_hint
+
+    subroutine collect_c_family(root, items, n_items)
+        !! Collect C and C++ sources under root into one list. A project that
+        !! binds a C++ library needs a shim compiled by a C++ compiler; keeping
+        !! the two extensions in one list means every call site that already
+        !! handled .c handles .cpp without a second loop.
+        character(len=*), intent(in) :: root
+        character(len=512), intent(out) :: items(:)
+        integer, intent(out) :: n_items
+
+        integer :: n_cxx
+
+        call fs_collect_files(root, '', '.c', '', items, n_items)
+        if (n_items >= size(items)) return
+        call fs_collect_files(root, '', '.cpp', '', &
+            items(n_items + 1:), n_cxx)
+        n_items = n_items + n_cxx
+    end subroutine collect_c_family
+
+    logical function is_cxx_source(path) result(is_cxx)
+        !! True for a C++ source, which must go to the C++ driver: g++ finds the
+        !! C++ standard headers and links the C++ runtime, gcc does neither.
+        character(len=*), intent(in) :: path
+        integer :: n
+        n = len_trim(path)
+        is_cxx = .false.
+        if (n >= 4) is_cxx = path(n - 3:n) == '.cpp'
+    end function is_cxx_source
+
+    function with_cxx_runtime(flags, objects, dependencies) result(combined)
+        character(len=*), intent(in) :: flags, objects(:), dependencies(:)
+        character(len=:), allocatable :: combined, runtime
+
+        combined = trim(flags)
+        runtime = cxx_runtime_flags(objects, dependencies)
+        if (len(runtime) == 0) return
+        if (index(' '//trim(flags)//' ', ' '//runtime//' ') > 0) return
+        combined = trim(flags)//' '//runtime
+    end function with_cxx_runtime
+
+    function cxx_runtime_flags(objects, dependencies) result(flags)
+        character(len=*), intent(in) :: objects(:), dependencies(:)
+        character(len=:), allocatable :: flags, packed, macros
+        character(len=HASH_LEN) :: tool
+        character(len=512) :: log_file, source_file
+        integer :: i, n, n_args, exitcode, ierr, unit
+        logical :: needed
+
+        flags = ''
+        needed = .false.
+        do i = 1, size(objects)
+            n = len_trim(objects(i))
+            if (n >= 6) needed = needed .or. objects(i)(n - 5:n) == '.cpp.o'
+        end do
+        do i = 1, size(dependencies)
+            n = len_trim(dependencies(i))
+            if (n >= 6) needed = needed .or. dependencies(i)(n - 5:n) == '.cpp.o'
+        end do
+        if (.not. needed) return
+        tool = compiler_tool_key('g++')
+        if (tool /= cxx_runtime_tool) then
+            ! Compiler headers identify the ABI before parallel link workers start.
+            cxx_runtime = ''
+            call make_tmpfile('fo_cxx_source', source_file)
+            open (newunit=unit, file=trim(source_file), status='new', &
+                action='write', iostat=ierr)
+            if (ierr /= 0) return
+            close (unit)
+            n_args = 0
+            call argv_push(packed, n_args, 'g++')
+            call argv_push_split(packed, n_args, &
+                '-std=c++17 -dM -E -x c++ -include cstddef')
+            call argv_push(packed, n_args, trim(source_file))
+            call make_tmpfile('fo_cxx_runtime', log_file)
+            call process_run_argv_logged('', packed, n_args, log_file, &
+                .false., 30, exitcode)
+            macros = ''
+            if (exitcode == 0) call read_text_file_alloc(log_file, macros, ierr)
+            call delete_tmpfile(log_file)
+            call delete_tmpfile(source_file)
+            if (index(macros, '#define _LIBCPP_VERSION ') > 0) then
+                cxx_runtime = '-lc++'
+            else if (index(macros, '#define __GLIBCXX__ ') > 0) then
+                cxx_runtime = '-lstdc++'
+            end if
+            cxx_runtime_tool = tool
+        end if
+        flags = trim(cxx_runtime)
+    end function cxx_runtime_flags
+
+    subroutine compile_c_family(source, objfile, package_dir, log_file, exitcode, &
+            include_dev_deps)
+        character(len=*), intent(in) :: source, objfile, package_dir, log_file
+        integer, intent(out) :: exitcode
+        logical, intent(in) :: include_dev_deps
+        type(fpm_config_t), allocatable :: config
+        character(len=512) :: directories(MAX_DEP_DIRS), objects(MAX_DEP_OBJS)
+        character(:), allocatable :: packed
+        integer :: n_args, n_directories, n_objects, i
+
+        call fpm_config_allocate(config)
+        call fpm_config_parse(package_dir, config, exitcode)
+        if (exitcode /= 0) return
+        ! Dependency libraries consume their regular closure. Only sources
+        ! owned by the root may receive that root's development headers.
+        call find_dep_artifacts(package_dir, config, directories, n_directories, &
+            objects, n_objects, include_dev_deps)
+        n_args = 0
+        if (is_cxx_source(source)) then
+            call argv_push(packed, n_args, 'g++')
+            call argv_push(packed, n_args, '-std=c++17')
+            call argv_push(packed, n_args, '-fPIC')
+        else
+            call argv_push(packed, n_args, 'gcc')
+        end if
+        call argv_push(packed, n_args, '-c')
+        do i = 1, n_directories
+            call argv_push(packed, n_args, '-I')
+            call argv_push(packed, n_args, trim(directories(i)))
+        end do
+        call argv_push(packed, n_args, '-o')
+        call argv_push(packed, n_args, objfile)
+        call argv_push(packed, n_args, source)
+        call process_run_argv_logged('', packed, n_args, log_file, .true., &
+            build_timeout_seconds(), exitcode)
+    end subroutine compile_c_family
+
+    subroutine link_binary(project_dir, prog_obj, lib_objs, n_lib_objs, dep_objs, n_dep_objs, &
+            link_libs, n_link_libs, output, log_file, exitcode, flags, &
+            cache, base_digest, exact_flags, compiler_identity)
+        character(len=*), intent(in) :: project_dir
+        character(len=*), intent(in) :: prog_obj, output, log_file
+        character(len=512), intent(in) :: lib_objs(:)
+        integer, intent(in) :: n_lib_objs
+        character(len=512), intent(in) :: dep_objs(MAX_DEP_OBJS)
+        integer, intent(in) :: n_dep_objs
+        character(len=128), intent(in) :: link_libs(*)
+        integer, intent(in) :: n_link_libs
+        integer, intent(out) :: exitcode
+        ! user flags forwarded to linker (e.g. -fsanitize=address needs to be
+        ! present at link time so the runtime library is linked in)
+        character(len=*), intent(in), optional :: flags
+        ! Link-cache handle and the precomputed digest of all shared link
+        ! inputs (library + dep objects + resolved archives). When both are
+        ! present, the link is an action keyed by (toolchain, flags, base_digest,
+        ! this program object): a cache hit restores the binary instead of
+        ! relinking. Linking is the dominant warm-build cost otherwise.
+        type(cache_t), intent(in), optional :: cache
+        character(len=*), intent(in), optional :: base_digest
+        logical, intent(in), optional :: exact_flags
+        character(len=*), intent(in), optional :: compiler_identity
+
+        character(len=:), allocatable :: packed
+        character(len=8) :: debug_links
+        integer :: debug_status
+        integer :: n_args
+        logical :: do_cache, restored, use_lld
+        character(len=HASH_LEN) :: action_id, prog_key
+        character(len=512) :: key_parts(8), lld_log, compiler
+        character(len=1024) :: stage_dir, staged_output, restore_bin
+        character(len=:), allocatable :: flags_str, command, lib_flags, display
+        integer :: store_ierr, reserve_rc, copy_rc, rename_rc
+        logical :: valid_image
+
+        flags_str = ''
+        if (present(flags)) flags_str = trim(flags)
+        exitcode = 1
+        call fc_command_into(command)
+        call select_linker(command, use_lld)
+        if (present(exact_flags)) then
+            if (exact_flags) use_lld = .false.
+        end if
+
+        do_cache = present(cache) .and. present(base_digest)
+        if (do_cache) do_cache = len_trim(base_digest) > 0
+        if (do_cache) then
+            call cache_file_digest(prog_obj, prog_key)
+            key_parts(1) = 'fo-link-4'
+            if (present(exact_flags)) then
+                if (exact_flags) key_parts(1) = 'fo-declared-link-2'
+            end if
+            key_parts(2) = trim(command)
+            key_parts(3) = 'default'
+            if (use_lld) key_parts(3) = 'lld-with-default-fallback'
+            key_parts(4) = flags_str
+            call link_lib_flags_into(project_dir, link_libs, n_link_libs, lib_flags)
+            key_parts(5) = trim(lib_flags)
+            key_parts(6) = trim(base_digest)
+            key_parts(7) = trim(prog_key)
+            ! The parallel test loop resolved this before starting workers.
+            ! Redetection clears the shared executable path while a peer may
+            ! be packing argv, making its object file become argv[0].
+            if (present(compiler_identity)) then
+                compiler = compiler_identity
+            else
+                call detect_compiler(compiler)
+            end if
+            key_parts(8) = compiler
+            action_id = cache_digest(key_parts, 8)
+            ! Fast path: the output is already the binary this action produces.
+            ! Leave it untouched - no relink, no copy. This is what keeps warm
+            ! builds cheap when outputs are large (2.4 GB of static binaries).
+            call cache_binary_matches(cache, action_id, output, restored)
+            if (restored) then
+                call native_image_valid(output, valid_image)
+                if (valid_image) then
+                    exitcode = 0
+                    return
                 end if
-                key_parts(2) = trim(command)
-                key_parts(3) = 'default'
-                if (use_lld) key_parts(3) = 'lld-with-default-fallback'
-                key_parts(4) = flags_str
-                call link_lib_flags_into(project_dir, link_libs, n_link_libs, lib_flags)
-                key_parts(5) = trim(lib_flags)
-                key_parts(6) = trim(base_digest)
-                key_parts(7) = trim(prog_key)
-                ! The parallel test loop resolved this before starting workers.
-                ! Redetection clears the shared executable path while a peer may
-                ! be packing argv, making its object file become argv[0].
-                if (present(compiler_identity)) then
-                    compiler = compiler_identity
-                else
-                    call detect_compiler(compiler)
-                end if
-                key_parts(8) = compiler
-                action_id = cache_digest(key_parts, 8)
-                ! Fast path: the output is already the binary this action produces.
-                ! Leave it untouched - no relink, no copy. This is what keeps warm
-                ! builds cheap when outputs are large (2.4 GB of static binaries).
-                call cache_binary_matches(cache, action_id, output, restored)
-                if (restored) then
-                    call native_image_valid(output, valid_image)
+            end if
+        end if
+
+        call reserve_link_stage(output, stage_dir, staged_output, reserve_rc)
+        if (reserve_rc /= 0) then
+            call append_artifact_error(log_file, &
+                'fo: could not reserve executable staging directory')
+            exitcode = 1
+            return
+        end if
+        if (do_cache) then
+            ! Restore into the owned stage, then publish it with the same atomic
+            ! rename used for a fresh linker output.
+            restore_bin = trim(stage_dir)//'/cached'
+            call cache_restore_binary(cache, action_id, restore_bin, restored)
+            if (restored) then
+                copy_rc = fs_copy_exec(trim(restore_bin), trim(staged_output))
+                call fs_remove_file(trim(restore_bin))
+                if (copy_rc == 0) then
+                    call native_image_valid(staged_output, valid_image)
                     if (valid_image) then
-                        exitcode = 0
-                        return
+                        rename_rc = fs_rename(trim(staged_output), trim(output))
+                        if (rename_rc == 0) then
+                            call fs_remove_tree(trim(stage_dir))
+                            exitcode = 0
+                            return
+                        end if
                     end if
                 end if
             end if
-
+            call fs_remove_tree(trim(stage_dir))
             call reserve_link_stage(output, stage_dir, staged_output, reserve_rc)
             if (reserve_rc /= 0) then
                 call append_artifact_error(log_file, &
@@ -6509,439 +6613,411 @@ contains
                 exitcode = 1
                 return
             end if
-            if (do_cache) then
-                ! Restore into the owned stage, then publish it with the same atomic
-                ! rename used for a fresh linker output.
-                restore_bin = trim(stage_dir)//'/cached'
-                call cache_restore_binary(cache, action_id, restore_bin, restored)
-                if (restored) then
-                    copy_rc = fs_copy_exec(trim(restore_bin), trim(staged_output))
-                    call fs_remove_file(trim(restore_bin))
-                    if (copy_rc == 0) then
-                        call native_image_valid(staged_output, valid_image)
-                        if (valid_image) then
-                            rename_rc = fs_rename(trim(staged_output), trim(output))
-                            if (rename_rc == 0) then
-                                call fs_remove_tree(trim(stage_dir))
-                                exitcode = 0
-                                return
-                            end if
-                        end if
-                    end if
-                end if
-                call fs_remove_tree(trim(stage_dir))
-                call reserve_link_stage(output, stage_dir, staged_output, reserve_rc)
-                if (reserve_rc /= 0) then
-                    call append_artifact_error(log_file, &
-                        'fo: could not reserve executable staging directory')
-                    exitcode = 1
-                    return
-                end if
-            end if
+        end if
 
-            ! Build an argv vector (no /bin/sh): quote-proof and async-signal-safe,
-            ! since link_binary runs inside the parallel test loop where a shell
-            ! fork would corrupt libgomp.
-            call get_environment_variable('FO_DEBUG_LINKS', debug_links, &
-                status=debug_status)
+        ! Build an argv vector (no /bin/sh): quote-proof and async-signal-safe,
+        ! since link_binary runs inside the parallel test loop where a shell
+        ! fork would corrupt libgomp.
+        call get_environment_variable('FO_DEBUG_LINKS', debug_links, &
+            status=debug_status)
+        call make_link_argv(project_dir, prog_obj, lib_objs, n_lib_objs, dep_objs, &
+            n_dep_objs, link_libs, n_link_libs, staged_output, flags_str, use_lld, &
+            packed, n_args, exact_flags=exact_flags)
+        if (debug_status == 0 .and. len_trim(debug_links) > 0) then
+            call argv_display_into(packed, display)
+            write (error_unit, '(a)') 'fo link: '//display
+        end if
+        if (use_lld) then
+            call make_tmpfile('fo_lld_link', lld_log)
+            call process_run_argv_logged('', packed, n_args, lld_log, .true., &
+                build_timeout_seconds(), exitcode)
+            call delete_tmpfile(lld_log)
+        end if
+        if (.not. use_lld .or. exitcode /= 0) then
+            call fs_remove_file(trim(staged_output))
             call make_link_argv(project_dir, prog_obj, lib_objs, n_lib_objs, dep_objs, &
-                n_dep_objs, link_libs, n_link_libs, staged_output, flags_str, use_lld, &
+                n_dep_objs, link_libs, n_link_libs, staged_output, flags_str, .false., &
                 packed, n_args, exact_flags=exact_flags)
-            if (debug_status == 0 .and. len_trim(debug_links) > 0) then
+            if (use_lld .and. debug_status == 0 .and. len_trim(debug_links) > 0) then
                 call argv_display_into(packed, display)
-                write (error_unit, '(a)') 'fo link: '//display
+                write (error_unit, '(a)') 'fo link fallback: '//display
             end if
-            if (use_lld) then
-                call make_tmpfile('fo_lld_link', lld_log)
-                call process_run_argv_logged('', packed, n_args, lld_log, .true., &
-                    build_timeout_seconds(), exitcode)
-                call delete_tmpfile(lld_log)
-            end if
-            if (.not. use_lld .or. exitcode /= 0) then
-                call fs_remove_file(trim(staged_output))
-                call make_link_argv(project_dir, prog_obj, lib_objs, n_lib_objs, dep_objs, &
-                    n_dep_objs, link_libs, n_link_libs, staged_output, flags_str, .false., &
-                    packed, n_args, exact_flags=exact_flags)
-                if (use_lld .and. debug_status == 0 .and. len_trim(debug_links) > 0) then
-                    call argv_display_into(packed, display)
-                    write (error_unit, '(a)') 'fo link fallback: '//display
-                end if
-                call process_run_argv_logged('', packed, n_args, log_file, .true., &
-                    build_timeout_seconds(), exitcode)
-            end if
-            if (exitcode == 124) call append_build_hang_hint(log_file, &
-                'link of '//trim(output), build_timeout_seconds())
+            call process_run_argv_logged('', packed, n_args, log_file, .true., &
+                build_timeout_seconds(), exitcode)
+        end if
+        if (exitcode == 124) call append_build_hang_hint(log_file, &
+            'link of '//trim(output), build_timeout_seconds())
 
-            if (exitcode /= 0) then
-                call fs_remove_tree(trim(stage_dir))
-                return
-            end if
-            call native_image_valid(staged_output, valid_image)
-            if (.not. valid_image) then
-                call append_artifact_error(log_file, &
-                    'fo: linker output is not a valid executable image')
-                call fs_remove_tree(trim(stage_dir))
-                exitcode = 1
-                return
-            end if
-            ! Cache only this producer's private bytes. Once published, output may
-            ! immediately be replaced by a different action's complete binary.
-            if (do_cache) &
-                call cache_store_binary(cache, action_id, staged_output, store_ierr)
-            rename_rc = fs_rename(trim(staged_output), trim(output))
-            if (rename_rc /= 0) then
-                call append_artifact_error(log_file, &
-                    'fo: could not atomically publish executable')
-                call fs_remove_tree(trim(stage_dir))
-                exitcode = 1
-                return
-            end if
+        if (exitcode /= 0) then
             call fs_remove_tree(trim(stage_dir))
-        end subroutine link_binary
+            return
+        end if
+        call native_image_valid(staged_output, valid_image)
+        if (.not. valid_image) then
+            call append_artifact_error(log_file, &
+                'fo: linker output is not a valid executable image')
+            call fs_remove_tree(trim(stage_dir))
+            exitcode = 1
+            return
+        end if
+        ! Cache only this producer's private bytes. Once published, output may
+        ! immediately be replaced by a different action's complete binary.
+        if (do_cache) &
+            call cache_store_binary(cache, action_id, staged_output, store_ierr)
+        rename_rc = fs_rename(trim(staged_output), trim(output))
+        if (rename_rc /= 0) then
+            call append_artifact_error(log_file, &
+                'fo: could not atomically publish executable')
+            call fs_remove_tree(trim(stage_dir))
+            exitcode = 1
+            return
+        end if
+        call fs_remove_tree(trim(stage_dir))
+    end subroutine link_binary
 
-        subroutine reserve_link_stage(output, stage_dir, staged_output, reserve_rc)
-            character(len=*), intent(in) :: output
-            character(len=*), intent(out) :: stage_dir, staged_output
-            integer, intent(out) :: reserve_rc
+    subroutine reserve_link_stage(output, stage_dir, staged_output, reserve_rc)
+        character(len=*), intent(in) :: output
+        character(len=*), intent(out) :: stage_dir, staged_output
+        integer, intent(out) :: reserve_rc
 
-            character(len=1024) :: parent_dir
-            integer :: i, slash
-            logical :: exists
+        character(len=1024) :: parent_dir
+        integer :: i, slash
+        logical :: exists
 
-            slash = index(trim(output), '/', back=.true.)
-            parent_dir = '.'
-            if (slash == 1) then
-                parent_dir = '/'
-            else if (slash > 1) then
-                parent_dir = output(:slash - 1)
+        slash = index(trim(output), '/', back=.true.)
+        parent_dir = '.'
+        if (slash == 1) then
+            parent_dir = '/'
+        else if (slash > 1) then
+            parent_dir = output(:slash - 1)
+        end if
+        reserve_rc = 1
+        do i = 1, 100
+            call make_sibling_tmpfile(trim(parent_dir)//'/.fo-link', stage_dir)
+            reserve_rc = fs_mkdir_excl(trim(stage_dir))
+            if (reserve_rc /= 0) then
+                if (reserve_rc < 0) return
+                cycle
             end if
+            staged_output = trim(stage_dir)//'/binary'
+            if (fs_is_windows()) staged_output = trim(staged_output)//'.exe'
+            inquire (file=trim(staged_output), exist=exists)
+            if (.not. exists) return
+            call fs_remove_tree(trim(stage_dir))
             reserve_rc = 1
-            do i = 1, 100
-                call make_sibling_tmpfile(trim(parent_dir)//'/.fo-link', stage_dir)
-                reserve_rc = fs_mkdir_excl(trim(stage_dir))
-                if (reserve_rc /= 0) then
-                    if (reserve_rc < 0) return
-                    cycle
+        end do
+    end subroutine reserve_link_stage
+
+    subroutine make_link_argv(project_dir, prog_obj, lib_objs, n_lib_objs, dep_objs, &
+            n_dep_objs, link_libs, n_link_libs, output, flags, use_lld, packed, n_args, &
+            install_name, exact_flags)
+        character(len=*), intent(in) :: project_dir, prog_obj, output, flags
+        character(len=512), intent(in) :: lib_objs(:)
+        integer, intent(in) :: n_lib_objs
+        character(len=512), intent(in) :: dep_objs(MAX_DEP_OBJS)
+        integer, intent(in) :: n_dep_objs
+        character(len=128), intent(in) :: link_libs(*)
+        integer, intent(in) :: n_link_libs
+        logical, intent(in) :: use_lld
+        character(len=:), allocatable, intent(out) :: packed
+        integer, intent(out) :: n_args
+        character(len=*), intent(in), optional :: install_name
+        logical, intent(in), optional :: exact_flags
+
+        integer :: i
+        character(len=512) :: policy_flag
+        character(len=:), allocatable :: lib_flags, link_policy
+        logical :: declared_link
+
+        n_args = 0
+        call append_fc_command(packed, n_args)
+        if (use_lld) call argv_push(packed, n_args, '-fuse-ld=lld')
+        call argv_push(packed, n_args, prog_obj)
+        ! Ordinary dependency objects may call into the project archive.
+        ! Introduce those references before the linker scans its members.
+        do i = 1, n_dep_objs
+            call argv_push(packed, n_args, dep_objs(i))
+        end do
+        do i = 1, n_lib_objs
+            call argv_push(packed, n_args, lib_objs(i))
+        end do
+        declared_link = .false.
+        if (present(exact_flags)) declared_link = exact_flags
+        if (declared_link) then
+            do i = 1, n_link_libs
+                if (index(trim(link_libs(i)), '/') > 0 .or. &
+                    index(trim(link_libs(i)), achar(92)) > 0 .or. &
+                    index(trim(link_libs(i)), '-') == 1) then
+                    call argv_push(packed, n_args, trim(link_libs(i)))
+                else
+                    call argv_push(packed, n_args, '-l'//trim(link_libs(i)))
                 end if
-                staged_output = trim(stage_dir)//'/binary'
-                if (fs_is_windows()) staged_output = trim(staged_output)//'.exe'
-                inquire (file=trim(staged_output), exist=exists)
-                if (.not. exists) return
-                call fs_remove_tree(trim(stage_dir))
-                reserve_rc = 1
             end do
-        end subroutine reserve_link_stage
-
-        subroutine make_link_argv(project_dir, prog_obj, lib_objs, n_lib_objs, dep_objs, &
-                n_dep_objs, link_libs, n_link_libs, output, flags, use_lld, packed, n_args, &
-                install_name, exact_flags)
-            character(len=*), intent(in) :: project_dir, prog_obj, output, flags
-            character(len=512), intent(in) :: lib_objs(:)
-            integer, intent(in) :: n_lib_objs
-            character(len=512), intent(in) :: dep_objs(MAX_DEP_OBJS)
-            integer, intent(in) :: n_dep_objs
-            character(len=128), intent(in) :: link_libs(*)
-            integer, intent(in) :: n_link_libs
-            logical, intent(in) :: use_lld
-            character(len=:), allocatable, intent(out) :: packed
-            integer, intent(out) :: n_args
-            character(len=*), intent(in), optional :: install_name
-            logical, intent(in), optional :: exact_flags
-
-            integer :: i
-            character(len=512) :: policy_flag
-            character(len=:), allocatable :: lib_flags, link_policy
-            logical :: declared_link
-
-            n_args = 0
-            call append_fc_command(packed, n_args)
-            if (use_lld) call argv_push(packed, n_args, '-fuse-ld=lld')
-            call argv_push(packed, n_args, prog_obj)
-            ! Ordinary dependency objects may call into the project archive.
-            ! Introduce those references before the linker scans its members.
-            do i = 1, n_dep_objs
-                call argv_push(packed, n_args, dep_objs(i))
-            end do
-            do i = 1, n_lib_objs
-                call argv_push(packed, n_args, lib_objs(i))
-            end do
-            declared_link = .false.
-            if (present(exact_flags)) declared_link = exact_flags
-            if (declared_link) then
-                do i = 1, n_link_libs
-                    if (index(trim(link_libs(i)), '/') > 0 .or. &
-                        index(trim(link_libs(i)), achar(92)) > 0 .or. &
-                        index(trim(link_libs(i)), '-') == 1) then
-                        call argv_push(packed, n_args, trim(link_libs(i)))
-                    else
-                        call argv_push(packed, n_args, '-l'//trim(link_libs(i)))
-                    end if
-                end do
-            else
-                call link_lib_flags_into(project_dir, link_libs, n_link_libs, lib_flags)
-                call argv_push_split_nl(packed, n_args, lib_flags)
-            end if
-            ! flang's driver does not add Homebrew's libomp to the link search, so
-            ! -fopenmp links fail with "library 'omp' not found". Add it (harmless
-            ! when the build does not use OpenMP) plus an rpath for runtime.
-            if (fc_is_flang() .and. is_macos()) then
-                call argv_push(packed, n_args, '-L/opt/homebrew/opt/libomp/lib')
-                call argv_push(packed, n_args, '-Wl,-rpath,/opt/homebrew/opt/libomp/lib')
-            end if
-            if (len_trim(flags) > 0) call argv_push_split(packed, n_args, flags)
-            policy_flag = ''
-            if (present(exact_flags)) then
-                if (.not. exact_flags) then
-                    call fc_link_policy_flags_into(link_policy)
-                    policy_flag = link_policy
-                end if
-            else
+        else
+            call link_lib_flags_into(project_dir, link_libs, n_link_libs, lib_flags)
+            call argv_push_split_nl(packed, n_args, lib_flags)
+        end if
+        ! flang's driver does not add Homebrew's libomp to the link search, so
+        ! -fopenmp links fail with "library 'omp' not found". Add it (harmless
+        ! when the build does not use OpenMP) plus an rpath for runtime.
+        if (fc_is_flang() .and. is_macos()) then
+            call argv_push(packed, n_args, '-L/opt/homebrew/opt/libomp/lib')
+            call argv_push(packed, n_args, '-Wl,-rpath,/opt/homebrew/opt/libomp/lib')
+        end if
+        if (len_trim(flags) > 0) call argv_push_split(packed, n_args, flags)
+        policy_flag = ''
+        if (present(exact_flags)) then
+            if (.not. exact_flags) then
                 call fc_link_policy_flags_into(link_policy)
                 policy_flag = link_policy
             end if
-            if (len_trim(policy_flag) > 0) call argv_push_split(packed, n_args, policy_flag)
-            if (present(install_name)) then
-                if (len_trim(install_name) > 0) &
-                    call argv_push(packed, n_args, &
-                    '-Wl,-install_name,'//trim(install_name))
-            end if
-            call argv_push(packed, n_args, '-o')
-            call argv_push(packed, n_args, output)
-        end subroutine make_link_argv
+        else
+            call fc_link_policy_flags_into(link_policy)
+            policy_flag = link_policy
+        end if
+        if (len_trim(policy_flag) > 0) call argv_push_split(packed, n_args, policy_flag)
+        if (present(install_name)) then
+            if (len_trim(install_name) > 0) &
+                call argv_push(packed, n_args, &
+                '-Wl,-install_name,'//trim(install_name))
+        end if
+        call argv_push(packed, n_args, '-o')
+        call argv_push(packed, n_args, output)
+    end subroutine make_link_argv
 
-        function argv_display(packed) result(text)
-            !! Render a packed NUL-separated argv buffer as a space-joined string
-            !! for human-readable debug output only.
-            character(len=*), intent(in) :: packed
-            character(len=:), allocatable :: text
+    function argv_display(packed) result(text)
+        !! Render a packed NUL-separated argv buffer as a space-joined string
+        !! for human-readable debug output only.
+        character(len=*), intent(in) :: packed
+        character(len=:), allocatable :: text
 
-            call argv_display_into(packed, text)
-        end function argv_display
+        call argv_display_into(packed, text)
+    end function argv_display
 
-        subroutine argv_display_into(packed, text)
-            ! Threads call this form: gfortran keeps a deferred-length function
-            ! result's length in a static caller temporary (GCC PR 113797).
-            character(len=*), intent(in) :: packed
-            character(len=:), allocatable, intent(out) :: text
-            integer :: i
+    subroutine argv_display_into(packed, text)
+        ! Threads call this form: gfortran keeps a deferred-length function
+        ! result's length in a static caller temporary (GCC PR 113797).
+        character(len=*), intent(in) :: packed
+        character(len=:), allocatable, intent(out) :: text
+        integer :: i
 
-            text = packed
-            do i = 1, len(text)
-                if (text(i:i) == char(0)) text(i:i) = ' '
+        text = packed
+        do i = 1, len(text)
+            if (text(i:i) == char(0)) text(i:i) = ' '
+        end do
+        text = trim(text)
+    end subroutine argv_display_into
+
+    function link_lib_flags(project_dir, link_libs, n_link_libs) result(flags)
+        !! Resolve each `link` lib to a concrete archive on a search path and
+        !! link it by absolute path, preferring a static .a so the binary does
+        !! not depend on LIBRARY_PATH at link or run time. Libs found only via
+        !! the system default search (libm, libstdc++, ...) keep -lname. Returns
+        !! the space-prefixed flag string so the caller mutates its own cmd
+        !! buffer (passing the deferred-length cmd through an assumed-length
+        !! intent(inout) dummy dropped the appended tokens via copy-out).
+        character(len=*), intent(in) :: project_dir
+        character(len=128), intent(in) :: link_libs(*)
+        integer, intent(in) :: n_link_libs
+        character(len=:), allocatable :: flags
+
+        call link_lib_flags_into(project_dir, link_libs, n_link_libs, flags)
+    end function link_lib_flags
+
+    subroutine link_lib_flags_into(project_dir, link_libs, n_link_libs, flags)
+        ! Threads call this form: gfortran keeps a deferred-length function
+        ! result's length in a static caller temporary (GCC PR 113797).
+        character(len=*), intent(in) :: project_dir
+        character(len=128), intent(in) :: link_libs(*)
+        integer, intent(in) :: n_link_libs
+        character(len=:), allocatable, intent(out) :: flags
+
+        character(len=512) :: dirs(2*MAX_DEP_DIRS)
+        character(len=1024) :: token
+        integer :: n_dirs, n_env, i
+
+        flags = ''
+        call build_lib_search_dirs(dirs, n_dirs, n_env)
+        do i = 1, n_link_libs
+            call resolve_link_token(project_dir, trim(link_libs(i)), dirs, n_dirs, n_env, &
+                token)
+            ! Newline-join so the caller can split with argv_push_split_nl,
+            ! which preserves spaces in resolved library paths. Tokens are
+            ! passed straight to the linker via argv (shell-free build), so
+            ! they must NOT be shell-quoted.
+            flags = flags//new_line('a')//trim(token)
+        end do
+    end subroutine link_lib_flags_into
+
+    subroutine file_basename(path, name)
+        character(len=*), intent(in) :: path
+        character(len=*), intent(out) :: name
+
+        character(len=512) :: base
+        integer :: slash, dot, n
+
+        n = len_trim(path)
+        slash = index(path(1:n), '/', back=.true.)
+        if (slash > 0) then
+            base = path(slash + 1:n)
+        else
+            base = trim(path)
+        end if
+        dot = index(trim(base), '.', back=.true.)
+        if (dot > 1) then
+            name = base(1:dot - 1)
+        else
+            name = trim(base)
+        end if
+    end subroutine file_basename
+
+    subroutine truncate_file(path)
+        character(len=*), intent(in) :: path
+        integer :: u, ios
+        open (newunit=u, file=trim(path), status='replace', iostat=ios)
+        if (ios == 0) close (u)
+    end subroutine truncate_file
+
+    subroutine package_source_flags(sources, flags, root_config, deps, n_deps, out, ierr)
+        !! Manifest compile choices belong to the package defining a source.
+        !! Profile/user flags stay shared; root manifest choices must not leak.
+        character(len=*), intent(in) :: sources(:), flags
+        type(fpm_config_t), intent(in) :: root_config
+        type(resolved_src_t), intent(in) :: deps(:)
+        integer, intent(in) :: n_deps
+        character(len=*), intent(out) :: out(:)
+        integer, intent(out) :: ierr
+        type(fpm_config_t), allocatable :: dep_config
+        type(compiler_dialect_t) :: dialect
+        character(len=:), allocatable :: shared, package_flags, prefix, flag_text
+        integer :: i, d, k, parse_ierr, n
+        integer, allocatable :: owner_lengths(:)
+
+        ierr = 0
+        if (len_trim(flags) > len(out)) then
+            call flags_too_long('(shared flags)', len(out), ierr)
+            return
+        end if
+        allocate (owner_lengths(size(sources)))
+        owner_lengths = 0
+        out = flags
+        shared = flags
+        dialect = compiler_dialect(fc_command())
+        package_flags = manifest_compile_flags(root_config, dialect)
+        do while (len_trim(package_flags) > 0)
+            k = index(package_flags, ' ')
+            if (k == 0) k = len_trim(package_flags) + 1
+            call remove_manifest_flag(shared, package_flags(:k - 1))
+            package_flags = adjustl(package_flags(k:))
+        end do
+        call fpm_config_allocate(dep_config)
+        do d = 1, n_deps
+            call fpm_config_parse(trim(deps(d)%dir), dep_config, parse_ierr)
+            if (parse_ierr /= 0) cycle
+            package_flags = manifest_compile_flags(dep_config, dialect)
+            prefix = trim(deps(d)%src_dir)//'/'
+            n = len(prefix)
+            do i = 1, size(sources)
+                if (len_trim(sources(i)) < n) cycle
+                if (sources(i)(:n) /= prefix) cycle
+                if (n <= owner_lengths(i)) cycle
+                owner_lengths(i) = n
+                flag_text = trim(adjustl(package_flags))//' '//trim(shared)
+                if (len_trim(flag_text) > len(out(i))) then
+                    call flags_too_long(sources(i), len(out(i)), ierr)
+                    return
+                end if
+                out(i) = flag_text
             end do
-            text = trim(text)
-        end subroutine argv_display_into
+        end do
+    end subroutine package_source_flags
 
-        function link_lib_flags(project_dir, link_libs, n_link_libs) result(flags)
-            !! Resolve each `link` lib to a concrete archive on a search path and
-            !! link it by absolute path, preferring a static .a so the binary does
-            !! not depend on LIBRARY_PATH at link or run time. Libs found only via
-            !! the system default search (libm, libstdc++, ...) keep -lname. Returns
-            !! the space-prefixed flag string so the caller mutates its own cmd
-            !! buffer (passing the deferred-length cmd through an assumed-length
-            !! intent(inout) dummy dropped the appended tokens via copy-out).
-            character(len=*), intent(in) :: project_dir
-            character(len=128), intent(in) :: link_libs(*)
-            integer, intent(in) :: n_link_libs
-            character(len=:), allocatable :: flags
+    subroutine flags_too_long(source, limit, ierr)
+        character(len=*), intent(in) :: source
+        integer, intent(in) :: limit
+        integer, intent(out) :: ierr
 
-            call link_lib_flags_into(project_dir, link_libs, n_link_libs, flags)
-        end function link_lib_flags
+        write (error_unit, '(a,i0,a)') 'fo: compile flags for '//trim(source)// &
+            ' exceed ', limit, ' characters'
+        ierr = 1
+    end subroutine flags_too_long
 
-        subroutine link_lib_flags_into(project_dir, link_libs, n_link_libs, flags)
-            ! Threads call this form: gfortran keeps a deferred-length function
-            ! result's length in a static caller temporary (GCC PR 113797).
-            character(len=*), intent(in) :: project_dir
-            character(len=128), intent(in) :: link_libs(*)
-            integer, intent(in) :: n_link_libs
-            character(len=:), allocatable, intent(out) :: flags
+    function manifest_compile_flags(config, dialect) result(flags)
+        type(fpm_config_t), intent(in) :: config
+        type(compiler_dialect_t), intent(in) :: dialect
+        character(len=:), allocatable :: flags, mapped
+        integer :: i
 
-            character(len=512) :: dirs(2*MAX_DEP_DIRS)
-            character(len=1024) :: token
-            integer :: n_dirs, n_env, i
-
-            flags = ''
-            call build_lib_search_dirs(dirs, n_dirs, n_env)
-            do i = 1, n_link_libs
-                call resolve_link_token(project_dir, trim(link_libs(i)), dirs, n_dirs, n_env, &
-                    token)
-                ! Newline-join so the caller can split with argv_push_split_nl,
-                ! which preserves spaces in resolved library paths. Tokens are
-                ! passed straight to the linker via argv (shell-free build), so
-                ! they must NOT be shell-quoted.
-                flags = flags//new_line('a')//trim(token)
-            end do
-        end subroutine link_lib_flags_into
-
-        subroutine file_basename(path, name)
-            character(len=*), intent(in) :: path
-            character(len=*), intent(out) :: name
-
-            character(len=512) :: base
-            integer :: slash, dot, n
-
-            n = len_trim(path)
-            slash = index(path(1:n), '/', back=.true.)
-            if (slash > 0) then
-                base = path(slash + 1:n)
-            else
-                base = trim(path)
-            end if
-            dot = index(trim(base), '.', back=.true.)
-            if (dot > 1) then
-                name = base(1:dot - 1)
-            else
-                name = trim(base)
-            end if
-        end subroutine file_basename
-
-        subroutine truncate_file(path)
-            character(len=*), intent(in) :: path
-            integer :: u, ios
-            open (newunit=u, file=trim(path), status='replace', iostat=ios)
-            if (ios == 0) close (u)
-        end subroutine truncate_file
-
-        subroutine package_source_flags(sources, flags, root_config, deps, n_deps, out, ierr)
-            !! Manifest compile choices belong to the package defining a source.
-            !! Profile/user flags stay shared; root manifest choices must not leak.
-            character(len=*), intent(in) :: sources(:), flags
-            type(fpm_config_t), intent(in) :: root_config
-            type(resolved_src_t), intent(in) :: deps(:)
-            integer, intent(in) :: n_deps
-            character(len=*), intent(out) :: out(:)
-            integer, intent(out) :: ierr
-            type(fpm_config_t), allocatable :: dep_config
-            type(compiler_dialect_t) :: dialect
-            character(len=:), allocatable :: shared, package_flags, prefix, flag_text
-            integer :: i, d, k, parse_ierr, n
-            integer, allocatable :: owner_lengths(:)
-
-            ierr = 0
-            if (len_trim(flags) > len(out)) then
-                call flags_too_long('(shared flags)', len(out), ierr)
-                return
-            end if
-            allocate (owner_lengths(size(sources)))
-            owner_lengths = 0
-            out = flags
-            shared = flags
-            dialect = compiler_dialect(fc_command())
-            package_flags = manifest_compile_flags(root_config, dialect)
-            do while (len_trim(package_flags) > 0)
-                k = index(package_flags, ' ')
-                if (k == 0) k = len_trim(package_flags) + 1
-                call remove_manifest_flag(shared, package_flags(:k - 1))
-                package_flags = adjustl(package_flags(k:))
-            end do
-            call fpm_config_allocate(dep_config)
-            do d = 1, n_deps
-                call fpm_config_parse(trim(deps(d)%dir), dep_config, parse_ierr)
-                if (parse_ierr /= 0) cycle
-                package_flags = manifest_compile_flags(dep_config, dialect)
-                prefix = trim(deps(d)%src_dir)//'/'
-                n = len(prefix)
-                do i = 1, size(sources)
-                    if (len_trim(sources(i)) < n) cycle
-                    if (sources(i)(:n) /= prefix) cycle
-                    if (n <= owner_lengths(i)) cycle
-                    owner_lengths(i) = n
-                    flag_text = trim(adjustl(package_flags))//' '//trim(shared)
-                    if (len_trim(flag_text) > len(out(i))) then
-                        call flags_too_long(sources(i), len(out(i)), ierr)
-                        return
-                    end if
-                    out(i) = flag_text
-                end do
-            end do
-        end subroutine package_source_flags
-
-        subroutine flags_too_long(source, limit, ierr)
-            character(len=*), intent(in) :: source
-            integer, intent(in) :: limit
-            integer, intent(out) :: ierr
-
-            write (error_unit, '(a,i0,a)') 'fo: compile flags for '//trim(source)// &
-                ' exceed ', limit, ' characters'
-            ierr = 1
-        end subroutine flags_too_long
-
-        function manifest_compile_flags(config, dialect) result(flags)
-            type(fpm_config_t), intent(in) :: config
-            type(compiler_dialect_t), intent(in) :: dialect
-            character(len=:), allocatable :: flags, mapped
-            integer :: i
-
-            flags = ''
-            if (config%implicit_typing) then
-                mapped = dialect%translate_flag('-fno-implicit-none')
-            else
-                mapped = dialect%translate_flag('-fimplicit-none')
-            end if
-            if (len_trim(mapped) > 0) flags = mapped
-            if (.not. config%implicit_external) then
-                mapped = dialect%translate_flag('-Werror=implicit-interface')
-                if (len_trim(mapped) > 0) flags = trim(flags)//' '//mapped
-            end if
-            if (config%source_form /= 'default') then
-                mapped = dialect%translate_flag('-f'//trim(config%source_form)//'-form')
-                if (len_trim(mapped) > 0) flags = trim(flags)//' '//mapped
-            end if
-            do i = 1, config%n_flags
-                mapped = dialect%translate_flag(config%flags(i))
-                if (len_trim(mapped) > 0) flags = trim(flags)//' '//mapped
-            end do
-            ! Package defaults precede request flags, so --debug and --asan retain
-            ! their explicit debug information even when the manifest defaults to g0.
-            mapped = dialect%debug_info_flag(config%debug_info)
+        flags = ''
+        if (config%implicit_typing) then
+            mapped = dialect%translate_flag('-fno-implicit-none')
+        else
+            mapped = dialect%translate_flag('-fimplicit-none')
+        end if
+        if (len_trim(mapped) > 0) flags = mapped
+        if (.not. config%implicit_external) then
+            mapped = dialect%translate_flag('-Werror=implicit-interface')
             if (len_trim(mapped) > 0) flags = trim(flags)//' '//mapped
-            flags = trim(adjustl(flags))
-        end function manifest_compile_flags
+        end if
+        if (config%source_form /= 'default') then
+            mapped = dialect%translate_flag('-f'//trim(config%source_form)//'-form')
+            if (len_trim(mapped) > 0) flags = trim(flags)//' '//mapped
+        end if
+        do i = 1, config%n_flags
+            mapped = dialect%translate_flag(config%flags(i))
+            if (len_trim(mapped) > 0) flags = trim(flags)//' '//mapped
+        end do
+        ! Package defaults precede request flags, so --debug and --asan retain
+        ! their explicit debug information even when the manifest defaults to g0.
+        mapped = dialect%debug_info_flag(config%debug_info)
+        if (len_trim(mapped) > 0) flags = trim(flags)//' '//mapped
+        flags = trim(adjustl(flags))
+    end function manifest_compile_flags
 
-        subroutine remove_manifest_flag(flags, flag)
-            !! Remove one manifest occurrence, retaining a repeated user override.
-            character(len=:), allocatable, intent(inout) :: flags
-            character(len=*), intent(in) :: flag
-            character(len=:), allocatable :: padded, needle
-            integer :: pos
-            if (len_trim(flag) == 0) return
-            padded = ' '//trim(flags)//' '
-            needle = ' '//trim(flag)//' '
-            pos = index(padded, needle)
-            if (pos == 0) return
-            flags = trim(adjustl(padded(:pos)//padded(pos + len(needle):)))
-        end subroutine remove_manifest_flag
+    subroutine remove_manifest_flag(flags, flag)
+        !! Remove one manifest occurrence, retaining a repeated user override.
+        character(len=:), allocatable, intent(inout) :: flags
+        character(len=*), intent(in) :: flag
+        character(len=:), allocatable :: padded, needle
+        integer :: pos
+        if (len_trim(flag) == 0) return
+        padded = ' '//trim(flags)//' '
+        needle = ' '//trim(flag)//' '
+        pos = index(padded, needle)
+        if (pos == 0) return
+        flags = trim(adjustl(padded(:pos)//padded(pos + len(needle):)))
+    end subroutine remove_manifest_flag
 
-        subroutine merge_flags(config, flag_text)
-            type(fpm_config_t), intent(in) :: config
-            character(len=*), intent(inout) :: flag_text
-            character(len=1024) :: combined
-            character(len=:), allocatable :: mapped
-            type(compiler_dialect_t) :: dialect
+    subroutine merge_flags(config, flag_text)
+        type(fpm_config_t), intent(in) :: config
+        character(len=*), intent(inout) :: flag_text
+        character(len=1024) :: combined
+        character(len=:), allocatable :: mapped
+        type(compiler_dialect_t) :: dialect
 
-            combined = ''
-            dialect = compiler_dialect(fc_command())
-            ! fpm openmp metapackage -> the selected compiler's OpenMP flag.
-            if (config%openmp) combined = trim(dialect%openmp_flag())
-            combined = trim(combined)//' '//manifest_compile_flags(config, dialect)
-            if (len_trim(flag_text) > 0) then
-                if (len_trim(combined) > 0) then
-                    combined = trim(combined)//' '//trim(flag_text)
-                else
-                    combined = trim(flag_text)
-                end if
+        combined = ''
+        dialect = compiler_dialect(fc_command())
+        ! fpm openmp metapackage -> the selected compiler's OpenMP flag.
+        if (config%openmp) combined = trim(dialect%openmp_flag())
+        combined = trim(combined)//' '//manifest_compile_flags(config, dialect)
+        if (len_trim(flag_text) > 0) then
+            if (len_trim(combined) > 0) then
+                combined = trim(combined)//' '//trim(flag_text)
+            else
+                combined = trim(flag_text)
             end if
-            ! Required PIC must survive both manifest and request flags for shared
-            ! libraries to link without relocation errors.
-            mapped = dialect%pic_flag(config%pic)
-            if (len_trim(mapped) > 0) then
-                if (len_trim(combined) > 0) then
-                    combined = trim(combined)//' '//trim(mapped)
-                else
-                    combined = trim(mapped)
-                end if
+        end if
+        ! Required PIC must survive both manifest and request flags for shared
+        ! libraries to link without relocation errors.
+        mapped = dialect%pic_flag(config%pic)
+        if (len_trim(mapped) > 0) then
+            if (len_trim(combined) > 0) then
+                combined = trim(combined)//' '//trim(mapped)
+            else
+                combined = trim(mapped)
             end if
-            flag_text = combined
-        end subroutine merge_flags
+        end if
+        flag_text = combined
+    end subroutine merge_flags
 
-    end module fo_gfortran_build
+end module fo_gfortran_build
