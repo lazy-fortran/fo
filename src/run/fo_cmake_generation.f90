@@ -55,6 +55,8 @@ contains
 
         ierr = 0
         message = ''
+        ! Native capture retains a relocatable build directory.
+        if (native_cmake_selected(backend%project_dir)) return
         if (allocated(backend%cmake%extra_args)) then
             do i = 1, size(backend%cmake%extra_args)
                 value = backend%cmake%extra_args(i)
