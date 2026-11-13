@@ -36,8 +36,206 @@ module fo_cmake_generation
     end type path_alias_t
     public :: cmake_capture_inventory, cmake_registered_names, cmake_capture_cleanup
     public :: cmake_stage_git, cmake_populated_dependency_args
+    public :: cmake_capture_private_build
     public :: cmake_unpopulated_dependency, cmake_cache_compiler_args
 contains
+    subroutine cmake_capture_private_build(backend, build_root, ierr, message)
+        !! Treat an explicit caller tree as a configuration seed, never a write target.
+        type(backend_t), intent(inout) :: backend
+        character(len=*), intent(in) :: build_root
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+        character(:), allocatable :: caller, project, cache, line, key, kind, value
+        character(:), allocatable :: script, generator, home, populated, private_build
+        character(:), allocatable :: arguments(:), previous_seed, help, pending_help
+        type(string_t), allocatable :: words(:)
+        integer :: cursor, count, i, width, old_count, unit, n_roots, equals
+        character(len=PATH_LEN) :: source_roots(MAX_ROOTS)
+        logical :: exists, source_key
+
+        ierr = 0
+        message = ''
+        if (allocated(backend%cmake%extra_args)) then
+            do i = 1, size(backend%cmake%extra_args)
+                value = backend%cmake%extra_args(i)
+                if (index(value, '-B') == 1 .or. index(value, '-S') == 1 .or. &
+                    index(value, '-H') == 1 .or. index(value, '--preset') == 1 .or. &
+                    index(value, '--build') == 1 .or. index(value, '--install') == 1 .or. &
+                    index(value, '-P') == 1 .or. index(value, '-E') == 1 .or. &
+                    index(value, '--workflow') == 1) then
+                    ierr = 1
+                    message = 'resident CMake arguments cannot override configure location or mode'
+                    return
+                end if
+            end do
+        end if
+        caller = fs_canonical_path(cmake_context_build_path(backend%cmake))
+        project = fs_canonical_path(backend%project_dir)
+        if (caller == project) then
+            ierr = 1
+            message = 'resident CMake requires an out-of-source build directory'
+            return
+        end if
+        private_build = trim(build_root)
+        if (.not. fs_path_is_absolute(private_build)) &
+            private_build = backend%cmake%source_root//'/'//private_build
+        script = ''
+        generator = ''
+        n_roots = 0
+        inquire(file=caller//'/CMakeCache.txt', exist=exists)
+        if (exists) then
+            call read_text_file_alloc(caller//'/CMakeCache.txt', cache, ierr)
+            if (ierr /= 0) then
+                message = 'cannot read caller CMake cache'
+                return
+            end if
+            home = ''
+            cursor = 1
+            do while (next_cache_line(cache, cursor, line))
+                call cache_entry(line, key, kind, value)
+                if (key == 'CMAKE_HOME_DIRECTORY') home = fs_canonical_path(value)
+                if (key == 'CMAKE_GENERATOR') generator = value
+            end do
+            if (home /= project) then
+                ierr = 1
+                message = 'caller CMake cache does not belong to this project'
+                return
+            end if
+            call cmake_populated_dependency_args(caller, private_build//'/_deps', &
+                populated, ierr, message)
+            if (ierr /= 0) return
+            call cmake_split_fragment(populated, words, count)
+            do i = 1, count
+                if (index(words(i)%s, '-DFETCHCONTENT_SOURCE_DIR_') /= 1) cycle
+                equals = index(words(i)%s, '=')
+                if (equals == 0 .or. n_roots == MAX_ROOTS) cycle
+                n_roots = n_roots + 1
+                source_roots(n_roots) = words(i)%s(equals + 1:)
+            end do
+            cursor = 1
+            do while (next_cache_line(cache, cursor, line))
+                call cache_entry(line, key, kind, value)
+                source_key = .false.
+                if (len(key) > 11) source_key = key(len(key) - 10:) == '_SOURCE_DIR'
+                if (len(key) > 6) then
+                    if (key(len(key) - 5:) == '_BUILD') source_key = .true.
+                end if
+                if (.not. source_key .or. len_trim(value) == 0) cycle
+                if (any(source_roots(:n_roots) == value)) cycle
+                if (n_roots == MAX_ROOTS) then
+                    ierr = 1
+                    message = 'CMake seed exceeds supported source root capacity'
+                    return
+                end if
+                n_roots = n_roots + 1
+                source_roots(n_roots) = value
+            end do
+            cursor = 1
+            pending_help = ''
+            do while (next_cache_line(cache, cursor, line))
+                if (index(line, '//') == 1) then
+                    if (len(pending_help) > 0) pending_help = pending_help//new_line('a')
+                    pending_help = pending_help//line(3:)
+                    cycle
+                end if
+                help = pending_help
+                pending_help = ''
+                call cache_entry(line, key, kind, value)
+                if (len(key) == 0) cycle
+                source_key = .false.
+                if (len(key) > 11) source_key = key(len(key) - 10:) == '_SOURCE_DIR'
+                if (len(key) > 6) then
+                    if (key(len(key) - 5:) == '_BUILD') source_key = .true.
+                end if
+                if (kind == 'STATIC' .and. source_key) kind = 'PATH'
+                if (kind == 'UNINITIALIZED') kind = 'STRING'
+                if (kind /= 'BOOL' .and. kind /= 'STRING' .and. kind /= 'PATH' .and. &
+                    kind /= 'FILEPATH') cycle
+                if (key == 'FETCHCONTENT_BASE_DIR') cycle
+                if (key == 'CMAKE_MAKE_PROGRAM' .and. &
+                    len_trim(backend%cmake%generator) > 0 .and. &
+                    backend%cmake%generator /= generator) cycle
+                if (.not. source_key) call seed_build_paths(value, caller, private_build, &
+                    source_roots(:n_roots))
+                script = script//'set('//key//' "'//cmake_quote(value, literal=.true.)// &
+                    '" CACHE '//kind//' "'//cmake_quote(help, literal=.true.)// &
+                    '" FORCE)'//new_line('a')
+            end do
+            old_count = 0
+            width = 1
+            if (allocated(backend%cmake%extra_args)) then
+                old_count = size(backend%cmake%extra_args)
+                width = len(backend%cmake%extra_args)
+            end if
+            do i = 1, count
+                width = max(width, len(words(i)%s))
+            end do
+            allocate(character(len=width) :: arguments(count + old_count))
+            do i = 1, count
+                arguments(i) = words(i)%s
+            end do
+            if (old_count > 0) arguments(count + 1:) = backend%cmake%extra_args
+            call move_alloc(arguments, backend%cmake%extra_args)
+        end if
+        if (len_trim(backend%cmake%generator) == 0) backend%cmake%generator = generator
+        script = script//'set(FETCHCONTENT_BASE_DIR "'// &
+            cmake_quote(private_build//'/_deps', literal=.true.)// &
+            '" CACHE PATH "private dependency builds" FORCE)'//new_line('a')
+        call read_text_file_alloc(private_build//'/fo-capture-seed.cmake', previous_seed, ierr)
+        backend%cmake%capture_preload_changed = ierr /= 0
+        if (ierr == 0) backend%cmake%capture_preload_changed = previous_seed /= script
+        call fs_make_dir(private_build, ierr)
+        if (ierr == 0) then
+            open(newunit=unit, file=private_build//'/fo-capture-seed.cmake', &
+                status='replace', action='write', iostat=ierr)
+            if (ierr == 0) then
+                write(unit, '(a)', advance='no', iostat=ierr) script
+                close(unit)
+            end if
+        end if
+        if (ierr /= 0) then
+            message = 'cannot write private CMake capture seed'
+            return
+        end if
+        backend%cmake%build_root = private_build
+        backend%cmake%capture_preload = private_build//'/fo-capture-seed.cmake'
+    end subroutine cmake_capture_private_build
+
+    subroutine seed_build_paths(value, caller, private_build, source_roots)
+        character(:), allocatable, intent(inout) :: value
+        character(len=*), intent(in) :: caller, private_build, source_roots(:)
+        integer :: start, at, i, length
+        logical :: source_path
+
+        start = 1
+        do
+            at = index(value(start:), caller)
+            if (at == 0) return
+            at = at + start - 1
+            source_path = .false.
+            do i = 1, size(source_roots)
+                length = len_trim(source_roots(i))
+                if (length < len(caller) .or. at + length - 1 > len(value)) cycle
+                if (value(at:at + length - 1) /= trim(source_roots(i))) cycle
+                if (at + length <= len(value)) then
+                    if (scan(value(at + length:at + length), '/; '//'"'//"'") == 0) cycle
+                end if
+                source_path = .true.
+                exit
+            end do
+            if (.not. source_path .and. at + len(caller) <= len(value)) &
+                source_path = scan(value(at + len(caller):at + len(caller)), &
+                    '/; '//'"'//"'") == 0
+            if (source_path) then
+                start = at + len(caller)
+            else
+                value = value(:at - 1)//private_build//value(at + len(caller):)
+                start = at + len(private_build)
+            end if
+            if (start > len(value)) return
+        end do
+    end subroutine seed_build_paths
+
     subroutine cmake_capture_inventory(backend, inventory, ierr, message, flags, &
             configured)
         type(backend_t), intent(inout) :: backend

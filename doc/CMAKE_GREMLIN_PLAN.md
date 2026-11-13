@@ -201,9 +201,10 @@ through installed CMake/CTest, not standalone compatibility.
 The supported closure includes project presets, explicit cache overrides and
 FetchContent source directories. `FO_CMAKE_BUILD_TARGETS` selects native build
 targets while `--target` selects registered test names; neither changes native
-project flags. An absolute `FO_CMAKE_BUILD_DIR` is captured in place; the
-generation builds in its own view (`build/fo-external` when that tree lies
-outside the project) and never configures the caller's tree. An absolute
+project flags. When no configure preset is selected, an explicit
+`FO_CMAKE_BUILD_DIR` is read without reconfiguration. Existing cached settings
+seed a private discovery tree, where invocation overrides apply. The generation
+builds in its own view (`build/fo-external` for an external discovery tree) and never configures the caller's tree. An absolute
 preset `binaryDir` remains unsupported. Declared prebuilt `*_BUILD` providers capture their include/lib
 inputs and real Git HEAD provenance for the observed CMakeCache source probe.
 Explicit target include directories, including system and virtual-environment

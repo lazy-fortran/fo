@@ -23,11 +23,13 @@ module fo_cmake_context
         character(:), allocatable :: test_preset
         character(:), allocatable :: request_token
         character(:), allocatable :: error
+        character(:), allocatable :: capture_preload
         character(:), allocatable :: extra_args(:)
         character(:), allocatable :: build_targets(:)
         character(:), allocatable :: reported_generator
         !! Path of the File API index file read by cmake_context_read_reply.
         character(:), allocatable :: reply_index
+        logical :: capture_preload_changed = .false.
         logical :: multi_config = .false.
         logical :: has_codemodel = .false.
         logical :: has_cache = .false.
@@ -67,6 +69,7 @@ contains
         logical :: resolved
 
         context%profile = ''
+        context%capture_preload = ''
         context%source_root = trim(source_root)
         ! CMake reports physical paths (/private/var on Darwin), so match them.
         call fs_realpath(source_root, physical, resolved)
