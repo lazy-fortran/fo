@@ -353,6 +353,10 @@ contains
         call write_text(join_path(tools, 'f951'), '#!/bin/sh'//nl//'exec "'//proper// &
             '" "$@" -fdefault-real-8'//nl)
         call set_mode(join_path(tools, 'f951'), int(o'755'))
+        ! A relocated toolchain finds its own f951 before COMPILER_PATH.
+        call run_process(argv('/usr/bin/env', 'COMPILER_PATH='//tools, trim(real_fc), &
+            '-print-prog-name=f951'), scratch, result)
+        if (index(result%stdout, join_path(tools, 'f951')) /= 1) return
         other_proper = relocatable
         call list_add(other_proper, 'COMPILER_PATH='//tools)
 
