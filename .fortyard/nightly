@@ -1,0 +1,3 @@
+#!/bin/sh
+# Nightly run: every test, the slow ones included, run again.
+FO_TEST_RERUN=1 exec "$(dirname "$0")/check" --all "$@"
