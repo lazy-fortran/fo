@@ -6,6 +6,7 @@ program test_dev_dependency_git_cli
     use fo_test_harness, only: remove_tree, run_git, assert_equal_integer
     use fo_test_harness, only: assert_contains, finish_assertions, assert_true
     use fo_test_harness, only: read_text, file_exists, resolve_test_executable
+    use fo_test_harness, only: make_symlink
     use fo_dep_update, only: dep_acquire_sources
     use fo_process, only: process_exit
     use fo_test_cli, only: resolve_driver, run_fo, run_external
@@ -63,6 +64,7 @@ program test_dev_dependency_git_cli
     call assert_contains(result%stdout, '1 pass', 'the test using the dependency passes')
 
     call fpm_checkout()
+    call shared_checkout()
     call remove_tree(scratch)
     call finish_assertions()
 
@@ -161,4 +163,64 @@ contains
             "relative checkout ignores ambient Git repository: "//result%stdout//result%stderr)
         call assert_true(file_exists(marker), "relative acquisition records identity")
     end subroutine fpm_checkout
+
+    subroutine shared_checkout()
+        !! A Git package pins a provider and another Git package that pins the
+        !! same provider revision: a fresh build on the fetched checkouts needs no
+        !! transport, as in the hook's offline view.
+        character(len=:), allocatable :: root, view, pin, outer, inner
+        type(string_list_t) :: offline
+
+        root = join_path(scratch, "shared-root")
+        outer = join_path(scratch, "outer")
+        inner = join_path(scratch, "inner")
+        pin = 'dev_provider = { git = "file://'//provider//'", rev = "'// &
+            head(provider)//'" }'
+        call package(inner, "inner", pin)
+        call package(outer, "outer", pin//nl//'inner = { git = "file://'//inner// &
+            '", rev = "'//head(inner)//'" }')
+        call write_text(root//"/fpm.toml", 'name = "shared_root"'//nl// &
+            "[dependencies]"//nl//'outer = { git = "file://'//outer//'", rev = "'// &
+            head(outer)//'" }'//nl)
+        call write_text(root//"/test/test_value.f90", &
+            read_text(consumer//"/test/test_value.f90"))
+        args = string_list_t()
+        call list_add(args, "build")
+        call list_add(args, "--tests")
+        call run_fo(driver, args, root, scratch//"/shared-cache", result, environment)
+        call assert_equal_integer(result%exit_code, 0, &
+            "first build fetches the shared dependency: "//result%stderr)
+        view = join_path(scratch, "shared-view")
+        call write_text(view//"/fpm.toml", read_text(root//"/fpm.toml"))
+        call write_text(view//"/test/test_value.f90", read_text(root//"/test/test_value.f90"))
+        call make_directory(view//"/build")
+        call make_symlink(root//"/build/dependencies", view//"/build/dependencies")
+        offline = environment
+        call list_add(offline, "GIT_ALLOW_PROTOCOL=ssh")
+        call run_fo(driver, args, view, scratch//"/shared-view-cache", result, offline)
+        call assert_equal_integer(result%exit_code, 0, &
+            "second build reuses the shared checkout offline: "//result%stderr)
+    end subroutine shared_checkout
+
+    subroutine package(dir, name, deps)
+        character(len=*), intent(in) :: dir, name, deps
+        call write_text(dir//"/fpm.toml", 'name = "'//name//'"'//nl// &
+            "[dependencies]"//nl//deps//nl)
+        call write_text(dir//"/src/"//name//".f90", "module "//name//nl// &
+            "use dev_provider, only: value"//nl//"end module "//name//nl)
+        call run_git(dir, [character(len=32) :: "init", "-q", "-b", "main"], code)
+        call run_git(dir, [character(len=32) :: "add", "."], code)
+        call run_git(dir, [character(len=32) :: "commit", "-q", "-m", name], code)
+        call assert_equal_integer(code, 0, "commit "//name)
+    end subroutine package
+
+    function head(dir) result(revision)
+        character(len=*), intent(in) :: dir
+        character(len=:), allocatable :: revision
+        args = string_list_t()
+        call list_add(args, "rev-parse")
+        call list_add(args, "HEAD")
+        call run_external("git", args, dir, result, environment)
+        revision = result%stdout(:index(result%stdout, nl) - 1)
+    end function head
 end program test_dev_dependency_git_cli

@@ -587,13 +587,22 @@ contains
     logical function git_identity_matches(selector, identity)
         character(len=*), intent(in) :: selector, identity
         character(len=64) :: commit
-        integer :: start, n, i, code
+        character(len=len(identity)) :: rest
+        integer :: start, n, i, code, skip, cut
 
         git_identity_matches = .false.
-        if (index(trim(identity), trim(selector)//new_line('a')) /= 1) return
-        start = len_trim(selector) + 2
-        if (start > len_trim(identity)) return
-        commit = identity(start:)
+        ! Packages that pin the same source share one checkout, so the package
+        ! that declared it (the first line) does not take part.
+        if (index(selector, 'declared-by=') /= 1 .or. &
+            index(identity, 'declared-by=') /= 1) return
+        skip = index(selector, new_line('a'))
+        cut = index(identity, new_line('a'))
+        if (skip == 0 .or. cut == 0) return
+        rest = identity(cut + 1:)
+        if (index(trim(rest), trim(selector(skip + 1:))//new_line('a')) /= 1) return
+        start = len_trim(selector(skip + 1:)) + 2
+        if (start > len_trim(rest)) return
+        commit = rest(start:)
         n = len_trim(commit)
         if (n > 0) then
             if (commit(n:n) == new_line('a')) n = n - 1
