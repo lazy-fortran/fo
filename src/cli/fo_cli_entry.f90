@@ -532,6 +532,9 @@ contains
             write (out, '(a)') 'options:'
             write (out, '(a)') '  --only-changed  cases affected by changes since Git HEAD'
             write (out, '(a)') '  --all           include slow tests'
+            write (out, '(a)') '  --registered-only'
+            write (out, '(a)') '                  skip named tests this build does not register'
+            write (out, '(a)') '                  (with a note); an empty selection is not an error'
             write (out, '(a)') '  --no-build      run the selected tests without building'
             write (out, '(a)') '  -L, --label RE  select cases with a label matching RE (repeat: AND)'
             write (out, '(a)') '  -LE, --exclude-label RE'
@@ -1193,7 +1196,7 @@ contains
             integer :: exitcode, ierr, i, n_arg_names
             integer :: random_count, random_seed, clock_count
             integer :: argument_status, eq
-            logical :: only_changed, include_all, verbose, use_json, skip_next
+            logical :: only_changed, include_all, verbose, use_json, skip_next, registered_only
             logical :: json_full, quiet
             logical :: end_options, flags_seen, list_mode, filtered, no_build
             logical :: strict_flaky
@@ -1227,6 +1230,7 @@ contains
             no_cache = .false.
             only_changed = .false.
             include_all = .false.
+            registered_only = .false.
             verbose = .false.
             use_json = .false.
             json_full = .false.
@@ -1381,6 +1385,8 @@ contains
                     only_changed = .true.
                 case ('--all')
                     include_all = .true.
+                case ('--registered-only')
+                    registered_only = .true.
                 case ('--verbose')
                     verbose = .true.
                 case ('--json', '--json=compact')
@@ -1497,6 +1503,7 @@ contains
                 request%names(i)%s = trim(test_names(i))
             end do
             request%all = include_all
+            request%registered_only = registered_only
             request%filter = filter_text
             call project_select(b, all_flags, request, only_changed, model, selection, &
                 widen_reasons, ierr, message, configured=no_build)
@@ -1511,6 +1518,12 @@ contains
                 write (error_unit, '(a)') 'fo: affected selection widened: '// &
                     widen_reasons(i)%s
             end do
+            if (registered_only) then
+                do i = 1, size(selection%unknown)
+                    write (error_unit, '(a)') 'fo: not registered in this build, skipped: '// &
+                        selection%unknown(i)%s
+                end do
+            end if
             if (.not. only_changed .and. random_count == 0 .and. &
                 selection%status /= SELECT_EMPTY) then
                 ! Executables that list their cases are selected, cached and run
@@ -1571,6 +1584,10 @@ contains
                 return
             end if
             if (selection%status == SELECT_EMPTY) then
+                if (registered_only) then
+                    write (output_unit, '(a)') 'no registered test to run'
+                    return
+                end if
                 if (only_changed) then
                     write (output_unit, '(a)') 'no affected tests'
                     return

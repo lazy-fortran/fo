@@ -165,6 +165,19 @@ contains
         call assert_equal_integer(result%exit_code, 1, 'unknown name exits 1')
         call assert_contains(result%stderr, 'fo: unknown test: no_such_test', &
             'unknown name diagnostic')
+        ! --registered-only: an unregistered name is skipped with a note
+        call assert_equal_string(listing(fpm_dir, fpm_env, &
+            [character(len=48) :: '--registered-only', 'no_such_test', 'test_fast'], &
+            result), 'test_fast;', '--registered-only keeps the registered name')
+        call assert_contains(result%stderr, &
+            'fo: not registered in this build, skipped: no_such_test', &
+            '--registered-only names the skipped test')
+        call fo(fpm_dir, fpm_env, [character(len=48) :: 'test', '--registered-only', &
+            'no_such_test'], result)
+        call assert_equal_integer(result%exit_code, 0, &
+            '--registered-only with no registered name exits 0')
+        call assert_contains(result%stdout, 'no registered test to run', &
+            '--registered-only reports the empty run')
         call fo(fpm_dir, fpm_env, [character(len=48) :: 'test', 'test_heavy_slow'], &
             result)
         call assert_equal_integer(result%exit_code, 1, 'slow name needs --all')

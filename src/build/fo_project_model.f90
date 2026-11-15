@@ -184,6 +184,9 @@ module fo_project_model
         character(len=:), allocatable :: filter
         logical, allocatable :: affected(:), failed(:)
         logical :: all = .false.
+        !! Named tests the build does not register are skipped (listed in
+        !! selection%unknown) instead of failing the selection.
+        logical :: registered_only = .false.
     end type model_request_t
 
     type, public :: model_selection_t
@@ -803,7 +806,7 @@ contains
         end do
         call sort_by_name(selection%cases)
 
-        if (size(selection%unknown) > 0) then
+        if (size(selection%unknown) > 0 .and. .not. request%registered_only) then
             selection%status = SELECT_UNKNOWN_NAME
             selection%message = 'unknown test: '//joined(selection%unknown)
             return
@@ -975,1454 +978,1454 @@ contains
         lifted = ''
         label_hit = ''
         outer: do j = 1, size(c%labels)
-        do k = 1, size(defaults)
-            if (c%labels(j)%s == defaults(k)%s) then
-                label_hit = c%labels(j)%s
-                exit outer
-            end if
-        end do
-    end do outer
-    if (.not. c%default_excluded .and. len(label_hit) == 0) return
-    if (all) then
-        lifted = '; default exclusion lifted by --all'
-        return
-    end if
-    if (c%default_excluded) then
-        reason = 'excluded by default: test preset filter'
-        return
-    end if
-    do k = 1, size(include_re)
-        if (pattern_matches(include_re(k), label_hit)) then
-            lifted = '; default exclusion lifted by -L '//include(k)%s
+            do k = 1, size(defaults)
+                if (c%labels(j)%s == defaults(k)%s) then
+                    label_hit = c%labels(j)%s
+                    exit outer
+                end if
+            end do
+        end do outer
+        if (.not. c%default_excluded .and. len(label_hit) == 0) return
+        if (all) then
+            lifted = '; default exclusion lifted by --all'
             return
         end if
-    end do
-    reason = 'excluded by default: label '//label_hit
-end subroutine default_exclusion
-
-subroutine model_plan(model, cases, plan)
-    !! Targets needed to run cases: their mapped targets (command target,
-    !! declared targets) and the closure of their link dependencies,
-    !! dependency-origin targets included; O(targets + link edges). A case
-    !! with an unknown mapping or an incomplete model widens the plan to
-    !! every target.
-    type(project_model_t), intent(in) :: model
-    integer, intent(in) :: cases(:)
-    type(model_plan_t), intent(out) :: plan
-    logical, allocatable :: needed(:)
-    integer, allocatable :: stack(:)
-    integer :: i, top, t, k, n
-
-    if (.not. model%finalized) error stop 'model_plan: model not finalized'
-    allocate(plan%reasons(0))
-    if (.not. model%complete) &
-        call append_string(plan%reasons, 'project model is incomplete')
-    do i = 1, size(cases)
-        if (cases(i) < 1 .or. cases(i) > model%n_cases) then
-            call append_string(plan%reasons, 'invalid case index')
-            cycle
+        if (c%default_excluded) then
+            reason = 'excluded by default: test preset filter'
+            return
         end if
-        if (model%cases(cases(i))%mapping /= MAP_UNKNOWN) cycle
-        call append_string(plan%reasons, 'test case '// &
-            model%cases(cases(i))%name//': target mapping unknown')
-    end do
-    plan%widened = size(plan%reasons) > 0
-    allocate(needed(model%n_targets), stack(max(1, model%n_targets)))
-    needed = plan%widened
-    top = 0
-    if (.not. plan%widened) then
+        do k = 1, size(include_re)
+            if (pattern_matches(include_re(k), label_hit)) then
+                lifted = '; default exclusion lifted by -L '//include(k)%s
+                return
+            end if
+        end do
+        reason = 'excluded by default: label '//label_hit
+    end subroutine default_exclusion
+
+    subroutine model_plan(model, cases, plan)
+        !! Targets needed to run cases: their mapped targets (command target,
+        !! declared targets) and the closure of their link dependencies,
+        !! dependency-origin targets included; O(targets + link edges). A case
+        !! with an unknown mapping or an incomplete model widens the plan to
+        !! every target.
+        type(project_model_t), intent(in) :: model
+        integer, intent(in) :: cases(:)
+        type(model_plan_t), intent(out) :: plan
+        logical, allocatable :: needed(:)
+        integer, allocatable :: stack(:)
+        integer :: i, top, t, k, n
+
+        if (.not. model%finalized) error stop 'model_plan: model not finalized'
+        allocate(plan%reasons(0))
+        if (.not. model%complete) &
+            call append_string(plan%reasons, 'project model is incomplete')
         do i = 1, size(cases)
-            associate (c => model%cases(cases(i)))
-                if (c%command_target > 0) call push(c%command_target)
-                do k = 1, size(c%declared_targets)
-                    call push(c%declared_targets(k))
-                end do
+            if (cases(i) < 1 .or. cases(i) > model%n_cases) then
+                call append_string(plan%reasons, 'invalid case index')
+                cycle
+            end if
+            if (model%cases(cases(i))%mapping /= MAP_UNKNOWN) cycle
+            call append_string(plan%reasons, 'test case '// &
+                model%cases(cases(i))%name//': target mapping unknown')
+        end do
+        plan%widened = size(plan%reasons) > 0
+        allocate(needed(model%n_targets), stack(max(1, model%n_targets)))
+        needed = plan%widened
+        top = 0
+        if (.not. plan%widened) then
+            do i = 1, size(cases)
+                associate (c => model%cases(cases(i)))
+                    if (c%command_target > 0) call push(c%command_target)
+                    do k = 1, size(c%declared_targets)
+                        call push(c%declared_targets(k))
+                    end do
+                end associate
+            end do
+        end if
+        do while (top > 0)
+            t = stack(top)
+            top = top - 1
+            do k = 1, size(model%targets(t)%link_deps)
+                call push(model%targets(t)%link_deps(k))
+            end do
+        end do
+        allocate(plan%targets(count(needed)))
+        n = 0
+        do i = 1, model%n_targets
+            if (.not. needed(i)) cycle
+            n = n + 1
+            plan%targets(n) = i
+        end do
+
+    contains
+
+        subroutine push(target_index)
+            integer, intent(in) :: target_index
+
+            if (needed(target_index)) return
+            needed(target_index) = .true.
+            top = top + 1
+            stack(top) = target_index
+        end subroutine push
+
+    end subroutine model_plan
+
+    subroutine model_layering_sources(model, extra, paths)
+        !! Project sources a layering check covers: the sources of every
+        !! project-origin target and of every layer, then extra, each once in
+        !! first-seen order. Dependency-origin targets contribute nothing.
+        type(project_model_t), intent(in) :: model
+        type(string_t), intent(in) :: extra(:)
+        type(string_t), allocatable, intent(out) :: paths(:)
+        type(string_t), allocatable :: trimmed(:)
+        type(name_index_t) :: seen
+        integer :: n, i, k
+
+        n = 0
+        allocate(paths(16))
+        do i = 1, model%n_targets
+            if (model%targets(i)%origin /= ORIGIN_PROJECT) cycle
+            if (.not. allocated(model%targets(i)%sources)) cycle
+            do k = 1, size(model%targets(i)%sources)
+                call add(model%targets(i)%sources(k)%s)
+            end do
+        end do
+        do i = 1, model%n_layers
+            if (.not. allocated(model%layers(i)%sources)) cycle
+            do k = 1, size(model%layers(i)%sources)
+                call add(model%layers(i)%sources(k)%s)
+            end do
+        end do
+        do k = 1, size(extra)
+            call add(extra(k)%s)
+        end do
+        allocate(trimmed(n))
+        trimmed(:) = paths(1:n)
+        call move_alloc(trimmed, paths)
+
+    contains
+
+        subroutine add(path)
+            character(len=*), intent(in) :: path
+            type(string_t), allocatable :: grown(:)
+            integer :: existing
+
+            if (len(path) == 0) return
+            call index_insert(seen, path, n + 1, existing)
+            if (existing /= 0) return
+            n = n + 1
+            if (n > size(paths)) then
+                allocate(grown(2*size(paths)))
+                grown(1:n - 1) = paths(1:n - 1)
+                call move_alloc(grown, paths)
+            end if
+            paths(n)%s = path
+        end subroutine add
+
+    end subroutine model_layering_sources
+
+    subroutine model_layering(model, units, report)
+        !! Layering check, the same for every backend. A source in layer A that
+        !! uses a module defined by a source in layer B violates the layering
+        !! when B is outside the uses closure of A (A included). On CMake the
+        !! layers are the project libraries and their uses the link graph.
+        !!
+        !! A source's layers are the layers listing it as a source or containing
+        !! a target that lists it. Only modules defined by units are checked:
+        !! intrinsic, external and dependency modules are ignored, as is a
+        !! module the source defines itself or one with a provider in no layer.
+        !! With several providers, any reachable one satisfies the use. Duplicate
+        !! unit paths count once (the first). Cost: hashed lookups, linear in
+        !! units, layer memberships and module uses, plus one closure walk per
+        !! layer that has member sources.
+        type(project_model_t), intent(in) :: model
+        type(model_unit_t), intent(in) :: units(:)
+        type(model_layering_t), intent(out) :: report
+        type(name_index_t) :: path_index, module_index
+        logical, allocatable :: active(:)
+        integer, allocatable :: layer_first(:), layer_units(:)
+        integer, allocatable :: unit_first(:), unit_layers(:), fill(:)
+        integer, allocatable :: module_head(:), provider_next(:), provider_unit(:)
+        integer, allocatable :: stamp(:), mark(:), queue(:), module_seen(:)
+        integer :: nu, nl, n_pairs, n_modules, n_providers, n_violations
+        integer :: u, l, k, j, t, s, m, e, p, existing, token, a, best, head, tail
+        logical :: reached, unlayered_provider, other_provider
+
+        if (.not. model%finalized) error stop 'model_layering: model not finalized'
+        nu = size(units)
+        nl = model%n_layers
+        allocate(active(nu))
+        do u = 1, nu
+            call index_insert(path_index, units(u)%path, u, existing)
+            active(u) = existing == 0
+        end do
+
+        ! Layer -> member units (CSR in layer order, each unit once per layer).
+        allocate(layer_first(nl + 1), layer_units(max(16, nu)), stamp(nu))
+        stamp = 0
+        n_pairs = 0
+        do l = 1, nl
+            layer_first(l) = n_pairs + 1
+            associate (ly => model%layers(l))
+                if (allocated(ly%sources)) then
+                    do k = 1, size(ly%sources)
+                        call add_member(ly%sources(k)%s, l)
+                    end do
+                end if
+                if (allocated(ly%targets)) then
+                    do k = 1, size(ly%targets)
+                        t = ly%targets(k)
+                        do s = 1, size(model%targets(t)%sources)
+                            call add_member(model%targets(t)%sources(s)%s, l)
+                        end do
+                    end do
+                end if
             end associate
         end do
-    end if
-    do while (top > 0)
-        t = stack(top)
-        top = top - 1
-        do k = 1, size(model%targets(t)%link_deps)
-            call push(model%targets(t)%link_deps(k))
+        layer_first(nl + 1) = n_pairs + 1
+
+        ! Unit -> layers (CSR, ascending layer index) by counting.
+        allocate(unit_first(nu + 1), unit_layers(max(1, n_pairs)), fill(nu))
+        fill = 0
+        do j = 1, n_pairs
+            fill(layer_units(j)) = fill(layer_units(j)) + 1
         end do
-    end do
-    allocate(plan%targets(count(needed)))
-    n = 0
-    do i = 1, model%n_targets
-        if (.not. needed(i)) cycle
-        n = n + 1
-        plan%targets(n) = i
-    end do
-
-contains
-
-    subroutine push(target_index)
-        integer, intent(in) :: target_index
-
-        if (needed(target_index)) return
-        needed(target_index) = .true.
-        top = top + 1
-        stack(top) = target_index
-    end subroutine push
-
-end subroutine model_plan
-
-subroutine model_layering_sources(model, extra, paths)
-    !! Project sources a layering check covers: the sources of every
-    !! project-origin target and of every layer, then extra, each once in
-    !! first-seen order. Dependency-origin targets contribute nothing.
-    type(project_model_t), intent(in) :: model
-    type(string_t), intent(in) :: extra(:)
-    type(string_t), allocatable, intent(out) :: paths(:)
-    type(string_t), allocatable :: trimmed(:)
-    type(name_index_t) :: seen
-    integer :: n, i, k
-
-    n = 0
-    allocate(paths(16))
-    do i = 1, model%n_targets
-        if (model%targets(i)%origin /= ORIGIN_PROJECT) cycle
-        if (.not. allocated(model%targets(i)%sources)) cycle
-        do k = 1, size(model%targets(i)%sources)
-            call add(model%targets(i)%sources(k)%s)
+        unit_first(1) = 1
+        do u = 1, nu
+            unit_first(u + 1) = unit_first(u) + fill(u)
+            fill(u) = unit_first(u)
         end do
-    end do
-    do i = 1, model%n_layers
-        if (.not. allocated(model%layers(i)%sources)) cycle
-        do k = 1, size(model%layers(i)%sources)
-            call add(model%layers(i)%sources(k)%s)
-        end do
-    end do
-    do k = 1, size(extra)
-        call add(extra(k)%s)
-    end do
-    allocate(trimmed(n))
-    trimmed(:) = paths(1:n)
-    call move_alloc(trimmed, paths)
-
-contains
-
-    subroutine add(path)
-        character(len=*), intent(in) :: path
-        type(string_t), allocatable :: grown(:)
-        integer :: existing
-
-        if (len(path) == 0) return
-        call index_insert(seen, path, n + 1, existing)
-        if (existing /= 0) return
-        n = n + 1
-        if (n > size(paths)) then
-            allocate(grown(2*size(paths)))
-            grown(1:n - 1) = paths(1:n - 1)
-            call move_alloc(grown, paths)
-        end if
-        paths(n)%s = path
-    end subroutine add
-
-end subroutine model_layering_sources
-
-subroutine model_layering(model, units, report)
-    !! Layering check, the same for every backend. A source in layer A that
-    !! uses a module defined by a source in layer B violates the layering
-    !! when B is outside the uses closure of A (A included). On CMake the
-    !! layers are the project libraries and their uses the link graph.
-    !!
-    !! A source's layers are the layers listing it as a source or containing
-    !! a target that lists it. Only modules defined by units are checked:
-    !! intrinsic, external and dependency modules are ignored, as is a
-    !! module the source defines itself or one with a provider in no layer.
-    !! With several providers, any reachable one satisfies the use. Duplicate
-    !! unit paths count once (the first). Cost: hashed lookups, linear in
-    !! units, layer memberships and module uses, plus one closure walk per
-    !! layer that has member sources.
-    type(project_model_t), intent(in) :: model
-    type(model_unit_t), intent(in) :: units(:)
-    type(model_layering_t), intent(out) :: report
-    type(name_index_t) :: path_index, module_index
-    logical, allocatable :: active(:)
-    integer, allocatable :: layer_first(:), layer_units(:)
-    integer, allocatable :: unit_first(:), unit_layers(:), fill(:)
-    integer, allocatable :: module_head(:), provider_next(:), provider_unit(:)
-    integer, allocatable :: stamp(:), mark(:), queue(:), module_seen(:)
-    integer :: nu, nl, n_pairs, n_modules, n_providers, n_violations
-    integer :: u, l, k, j, t, s, m, e, p, existing, token, a, best, head, tail
-    logical :: reached, unlayered_provider, other_provider
-
-    if (.not. model%finalized) error stop 'model_layering: model not finalized'
-    nu = size(units)
-    nl = model%n_layers
-    allocate(active(nu))
-    do u = 1, nu
-        call index_insert(path_index, units(u)%path, u, existing)
-        active(u) = existing == 0
-    end do
-
-    ! Layer -> member units (CSR in layer order, each unit once per layer).
-    allocate(layer_first(nl + 1), layer_units(max(16, nu)), stamp(nu))
-    stamp = 0
-    n_pairs = 0
-    do l = 1, nl
-        layer_first(l) = n_pairs + 1
-        associate (ly => model%layers(l))
-            if (allocated(ly%sources)) then
-                do k = 1, size(ly%sources)
-                    call add_member(ly%sources(k)%s, l)
-                end do
-            end if
-            if (allocated(ly%targets)) then
-                do k = 1, size(ly%targets)
-                    t = ly%targets(k)
-                    do s = 1, size(model%targets(t)%sources)
-                        call add_member(model%targets(t)%sources(s)%s, l)
-                    end do
-                end do
-            end if
-        end associate
-    end do
-    layer_first(nl + 1) = n_pairs + 1
-
-    ! Unit -> layers (CSR, ascending layer index) by counting.
-    allocate(unit_first(nu + 1), unit_layers(max(1, n_pairs)), fill(nu))
-    fill = 0
-    do j = 1, n_pairs
-        fill(layer_units(j)) = fill(layer_units(j)) + 1
-    end do
-    unit_first(1) = 1
-    do u = 1, nu
-        unit_first(u + 1) = unit_first(u) + fill(u)
-        fill(u) = unit_first(u)
-    end do
-    do l = 1, nl
-        do j = layer_first(l), layer_first(l + 1) - 1
-            u = layer_units(j)
-            unit_layers(fill(u)) = l
-            fill(u) = fill(u) + 1
-        end do
-    end do
-
-    ! Module name -> providing units (linked lists over provider entries).
-    allocate(module_head(16), provider_next(16), provider_unit(16))
-    n_modules = 0
-    n_providers = 0
-    do u = 1, nu
-        if (.not. active(u)) cycle
-        if (.not. allocated(units(u)%provides)) cycle
-        do k = 1, size(units(u)%provides)
-            m = index_lookup(module_index, to_lower(units(u)%provides(k)%s))
-            if (m == 0) then
-                n_modules = n_modules + 1
-                call index_insert(module_index, &
-                    to_lower(units(u)%provides(k)%s), n_modules, existing)
-                call grow_ints(module_head, n_modules)
-                module_head(n_modules) = 0
-                m = n_modules
-            end if
-            n_providers = n_providers + 1
-            call grow_ints(provider_next, n_providers)
-            call grow_ints(provider_unit, n_providers)
-            provider_unit(n_providers) = u
-            provider_next(n_providers) = module_head(m)
-            module_head(m) = n_providers
-        end do
-    end do
-
-    allocate(report%violations(8))
-    n_violations = 0
-    allocate(mark(max(1, nl)), queue(max(1, nl)), module_seen(max(1, n_modules)))
-    mark = 0
-    module_seen = 0
-    token = 0
-    do a = 1, nl
-        if (layer_first(a) == layer_first(a + 1)) cycle
-        ! Uses closure of a: mark(x) == a.
-        mark(a) = a
-        queue(1) = a
-        head = 1
-        tail = 1
-        do while (head <= tail)
-            l = queue(head)
-            head = head + 1
-            do k = 1, size(model%layers(l)%uses)
-                if (mark(model%layers(l)%uses(k)) == a) cycle
-                mark(model%layers(l)%uses(k)) = a
-                tail = tail + 1
-                queue(tail) = model%layers(l)%uses(k)
+        do l = 1, nl
+            do j = layer_first(l), layer_first(l + 1) - 1
+                u = layer_units(j)
+                unit_layers(fill(u)) = l
+                fill(u) = fill(u) + 1
             end do
         end do
-        do j = layer_first(a), layer_first(a + 1) - 1
-            u = layer_units(j)
-            if (.not. allocated(units(u)%uses)) cycle
-            token = token + 1
-            do k = 1, size(units(u)%uses)
-                m = index_lookup(module_index, to_lower(units(u)%uses(k)%s))
-                if (m == 0) cycle
-                if (module_seen(m) == token) cycle
-                module_seen(m) = token
-                call judge(u, m)
-                if (reached .or. unlayered_provider .or. .not. other_provider) cycle
-                call add_violation(u, units(u)%uses(k)%s, a, best)
+
+        ! Module name -> providing units (linked lists over provider entries).
+        allocate(module_head(16), provider_next(16), provider_unit(16))
+        n_modules = 0
+        n_providers = 0
+        do u = 1, nu
+            if (.not. active(u)) cycle
+            if (.not. allocated(units(u)%provides)) cycle
+            do k = 1, size(units(u)%provides)
+                m = index_lookup(module_index, to_lower(units(u)%provides(k)%s))
+                if (m == 0) then
+                    n_modules = n_modules + 1
+                    call index_insert(module_index, &
+                        to_lower(units(u)%provides(k)%s), n_modules, existing)
+                    call grow_ints(module_head, n_modules)
+                    module_head(n_modules) = 0
+                    m = n_modules
+                end if
+                n_providers = n_providers + 1
+                call grow_ints(provider_next, n_providers)
+                call grow_ints(provider_unit, n_providers)
+                provider_unit(n_providers) = u
+                provider_next(n_providers) = module_head(m)
+                module_head(m) = n_providers
             end do
         end do
-    end do
-    if (nl > 0) then
-        allocate(report%unlayered(count(active .and. &
-            unit_first(2:nu + 1) == unit_first(1:nu))))
-    else
-        allocate(report%unlayered(0))
-    end if
-    j = 0
-    do u = 1, nu
-        if (.not. active(u)) cycle
-        if (unit_first(u + 1) > unit_first(u)) then
-            report%checked = report%checked + 1
-        else if (nl > 0) then
-            j = j + 1
-            report%unlayered(j)%s = units(u)%path
+
+        allocate(report%violations(8))
+        n_violations = 0
+        allocate(mark(max(1, nl)), queue(max(1, nl)), module_seen(max(1, n_modules)))
+        mark = 0
+        module_seen = 0
+        token = 0
+        do a = 1, nl
+            if (layer_first(a) == layer_first(a + 1)) cycle
+            ! Uses closure of a: mark(x) == a.
+            mark(a) = a
+            queue(1) = a
+            head = 1
+            tail = 1
+            do while (head <= tail)
+                l = queue(head)
+                head = head + 1
+                do k = 1, size(model%layers(l)%uses)
+                    if (mark(model%layers(l)%uses(k)) == a) cycle
+                    mark(model%layers(l)%uses(k)) = a
+                    tail = tail + 1
+                    queue(tail) = model%layers(l)%uses(k)
+                end do
+            end do
+            do j = layer_first(a), layer_first(a + 1) - 1
+                u = layer_units(j)
+                if (.not. allocated(units(u)%uses)) cycle
+                token = token + 1
+                do k = 1, size(units(u)%uses)
+                    m = index_lookup(module_index, to_lower(units(u)%uses(k)%s))
+                    if (m == 0) cycle
+                    if (module_seen(m) == token) cycle
+                    module_seen(m) = token
+                    call judge(u, m)
+                    if (reached .or. unlayered_provider .or. .not. other_provider) cycle
+                    call add_violation(u, units(u)%uses(k)%s, a, best)
+                end do
+            end do
+        end do
+        if (nl > 0) then
+            allocate(report%unlayered(count(active .and. &
+                unit_first(2:nu + 1) == unit_first(1:nu))))
+        else
+            allocate(report%unlayered(0))
         end if
-    end do
-    call shrink_violations()
+        j = 0
+        do u = 1, nu
+            if (.not. active(u)) cycle
+            if (unit_first(u + 1) > unit_first(u)) then
+                report%checked = report%checked + 1
+            else if (nl > 0) then
+                j = j + 1
+                report%unlayered(j)%s = units(u)%path
+            end if
+        end do
+        call shrink_violations()
 
-contains
+    contains
 
-    subroutine add_member(path, layer)
-        character(len=*), intent(in) :: path
-        integer, intent(in) :: layer
-        integer :: unit
+        subroutine add_member(path, layer)
+            character(len=*), intent(in) :: path
+            integer, intent(in) :: layer
+            integer :: unit
 
-        unit = index_lookup(path_index, path)
-        if (unit == 0) return
-        if (stamp(unit) == layer) return
-        stamp(unit) = layer
-        n_pairs = n_pairs + 1
-        call grow_ints(layer_units, n_pairs)
-        layer_units(n_pairs) = unit
-    end subroutine add_member
+            unit = index_lookup(path_index, path)
+            if (unit == 0) return
+            if (stamp(unit) == layer) return
+            stamp(unit) = layer
+            n_pairs = n_pairs + 1
+            call grow_ints(layer_units, n_pairs)
+            layer_units(n_pairs) = unit
+        end subroutine add_member
 
-    subroutine judge(user, module)
-        !! Providers of module seen from user in the layer being checked.
-        integer, intent(in) :: user, module
-        integer :: i
+        subroutine judge(user, module)
+            !! Providers of module seen from user in the layer being checked.
+            integer, intent(in) :: user, module
+            integer :: i
 
-        reached = .false.
-        unlayered_provider = .false.
-        other_provider = .false.
-        best = 0
-        e = module_head(module)
-        do while (e /= 0)
-            p = provider_unit(e)
-            e = provider_next(e)
-            if (p == user) then
-                reached = .true.
+            reached = .false.
+            unlayered_provider = .false.
+            other_provider = .false.
+            best = 0
+            e = module_head(module)
+            do while (e /= 0)
+                p = provider_unit(e)
+                e = provider_next(e)
+                if (p == user) then
+                    reached = .true.
+                    cycle
+                end if
+                other_provider = .true.
+                if (unit_first(p + 1) == unit_first(p)) then
+                    unlayered_provider = .true.
+                    cycle
+                end if
+                do i = unit_first(p), unit_first(p + 1) - 1
+                    if (mark(unit_layers(i)) == a) reached = .true.
+                end do
+                if (best == 0) then
+                    best = p
+                else if (p < best) then
+                    best = p
+                end if
+            end do
+        end subroutine judge
+
+        subroutine add_violation(user, module, layer, provider)
+            integer, intent(in) :: user, layer, provider
+            character(len=*), intent(in) :: module
+            type(model_violation_t), allocatable :: grown(:)
+
+            n_violations = n_violations + 1
+            if (n_violations > size(report%violations)) then
+                allocate(grown(2*size(report%violations)))
+                grown(1:n_violations - 1) = report%violations(1:n_violations - 1)
+                call move_alloc(grown, report%violations)
+            end if
+            associate (v => report%violations(n_violations))
+                v%source = units(user)%path
+                v%module = module
+                v%layer = model%layers(layer)%name
+                v%provider = units(provider)%path
+                v%provider_layer = model%layers(unit_layers(unit_first(provider)))%name
+            end associate
+        end subroutine add_violation
+
+        subroutine shrink_violations()
+            type(model_violation_t), allocatable :: kept(:)
+
+            allocate(kept(n_violations))
+            kept(:) = report%violations(1:n_violations)
+            call move_alloc(kept, report%violations)
+        end subroutine shrink_violations
+
+    end subroutine model_layering
+
+    subroutine model_affected(model, units, roots, changed, selection, widen_reasons, &
+            force_reason, delta)
+        !! Restrict a selection to the cases affected by changed project files,
+        !! the same for every backend (#189, #197). changed holds paths relative
+        !! to the project root; model and unit paths are made relative by
+        !! stripping one of roots (the project root as the model spells it).
+        !! units are the scanned Fortran sources of the project.
+        !!
+        !! A case is affected when a changed file is
+        !!  * a declared input of the case (fpm `input` attribute from a test
+        !!    group, CTest REQUIRED_FILES), or a file below such a directory;
+        !!  * a source in the module-use closure of the sources of its command
+        !!    (or declared) targets; the closure follows `use` to every unit
+        !!    providing the module, on both backends;
+        !!  * a source of a target in the link closure of those targets that is
+        !!    not reached through modules: a source providing no module that any
+        !!    unit uses (programs, submodules, external procedures, unscanned
+        !!    C sources), which the case links without a `use` edge; a file with
+        !!    a used module and also such units counts the same (other_units).
+        !! A case without a known command target is affected by every relevant
+        !! change. Every selected case is affected (widened) when a build
+        !! description (fpm.toml, CMakeLists.txt, *.cmake, CMake presets)
+        !! changes, when a changed Fortran/C source belongs to no target and is
+        !! no module some unit uses, or when force_reason is given. Other files
+        !! (documentation, undeclared data) affect nothing. Unselected cases stay
+        !! unselected; the affected subset keeps the selection order.
+        !! model_case_digests hashes exactly these per-case file sets.
+        !!
+        !! delta lists the build descriptions whose edits only register tests
+        !! and targets (fo_cmake_delta). They do not widen; they affect the
+        !! cases they may create (by name, or through a created target in the
+        !! case's link closure), the cases without a known command target, and
+        !! the cases whose command or attributes name the build tree, because
+        !! configure-time enumerations of all targets or tests reach a case only
+        !! through a script or a generated file.
+        type(project_model_t), intent(in) :: model
+        type(model_unit_t), intent(in) :: units(:)
+        type(string_t), intent(in) :: roots(:), changed(:)
+        type(model_selection_t), intent(inout) :: selection
+        type(string_t), allocatable, intent(out) :: widen_reasons(:)
+        character(len=*), intent(in), optional :: force_reason
+        type(cmake_delta_t), intent(in), optional :: delta
+        type(affect_graph_t) :: g
+        integer, allocatable :: kinds(:), change_unit(:), change_source(:), kept(:)
+        type(string_t), allocatable :: cause(:)
+        character(len=:), allocatable :: registered
+        integer :: n_kept, k, c, i, ci
+        logical :: relevant, hit, declared
+
+        if (.not. model%finalized) error stop 'model_affected: model not finalized'
+        allocate(widen_reasons(0))
+        if (selection%status /= SELECT_OK) return
+        call graph_build(g, model, units, roots)
+
+        ! Classify the changes.
+        allocate(kinds(size(changed)), change_unit(size(changed)), &
+            change_source(size(changed)), cause(model%n_cases))
+        do i = 1, model%n_cases
+            cause(i)%s = ''
+        end do
+        relevant = .false.
+        registered = ''
+        if (present(force_reason)) call widen(force_reason)
+        do i = 1, size(changed)
+            call graph_classify(g, changed(i)%s, kinds(i), change_unit(i), &
+                change_source(i))
+            select case (kinds(i))
+            case (FILE_BUILD_DESCRIPTION)
+                if (present(delta)) then
+                    if (any_text(delta%paths, changed(i)%s)) then
+                        if (len(registered) == 0) registered = changed(i)%s
+                        relevant = .true.
+                        cycle
+                    end if
+                end if
+                call widen('build description changed: '//changed(i)%s)
+                cycle
+            case (FILE_UNOWNED_SOURCE)
+                call widen('changed source has no owning target: '//changed(i)%s)
+            case (FILE_CLOSURE)
+                relevant = .true.
+            end select
+            if (kinds(i) == FILE_UNOWNED_SOURCE) cycle
+            declared = .false.
+            do ci = 1, model%n_cases
+                if (.not. case_input_covers(model, ci, roots, changed(i)%s)) cycle
+                declared = .true.
+                relevant = .true.
+                if (len(cause(ci)%s) == 0) cause(ci)%s = &
+                    'affected: declared input '//changed(i)%s//' changed'
+            end do
+            if (kinds(i) == FILE_OTHER .and. .not. declared .and. &
+                    .not. documentation_like(changed(i)%s)) &
+                call widen('changed file may be read by tests: '//changed(i)%s)
+        end do
+
+        ! Per selected case: declared inputs (above), else its closures.
+        allocate(kept(size(selection%cases)))
+        n_kept = 0
+        do k = 1, size(selection%cases)
+            c = selection%cases(k)
+            if (size(widen_reasons) > 0) then
+                call keep(c, 'affected: widened, '//widen_reasons(1)%s)
                 cycle
             end if
-            other_provider = .true.
-            if (unit_first(p + 1) == unit_first(p)) then
-                unlayered_provider = .true.
+            if (len(cause(c)%s) > 0) then
+                call keep(c, cause(c)%s)
                 cycle
             end if
-            do i = unit_first(p), unit_first(p + 1) - 1
-                if (mark(unit_layers(i)) == a) reached = .true.
-            end do
-            if (best == 0) then
-                best = p
-            else if (p < best) then
-                best = p
+            if (.not. relevant) then
+                call drop(c)
+                cycle
             end if
-        end do
-    end subroutine judge
-
-    subroutine add_violation(user, module, layer, provider)
-        integer, intent(in) :: user, layer, provider
-        character(len=*), intent(in) :: module
-        type(model_violation_t), allocatable :: grown(:)
-
-        n_violations = n_violations + 1
-        if (n_violations > size(report%violations)) then
-            allocate(grown(2*size(report%violations)))
-            grown(1:n_violations - 1) = report%violations(1:n_violations - 1)
-            call move_alloc(grown, report%violations)
-        end if
-        associate (v => report%violations(n_violations))
-            v%source = units(user)%path
-            v%module = module
-            v%layer = model%layers(layer)%name
-            v%provider = units(provider)%path
-            v%provider_layer = model%layers(unit_layers(unit_first(provider)))%name
-        end associate
-    end subroutine add_violation
-
-    subroutine shrink_violations()
-        type(model_violation_t), allocatable :: kept(:)
-
-        allocate(kept(n_violations))
-        kept(:) = report%violations(1:n_violations)
-        call move_alloc(kept, report%violations)
-    end subroutine shrink_violations
-
-end subroutine model_layering
-
-subroutine model_affected(model, units, roots, changed, selection, widen_reasons, &
-        force_reason, delta)
-    !! Restrict a selection to the cases affected by changed project files,
-    !! the same for every backend (#189, #197). changed holds paths relative
-    !! to the project root; model and unit paths are made relative by
-    !! stripping one of roots (the project root as the model spells it).
-    !! units are the scanned Fortran sources of the project.
-    !!
-    !! A case is affected when a changed file is
-    !!  * a declared input of the case (fpm `input` attribute from a test
-    !!    group, CTest REQUIRED_FILES), or a file below such a directory;
-    !!  * a source in the module-use closure of the sources of its command
-    !!    (or declared) targets; the closure follows `use` to every unit
-    !!    providing the module, on both backends;
-    !!  * a source of a target in the link closure of those targets that is
-    !!    not reached through modules: a source providing no module that any
-    !!    unit uses (programs, submodules, external procedures, unscanned
-    !!    C sources), which the case links without a `use` edge; a file with
-    !!    a used module and also such units counts the same (other_units).
-    !! A case without a known command target is affected by every relevant
-    !! change. Every selected case is affected (widened) when a build
-    !! description (fpm.toml, CMakeLists.txt, *.cmake, CMake presets)
-    !! changes, when a changed Fortran/C source belongs to no target and is
-    !! no module some unit uses, or when force_reason is given. Other files
-    !! (documentation, undeclared data) affect nothing. Unselected cases stay
-    !! unselected; the affected subset keeps the selection order.
-    !! model_case_digests hashes exactly these per-case file sets.
-    !!
-    !! delta lists the build descriptions whose edits only register tests
-    !! and targets (fo_cmake_delta). They do not widen; they affect the
-    !! cases they may create (by name, or through a created target in the
-    !! case's link closure), the cases without a known command target, and
-    !! the cases whose command or attributes name the build tree, because
-    !! configure-time enumerations of all targets or tests reach a case only
-    !! through a script or a generated file.
-    type(project_model_t), intent(in) :: model
-    type(model_unit_t), intent(in) :: units(:)
-    type(string_t), intent(in) :: roots(:), changed(:)
-    type(model_selection_t), intent(inout) :: selection
-    type(string_t), allocatable, intent(out) :: widen_reasons(:)
-    character(len=*), intent(in), optional :: force_reason
-    type(cmake_delta_t), intent(in), optional :: delta
-    type(affect_graph_t) :: g
-    integer, allocatable :: kinds(:), change_unit(:), change_source(:), kept(:)
-    type(string_t), allocatable :: cause(:)
-    character(len=:), allocatable :: registered
-    integer :: n_kept, k, c, i, ci
-    logical :: relevant, hit, declared
-
-    if (.not. model%finalized) error stop 'model_affected: model not finalized'
-    allocate(widen_reasons(0))
-    if (selection%status /= SELECT_OK) return
-    call graph_build(g, model, units, roots)
-
-    ! Classify the changes.
-    allocate(kinds(size(changed)), change_unit(size(changed)), &
-        change_source(size(changed)), cause(model%n_cases))
-    do i = 1, model%n_cases
-        cause(i)%s = ''
-    end do
-    relevant = .false.
-    registered = ''
-    if (present(force_reason)) call widen(force_reason)
-    do i = 1, size(changed)
-        call graph_classify(g, changed(i)%s, kinds(i), change_unit(i), &
-            change_source(i))
-        select case (kinds(i))
-        case (FILE_BUILD_DESCRIPTION)
-            if (present(delta)) then
-                if (any_text(delta%paths, changed(i)%s)) then
-                    if (len(registered) == 0) registered = changed(i)%s
-                    relevant = .true.
+            if (.not. case_mapped(model, c)) then
+                call keep(c, 'affected: no known command target')
+                cycle
+            end if
+            if (len(registered) > 0) then
+                if (any_template(delta%tests, model%cases(c)%name)) then
+                    call keep(c, 'affected: registered by '//registered)
+                    cycle
+                end if
+                if (names_build_tree(c)) then
+                    call keep(c, 'affected: reads the build tree, which '// &
+                        registered//' extends')
                     cycle
                 end if
             end if
-            call widen('build description changed: '//changed(i)%s)
-            cycle
-        case (FILE_UNOWNED_SOURCE)
-            call widen('changed source has no owning target: '//changed(i)%s)
-        case (FILE_CLOSURE)
+            call graph_closure(g, model, units, c)
+            if (len(registered) > 0) then
+                if (closure_created(c)) then
+                    call keep(c, 'affected: links a target registered by '//registered)
+                    cycle
+                end if
+            end if
+            hit = .false.
+            do i = 1, size(changed)
+                if (kinds(i) /= FILE_CLOSURE) cycle
+                if (graph_reached(g, change_unit(i), change_source(i))) then
+                    call keep(c, 'affected: '//changed(i)%s//' changed')
+                    hit = .true.
+                    exit
+                end if
+            end do
+            if (.not. hit) call drop(c)
+        end do
+        selection%cases = kept(1:n_kept)
+        if (n_kept == 0) then
+            selection%status = SELECT_EMPTY
+            selection%message = 'no test case is affected by the changes'
+        end if
+
+    contains
+
+        subroutine widen(reason)
+            character(len=*), intent(in) :: reason
+
+            call append_string(widen_reasons, reason)
             relevant = .true.
-        end select
-        if (kinds(i) == FILE_UNOWNED_SOURCE) cycle
-        declared = .false.
-        do ci = 1, model%n_cases
-            if (.not. case_input_covers(model, ci, roots, changed(i)%s)) cycle
-            declared = .true.
-            relevant = .true.
-            if (len(cause(ci)%s) == 0) cause(ci)%s = &
-                'affected: declared input '//changed(i)%s//' changed'
-        end do
-        if (kinds(i) == FILE_OTHER .and. .not. declared .and. &
-                .not. documentation_like(changed(i)%s)) &
-            call widen('changed file may be read by tests: '//changed(i)%s)
-    end do
+        end subroutine widen
 
-    ! Per selected case: declared inputs (above), else its closures.
-    allocate(kept(size(selection%cases)))
-    n_kept = 0
-    do k = 1, size(selection%cases)
-        c = selection%cases(k)
-        if (size(widen_reasons) > 0) then
-            call keep(c, 'affected: widened, '//widen_reasons(1)%s)
-            cycle
-        end if
-        if (len(cause(c)%s) > 0) then
-            call keep(c, cause(c)%s)
-            cycle
-        end if
-        if (.not. relevant) then
-            call drop(c)
-            cycle
-        end if
-        if (.not. case_mapped(model, c)) then
-            call keep(c, 'affected: no known command target')
-            cycle
-        end if
-        if (len(registered) > 0) then
-            if (any_template(delta%tests, model%cases(c)%name)) then
-                call keep(c, 'affected: registered by '//registered)
-                cycle
-            end if
-            if (names_build_tree(c)) then
-                call keep(c, 'affected: reads the build tree, which '// &
-                    registered//' extends')
-                cycle
-            end if
-        end if
-        call graph_closure(g, model, units, c)
-        if (len(registered) > 0) then
-            if (closure_created(c)) then
-                call keep(c, 'affected: links a target registered by '//registered)
-                cycle
-            end if
-        end if
-        hit = .false.
-        do i = 1, size(changed)
-            if (kinds(i) /= FILE_CLOSURE) cycle
-            if (graph_reached(g, change_unit(i), change_source(i))) then
-                call keep(c, 'affected: '//changed(i)%s//' changed')
-                hit = .true.
-                exit
-            end if
-        end do
-        if (.not. hit) call drop(c)
-    end do
-    selection%cases = kept(1:n_kept)
-    if (n_kept == 0) then
-        selection%status = SELECT_EMPTY
-        selection%message = 'no test case is affected by the changes'
-    end if
+        subroutine keep(ci, text)
+            integer, intent(in) :: ci
+            character(len=*), intent(in) :: text
 
-contains
+            n_kept = n_kept + 1
+            kept(n_kept) = ci
+            selection%reasons(ci)%s = text
+        end subroutine keep
 
-    subroutine widen(reason)
-        character(len=*), intent(in) :: reason
+        subroutine drop(ci)
+            integer, intent(in) :: ci
 
-        call append_string(widen_reasons, reason)
-        relevant = .true.
-    end subroutine widen
+            selection%disposition(ci) = CASE_NOT_AFFECTED
+            selection%reasons(ci)%s = 'not affected by the changes'
+        end subroutine drop
 
-    subroutine keep(ci, text)
-        integer, intent(in) :: ci
-        character(len=*), intent(in) :: text
+        logical function closure_created(ci) result(found)
+            !! A target of the last graph_closure matches a created target.
+            integer, intent(in) :: ci
+            integer :: t
 
-        n_kept = n_kept + 1
-        kept(n_kept) = ci
-        selection%reasons(ci)%s = text
-    end subroutine keep
-
-    subroutine drop(ci)
-        integer, intent(in) :: ci
-
-        selection%disposition(ci) = CASE_NOT_AFFECTED
-        selection%reasons(ci)%s = 'not affected by the changes'
-    end subroutine drop
-
-    logical function closure_created(ci) result(found)
-        !! A target of the last graph_closure matches a created target.
-        integer, intent(in) :: ci
-        integer :: t
-
-        found = .false.
-        if (ci < 1) return
-        do t = 1, model%n_targets
-            if (g%tstamp(t) /= g%token) cycle
-            if (.not. any_template(delta%targets, model%targets(t)%name)) cycle
-            found = .true.
-            return
-        end do
-    end function closure_created
-
-    logical function names_build_tree(ci) result(found)
-        integer, intent(in) :: ci
-        integer :: a
-
-        found = .false.
-        if (len(model%build_dir) == 0) return
-        ! Built executables and the working directory are the build tree too.
-        if (allocated(model%cases(ci)%command)) then
-            do a = 1, size(model%cases(ci)%command)
-                if (index(model%cases(ci)%command(a)%s, model%build_dir) == 0) cycle
-                if (model_find_artifact(model, model%cases(ci)%command(a)%s) > 0) cycle
+            found = .false.
+            if (ci < 1) return
+            do t = 1, model%n_targets
+                if (g%tstamp(t) /= g%token) cycle
+                if (.not. any_template(delta%targets, model%targets(t)%name)) cycle
                 found = .true.
+                return
             end do
-        end if
-        if (allocated(model%cases(ci)%attrs)) then
-            do a = 1, size(model%cases(ci)%attrs)
-                if (model%cases(ci)%attrs(a)%key == 'WORKING_DIRECTORY') cycle
-                if (index(model%cases(ci)%attrs(a)%value, model%build_dir) > 0) &
+        end function closure_created
+
+        logical function names_build_tree(ci) result(found)
+            integer, intent(in) :: ci
+            integer :: a
+
+            found = .false.
+            if (len(model%build_dir) == 0) return
+            ! Built executables and the working directory are the build tree too.
+            if (allocated(model%cases(ci)%command)) then
+                do a = 1, size(model%cases(ci)%command)
+                    if (index(model%cases(ci)%command(a)%s, model%build_dir) == 0) cycle
+                    if (model_find_artifact(model, model%cases(ci)%command(a)%s) > 0) cycle
                     found = .true.
-            end do
-        end if
-    end function names_build_tree
+                end do
+            end if
+            if (allocated(model%cases(ci)%attrs)) then
+                do a = 1, size(model%cases(ci)%attrs)
+                    if (model%cases(ci)%attrs(a)%key == 'WORKING_DIRECTORY') cycle
+                    if (index(model%cases(ci)%attrs(a)%value, model%build_dir) > 0) &
+                        found = .true.
+                end do
+            end if
+        end function names_build_tree
 
-end subroutine model_affected
+    end subroutine model_affected
 
-logical function any_text(items, text) result(found)
-    type(string_t), intent(in) :: items(:)
-    character(len=*), intent(in) :: text
-    integer :: k
-
-    found = .false.
-    do k = 1, size(items)
-        if (items(k)%s == text) found = .true.
-    end do
-end function any_text
-
-logical function any_template(templates, name) result(found)
-    type(string_t), intent(in) :: templates(:)
-    character(len=*), intent(in) :: name
-    integer :: k
-
-    found = .false.
-    do k = 1, size(templates)
-        if (cmake_template_matches(templates(k)%s, name)) found = .true.
-    end do
-end function any_template
-
-subroutine model_expand_cases(model, listings, ierr, message)
-    !! Add the listed cases of executable cases (#217): each parent keeps
-    !! its place, is marked expanded and is followed by its children
-    !! `parent::case`, which inherit its labels, layer, mapping, command and
-    !! attributes. A child with sources narrows its input closure to them
-    !! (graph_closure). Earlier children are removed first, so expanding
-    !! again after a rebuild starts from the executable cases.
-    type(project_model_t), intent(inout) :: model
-    type(model_listing_t), intent(in) :: listings(:)
-    integer, intent(out) :: ierr
-    character(len=:), allocatable, intent(out) :: message
-    type(model_case_t), allocatable :: old(:), cases(:)
-    integer :: i, j, n, total
-
-    call model_collapse_cases(model, ierr, message)
-    if (ierr /= 0) return
-    total = model%n_cases
-    do j = 1, size(listings)
-        total = total + size(listings(j)%names)
-    end do
-    allocate(old(model%n_cases), cases(total))
-    old(:) = model%cases(1:model%n_cases)
-    n = 0
-    do i = 1, size(old)
-        n = n + 1
-        cases(n) = old(i)
-        do j = 1, size(listings)
-            if (listings(j)%parent /= i) cycle
-            if (size(listings(j)%names) == 0) cycle
-            cases(n)%expanded = .true.
-            call add_children(listings(j), old(i))
-        end do
-    end do
-    call model_replace_cases(model, cases(1:n), ierr, message)
-
-contains
-
-    subroutine add_children(listing, parent)
-        type(model_listing_t), intent(in) :: listing
-        type(model_case_t), intent(in) :: parent
+    logical function any_text(items, text) result(found)
+        type(string_t), intent(in) :: items(:)
+        character(len=*), intent(in) :: text
         integer :: k
 
-        do k = 1, size(listing%names)
+        found = .false.
+        do k = 1, size(items)
+            if (items(k)%s == text) found = .true.
+        end do
+    end function any_text
+
+    logical function any_template(templates, name) result(found)
+        type(string_t), intent(in) :: templates(:)
+        character(len=*), intent(in) :: name
+        integer :: k
+
+        found = .false.
+        do k = 1, size(templates)
+            if (cmake_template_matches(templates(k)%s, name)) found = .true.
+        end do
+    end function any_template
+
+    subroutine model_expand_cases(model, listings, ierr, message)
+        !! Add the listed cases of executable cases (#217): each parent keeps
+        !! its place, is marked expanded and is followed by its children
+        !! `parent::case`, which inherit its labels, layer, mapping, command and
+        !! attributes. A child with sources narrows its input closure to them
+        !! (graph_closure). Earlier children are removed first, so expanding
+        !! again after a rebuild starts from the executable cases.
+        type(project_model_t), intent(inout) :: model
+        type(model_listing_t), intent(in) :: listings(:)
+        integer, intent(out) :: ierr
+        character(len=:), allocatable, intent(out) :: message
+        type(model_case_t), allocatable :: old(:), cases(:)
+        integer :: i, j, n, total
+
+        call model_collapse_cases(model, ierr, message)
+        if (ierr /= 0) return
+        total = model%n_cases
+        do j = 1, size(listings)
+            total = total + size(listings(j)%names)
+        end do
+        allocate(old(model%n_cases), cases(total))
+        old(:) = model%cases(1:model%n_cases)
+        n = 0
+        do i = 1, size(old)
             n = n + 1
-            cases(n) = parent
-            cases(n)%name = parent%name//CASE_SEP//listing%names(k)%s
+            cases(n) = old(i)
+            do j = 1, size(listings)
+                if (listings(j)%parent /= i) cycle
+                if (size(listings(j)%names) == 0) cycle
+                cases(n)%expanded = .true.
+                call add_children(listings(j), old(i))
+            end do
+        end do
+        call model_replace_cases(model, cases(1:n), ierr, message)
+
+    contains
+
+        subroutine add_children(listing, parent)
+            type(model_listing_t), intent(in) :: listing
+            type(model_case_t), intent(in) :: parent
+            integer :: k
+
+            do k = 1, size(listing%names)
+                n = n + 1
+                cases(n) = parent
+                cases(n)%name = parent%name//CASE_SEP//listing%names(k)%s
+                cases(n)%expanded = .false.
+                cases(n)%parent = parent%name
+                call split_sources(listing%sources(k)%s, cases(n)%case_sources)
+            end do
+        end subroutine add_children
+
+    end subroutine model_expand_cases
+
+    subroutine model_collapse_cases(model, ierr, message)
+        !! Drop the children of model_expand_cases.
+        type(project_model_t), intent(inout) :: model
+        integer, intent(out) :: ierr
+        character(len=:), allocatable, intent(out) :: message
+        type(model_case_t), allocatable :: cases(:)
+        integer :: i, n
+
+        ierr = 0
+        message = ''
+        if (.not. any([(model%cases(i)%expanded .or. allocated(model%cases(i)%parent), &
+            i=1, model%n_cases)])) return
+        allocate(cases(model%n_cases))
+        n = 0
+        do i = 1, model%n_cases
+            if (allocated(model%cases(i)%parent)) cycle
+            n = n + 1
+            cases(n) = model%cases(i)
             cases(n)%expanded = .false.
-            cases(n)%parent = parent%name
-            call split_sources(listing%sources(k)%s, cases(n)%case_sources)
         end do
-    end subroutine add_children
+        call model_replace_cases(model, cases(1:n), ierr, message)
+    end subroutine model_collapse_cases
 
-end subroutine model_expand_cases
+    subroutine model_replace_cases(model, cases, ierr, message)
+        !! Install cases, rebuild the name index and finalize again.
+        type(project_model_t), intent(inout) :: model
+        type(model_case_t), intent(in) :: cases(:)
+        integer, intent(out) :: ierr
+        character(len=:), allocatable, intent(out) :: message
+        integer :: i, existing
 
-subroutine model_collapse_cases(model, ierr, message)
-    !! Drop the children of model_expand_cases.
-    type(project_model_t), intent(inout) :: model
-    integer, intent(out) :: ierr
-    character(len=:), allocatable, intent(out) :: message
-    type(model_case_t), allocatable :: cases(:)
-    integer :: i, n
+        model%cases = cases
+        model%n_cases = size(cases)
+        model%case_index = name_index_t()
+        do i = 1, model%n_cases
+            call index_insert(model%case_index, model%cases(i)%name, i, existing)
+            if (existing /= 0) call note_duplicate(model, 'test case', &
+                model%cases(i)%name)
+        end do
+        call model_finalize(model, ierr, message)
+    end subroutine model_replace_cases
 
-    ierr = 0
-    message = ''
-    if (.not. any([(model%cases(i)%expanded .or. allocated(model%cases(i)%parent), &
-        i=1, model%n_cases)])) return
-    allocate(cases(model%n_cases))
-    n = 0
-    do i = 1, model%n_cases
-        if (allocated(model%cases(i)%parent)) cycle
-        n = n + 1
-        cases(n) = model%cases(i)
-        cases(n)%expanded = .false.
-    end do
-    call model_replace_cases(model, cases(1:n), ierr, message)
-end subroutine model_collapse_cases
+    subroutine split_sources(text, items)
+        character(len=*), intent(in) :: text
+        type(string_t), allocatable, intent(out) :: items(:)
+        integer :: pos, next
 
-subroutine model_replace_cases(model, cases, ierr, message)
-    !! Install cases, rebuild the name index and finalize again.
-    type(project_model_t), intent(inout) :: model
-    type(model_case_t), intent(in) :: cases(:)
-    integer, intent(out) :: ierr
-    character(len=:), allocatable, intent(out) :: message
-    integer :: i, existing
+        allocate(items(0))
+        pos = 1
+        do while (pos <= len(text))
+            next = index(text(pos:), ';')
+            if (next == 0) next = len(text) - pos + 2
+            if (next > 1) items = [items, string_t(text(pos:pos + next - 2))]
+            pos = pos + next
+        end do
+    end subroutine split_sources
 
-    model%cases = cases
-    model%n_cases = size(cases)
-    model%case_index = name_index_t()
-    do i = 1, model%n_cases
-        call index_insert(model%case_index, model%cases(i)%name, i, existing)
-        if (existing /= 0) call note_duplicate(model, 'test case', &
-            model%cases(i)%name)
-    end do
-    call model_finalize(model, ierr, message)
-end subroutine model_replace_cases
+    subroutine model_case_digests(model, units, roots, cases, files, contents, digests)
+        !! Digest of the input closure of each case: the contents of every file
+        !! whose change model_affected counts against the case (its declared
+        !! inputs, its module-use and link closure sources, and the files that
+        !! widen every case: build descriptions and sources owned by no
+        !! target), plus the case name, labels and attributes. files are paths
+        !! relative to the project root (as for model_affected's changed), with
+        !! contents(i) the content identity of files(i); the digest follows the
+        !! order of files. A case without a known command target covers every
+        !! relevant file. Equal digests mean that no change between the two
+        !! file sets affects the case.
+        type(project_model_t), intent(in) :: model
+        type(model_unit_t), intent(in) :: units(:)
+        type(string_t), intent(in) :: roots(:), cases(:)
+        type(string_t), intent(in) :: files(:), contents(:)
+        character(len=64), allocatable, intent(out) :: digests(:)
+        type(affect_graph_t) :: g
+        type(builder_t) :: b
+        integer, allocatable :: kinds(:), file_unit(:), file_source(:)
+        logical, allocatable :: any_input(:), covered(:)
+        integer :: f, k, c, j
+        logical :: mapped
 
-subroutine split_sources(text, items)
-    character(len=*), intent(in) :: text
-    type(string_t), allocatable, intent(out) :: items(:)
-    integer :: pos, next
-
-    allocate(items(0))
-    pos = 1
-    do while (pos <= len(text))
-        next = index(text(pos:), ';')
-        if (next == 0) next = len(text) - pos + 2
-        if (next > 1) items = [items, string_t(text(pos:pos + next - 2))]
-        pos = pos + next
-    end do
-end subroutine split_sources
-
-subroutine model_case_digests(model, units, roots, cases, files, contents, digests)
-    !! Digest of the input closure of each case: the contents of every file
-    !! whose change model_affected counts against the case (its declared
-    !! inputs, its module-use and link closure sources, and the files that
-    !! widen every case: build descriptions and sources owned by no
-    !! target), plus the case name, labels and attributes. files are paths
-    !! relative to the project root (as for model_affected's changed), with
-    !! contents(i) the content identity of files(i); the digest follows the
-    !! order of files. A case without a known command target covers every
-    !! relevant file. Equal digests mean that no change between the two
-    !! file sets affects the case.
-    type(project_model_t), intent(in) :: model
-    type(model_unit_t), intent(in) :: units(:)
-    type(string_t), intent(in) :: roots(:), cases(:)
-    type(string_t), intent(in) :: files(:), contents(:)
-    character(len=64), allocatable, intent(out) :: digests(:)
-    type(affect_graph_t) :: g
-    type(builder_t) :: b
-    integer, allocatable :: kinds(:), file_unit(:), file_source(:)
-    logical, allocatable :: any_input(:), covered(:)
-    integer :: f, k, c, j
-    logical :: mapped
-
-    if (.not. model%finalized) error stop 'model_case_digests: model not finalized'
-    if (size(files) /= size(contents)) error stop 'model_case_digests: size mismatch'
-    allocate(digests(size(cases)))
-    call graph_build(g, model, units, roots)
-    allocate(kinds(size(files)), file_unit(size(files)), &
-        file_source(size(files)), any_input(size(files)), covered(size(files)))
-    any_input = .false.
-    do f = 1, size(files)
-        call graph_classify(g, files(f)%s, kinds(f), file_unit(f), file_source(f))
-    end do
-    do c = 1, model%n_cases
-        if (.not. has_inputs(model%cases(c))) cycle
+        if (.not. model%finalized) error stop 'model_case_digests: model not finalized'
+        if (size(files) /= size(contents)) error stop 'model_case_digests: size mismatch'
+        allocate(digests(size(cases)))
+        call graph_build(g, model, units, roots)
+        allocate(kinds(size(files)), file_unit(size(files)), &
+            file_source(size(files)), any_input(size(files)), covered(size(files)))
+        any_input = .false.
         do f = 1, size(files)
-            if (any_input(f)) cycle
-            if (kinds(f) == FILE_BUILD_DESCRIPTION) cycle
-            if (kinds(f) == FILE_UNOWNED_SOURCE) cycle
-            any_input(f) = case_input_covers(model, c, roots, files(f)%s)
+            call graph_classify(g, files(f)%s, kinds(f), file_unit(f), file_source(f))
         end do
-    end do
-    do k = 1, size(cases)
-        c = model_find_case(model, cases(k)%s)
-        b = builder_t()
-        call field(b, 'fo-case-closure-v1')
-        call field(b, cases(k)%s)
-        if (c == 0) then
-            ! Not a model case: no closure is known, nothing can match it.
-            digests(k) = ''
-            cycle
-        end if
-        associate (mc => model%cases(c))
-            call field(b, int_text(size(mc%labels)))
-            do j = 1, size(mc%labels)
-                call field(b, mc%labels(j)%s)
-            end do
-            call field(b, int_text(size(mc%attrs)))
-            do j = 1, size(mc%attrs)
-                call field(b, mc%attrs(j)%key)
-                call field(b, mc%attrs(j)%value)
-            end do
-        end associate
-        mapped = case_mapped(model, c)
-        if (mapped) call graph_closure(g, model, units, c)
-        covered = .false.
-        if (has_inputs(model%cases(c))) then
+        do c = 1, model%n_cases
+            if (.not. has_inputs(model%cases(c))) cycle
             do f = 1, size(files)
+                if (any_input(f)) cycle
                 if (kinds(f) == FILE_BUILD_DESCRIPTION) cycle
                 if (kinds(f) == FILE_UNOWNED_SOURCE) cycle
-                covered(f) = case_input_covers(model, c, roots, files(f)%s)
+                any_input(f) = case_input_covers(model, c, roots, files(f)%s)
+            end do
+        end do
+        do k = 1, size(cases)
+            c = model_find_case(model, cases(k)%s)
+            b = builder_t()
+            call field(b, 'fo-case-closure-v1')
+            call field(b, cases(k)%s)
+            if (c == 0) then
+                ! Not a model case: no closure is known, nothing can match it.
+                digests(k) = ''
+                cycle
+            end if
+            associate (mc => model%cases(c))
+                call field(b, int_text(size(mc%labels)))
+                do j = 1, size(mc%labels)
+                    call field(b, mc%labels(j)%s)
+                end do
+                call field(b, int_text(size(mc%attrs)))
+                do j = 1, size(mc%attrs)
+                    call field(b, mc%attrs(j)%key)
+                    call field(b, mc%attrs(j)%value)
+                end do
+            end associate
+            mapped = case_mapped(model, c)
+            if (mapped) call graph_closure(g, model, units, c)
+            covered = .false.
+            if (has_inputs(model%cases(c))) then
+                do f = 1, size(files)
+                    if (kinds(f) == FILE_BUILD_DESCRIPTION) cycle
+                    if (kinds(f) == FILE_UNOWNED_SOURCE) cycle
+                    covered(f) = case_input_covers(model, c, roots, files(f)%s)
+                end do
+            end if
+            do f = 1, size(files)
+                select case (kinds(f))
+                case (FILE_BUILD_DESCRIPTION, FILE_UNOWNED_SOURCE)
+                    covered(f) = .true.
+                case (FILE_OTHER)
+                    if (.not. any_input(f) .and. .not. documentation_like(files(f)%s)) &
+                        covered(f) = .true.
+                case (FILE_CLOSURE)
+                    if (.not. mapped) then
+                        covered(f) = .true.
+                    else if (graph_reached(g, file_unit(f), file_source(f))) then
+                        covered(f) = .true.
+                    end if
+                end select
+                if (.not. mapped .and. any_input(f)) covered(f) = .true.
+                if (.not. covered(f)) cycle
+                call field(b, files(f)%s)
+                call field(b, contents(f)%s)
+            end do
+            digests(k) = sha256_string(builder_to_string(b))
+        end do
+
+    contains
+
+        logical function has_inputs(mc)
+            type(model_case_t), intent(in) :: mc
+            integer :: a
+
+            has_inputs = .false.
+            if (.not. allocated(mc%attrs)) return
+            do a = 1, size(mc%attrs)
+                if (mc%attrs(a)%key == 'input' .or. &
+                    mc%attrs(a)%key == 'REQUIRED_FILES') has_inputs = .true.
+            end do
+        end function has_inputs
+
+    end subroutine model_case_digests
+
+    subroutine graph_build(g, model, units, roots)
+        !! Index the units (by relative path, provided modules) and the target
+        !! sources (by relative path, owning targets) for model_affected.
+        type(affect_graph_t), intent(out) :: g
+        type(project_model_t), intent(in) :: model
+        type(model_unit_t), intent(in) :: units(:)
+        type(string_t), intent(in) :: roots(:)
+        logical, allocatable :: module_used(:)
+        integer :: u, k, m, t, s, existing, nu
+        character(len=:), allocatable :: rel
+
+        g%roots = roots
+        nu = size(units)
+        g%nu = nu
+        allocate(g%module_head(max(16, nu)), g%provider_next(max(16, nu)), &
+            g%provider_unit(max(16, nu)), g%plain_unit(nu))
+        g%n_modules = 0
+        g%n_providers = 0
+        do u = 1, nu
+            call index_insert(g%unit_index, graph_relative(roots, units(u)%path), u, &
+                existing)
+            do k = 1, size(units(u)%provides)
+                m = graph_module_id(g, units(u)%provides(k)%s, .true.)
+                g%n_providers = g%n_providers + 1
+                call grow_ints(g%provider_next, g%n_providers)
+                call grow_ints(g%provider_unit, g%n_providers)
+                g%provider_unit(g%n_providers) = u
+                g%provider_next(g%n_providers) = g%module_head(m)
+                g%module_head(m) = g%n_providers
+            end do
+        end do
+        allocate(module_used(g%n_modules))
+        module_used = .false.
+        do u = 1, nu
+            do k = 1, size(units(u)%uses)
+                m = index_lookup(g%module_index, to_lower(units(u)%uses(k)%s))
+                if (m > 0) module_used(m) = .true.
+            end do
+        end do
+        do u = 1, nu
+            g%plain_unit(u) = .true.
+            do k = 1, size(units(u)%provides)
+                m = index_lookup(g%module_index, to_lower(units(u)%provides(k)%s))
+                if (module_used(m)) g%plain_unit(u) = .false.
+            end do
+            if (units(u)%other_units) g%plain_unit(u) = .true.
+        end do
+
+        ! Target sources by relative path -> owning targets.
+        allocate(g%owner_head(16), g%owner_next(16), g%owner_target(16))
+        g%n_sources = 0
+        g%n_owners = 0
+        do t = 1, model%n_targets
+            if (.not. allocated(model%targets(t)%sources)) cycle
+            do k = 1, size(model%targets(t)%sources)
+                rel = graph_relative(roots, model%targets(t)%sources(k)%s)
+                s = index_lookup(g%source_index, rel)
+                if (s == 0) then
+                    g%n_sources = g%n_sources + 1
+                    call index_insert(g%source_index, rel, g%n_sources, existing)
+                    call grow_ints(g%owner_head, g%n_sources)
+                    g%owner_head(g%n_sources) = 0
+                    s = g%n_sources
+                end if
+                g%n_owners = g%n_owners + 1
+                call grow_ints(g%owner_next, g%n_owners)
+                call grow_ints(g%owner_target, g%n_owners)
+                g%owner_target(g%n_owners) = t
+                g%owner_next(g%n_owners) = g%owner_head(s)
+                g%owner_head(s) = g%n_owners
+            end do
+        end do
+        allocate(g%tstamp(model%n_targets), g%ustamp(nu), g%queue(max(16, nu)))
+        g%tstamp = 0
+        g%ustamp = 0
+        g%token = 0
+    end subroutine graph_build
+
+    subroutine graph_classify(g, path, kind, unit_id, source_id)
+        !! How a project file (relative path) can affect cases.
+        type(affect_graph_t), intent(in) :: g
+        character(len=*), intent(in) :: path
+        integer, intent(out) :: kind, unit_id, source_id
+
+        unit_id = index_lookup(g%unit_index, path)
+        source_id = index_lookup(g%source_index, path)
+        kind = FILE_CLOSURE
+        if (build_description(path)) then
+            kind = FILE_BUILD_DESCRIPTION
+        else if (header_like(path)) then
+            ! Includers are not scanned: a header may be read by any case.
+            kind = FILE_UNOWNED_SOURCE
+        else if (unit_id == 0 .and. source_id == 0) then
+            kind = FILE_OTHER
+            if (source_like(path)) kind = FILE_UNOWNED_SOURCE
+        else if (source_id == 0) then
+            if (g%plain_unit(unit_id)) kind = FILE_UNOWNED_SOURCE
+        end if
+    end subroutine graph_classify
+
+    subroutine graph_closure(g, model, units, ci)
+        !! tstamp: link closure of the case targets; ustamp: module-use
+        !! closure of their sources (both marked with a new token).
+        type(affect_graph_t), intent(inout) :: g
+        type(project_model_t), intent(in) :: model
+        type(model_unit_t), intent(in) :: units(:)
+        integer, intent(in) :: ci
+        integer :: q, p, r, t, u, m, e, head, tail, n_case
+        logical :: narrowed
+
+        narrowed = .false.
+        if (allocated(model%cases(ci)%case_sources)) &
+            narrowed = size(model%cases(ci)%case_sources) > 0
+        g%token = g%token + 1
+        head = 1
+        tail = 0
+        if (model%cases(ci)%command_target > 0) &
+            call push_target(model%cases(ci)%command_target)
+        if (allocated(model%cases(ci)%declared_targets)) then
+            do q = 1, size(model%cases(ci)%declared_targets)
+                call push_target(model%cases(ci)%declared_targets(q))
             end do
         end if
-        do f = 1, size(files)
-            select case (kinds(f))
-            case (FILE_BUILD_DESCRIPTION, FILE_UNOWNED_SOURCE)
-                covered(f) = .true.
-            case (FILE_OTHER)
-                if (.not. any_input(f) .and. .not. documentation_like(files(f)%s)) &
-                    covered(f) = .true.
-            case (FILE_CLOSURE)
-                if (.not. mapped) then
-                    covered(f) = .true.
-                else if (graph_reached(g, file_unit(f), file_source(f))) then
-                    covered(f) = .true.
-                end if
-            end select
-            if (.not. mapped .and. any_input(f)) covered(f) = .true.
-            if (.not. covered(f)) cycle
-            call field(b, files(f)%s)
-            call field(b, contents(f)%s)
-        end do
-        digests(k) = sha256_string(builder_to_string(b))
-    end do
-
-contains
-
-    logical function has_inputs(mc)
-        type(model_case_t), intent(in) :: mc
-        integer :: a
-
-        has_inputs = .false.
-        if (.not. allocated(mc%attrs)) return
-        do a = 1, size(mc%attrs)
-            if (mc%attrs(a)%key == 'input' .or. &
-                mc%attrs(a)%key == 'REQUIRED_FILES') has_inputs = .true.
-        end do
-    end function has_inputs
-
-end subroutine model_case_digests
-
-subroutine graph_build(g, model, units, roots)
-    !! Index the units (by relative path, provided modules) and the target
-    !! sources (by relative path, owning targets) for model_affected.
-    type(affect_graph_t), intent(out) :: g
-    type(project_model_t), intent(in) :: model
-    type(model_unit_t), intent(in) :: units(:)
-    type(string_t), intent(in) :: roots(:)
-    logical, allocatable :: module_used(:)
-    integer :: u, k, m, t, s, existing, nu
-    character(len=:), allocatable :: rel
-
-    g%roots = roots
-    nu = size(units)
-    g%nu = nu
-    allocate(g%module_head(max(16, nu)), g%provider_next(max(16, nu)), &
-        g%provider_unit(max(16, nu)), g%plain_unit(nu))
-    g%n_modules = 0
-    g%n_providers = 0
-    do u = 1, nu
-        call index_insert(g%unit_index, graph_relative(roots, units(u)%path), u, &
-            existing)
-        do k = 1, size(units(u)%provides)
-            m = graph_module_id(g, units(u)%provides(k)%s, .true.)
-            g%n_providers = g%n_providers + 1
-            call grow_ints(g%provider_next, g%n_providers)
-            call grow_ints(g%provider_unit, g%n_providers)
-            g%provider_unit(g%n_providers) = u
-            g%provider_next(g%n_providers) = g%module_head(m)
-            g%module_head(m) = g%n_providers
-        end do
-    end do
-    allocate(module_used(g%n_modules))
-    module_used = .false.
-    do u = 1, nu
-        do k = 1, size(units(u)%uses)
-            m = index_lookup(g%module_index, to_lower(units(u)%uses(k)%s))
-            if (m > 0) module_used(m) = .true.
-        end do
-    end do
-    do u = 1, nu
-        g%plain_unit(u) = .true.
-        do k = 1, size(units(u)%provides)
-            m = index_lookup(g%module_index, to_lower(units(u)%provides(k)%s))
-            if (module_used(m)) g%plain_unit(u) = .false.
-        end do
-        if (units(u)%other_units) g%plain_unit(u) = .true.
-    end do
-
-    ! Target sources by relative path -> owning targets.
-    allocate(g%owner_head(16), g%owner_next(16), g%owner_target(16))
-    g%n_sources = 0
-    g%n_owners = 0
-    do t = 1, model%n_targets
-        if (.not. allocated(model%targets(t)%sources)) cycle
-        do k = 1, size(model%targets(t)%sources)
-            rel = graph_relative(roots, model%targets(t)%sources(k)%s)
-            s = index_lookup(g%source_index, rel)
-            if (s == 0) then
-                g%n_sources = g%n_sources + 1
-                call index_insert(g%source_index, rel, g%n_sources, existing)
-                call grow_ints(g%owner_head, g%n_sources)
-                g%owner_head(g%n_sources) = 0
-                s = g%n_sources
-            end if
-            g%n_owners = g%n_owners + 1
-            call grow_ints(g%owner_next, g%n_owners)
-            call grow_ints(g%owner_target, g%n_owners)
-            g%owner_target(g%n_owners) = t
-            g%owner_next(g%n_owners) = g%owner_head(s)
-            g%owner_head(s) = g%n_owners
-        end do
-    end do
-    allocate(g%tstamp(model%n_targets), g%ustamp(nu), g%queue(max(16, nu)))
-    g%tstamp = 0
-    g%ustamp = 0
-    g%token = 0
-end subroutine graph_build
-
-subroutine graph_classify(g, path, kind, unit_id, source_id)
-    !! How a project file (relative path) can affect cases.
-    type(affect_graph_t), intent(in) :: g
-    character(len=*), intent(in) :: path
-    integer, intent(out) :: kind, unit_id, source_id
-
-    unit_id = index_lookup(g%unit_index, path)
-    source_id = index_lookup(g%source_index, path)
-    kind = FILE_CLOSURE
-    if (build_description(path)) then
-        kind = FILE_BUILD_DESCRIPTION
-    else if (header_like(path)) then
-        ! Includers are not scanned: a header may be read by any case.
-        kind = FILE_UNOWNED_SOURCE
-    else if (unit_id == 0 .and. source_id == 0) then
-        kind = FILE_OTHER
-        if (source_like(path)) kind = FILE_UNOWNED_SOURCE
-    else if (source_id == 0) then
-        if (g%plain_unit(unit_id)) kind = FILE_UNOWNED_SOURCE
-    end if
-end subroutine graph_classify
-
-subroutine graph_closure(g, model, units, ci)
-    !! tstamp: link closure of the case targets; ustamp: module-use
-    !! closure of their sources (both marked with a new token).
-    type(affect_graph_t), intent(inout) :: g
-    type(project_model_t), intent(in) :: model
-    type(model_unit_t), intent(in) :: units(:)
-    integer, intent(in) :: ci
-    integer :: q, p, r, t, u, m, e, head, tail, n_case
-    logical :: narrowed
-
-    narrowed = .false.
-    if (allocated(model%cases(ci)%case_sources)) &
-        narrowed = size(model%cases(ci)%case_sources) > 0
-    g%token = g%token + 1
-    head = 1
-    tail = 0
-    if (model%cases(ci)%command_target > 0) &
-        call push_target(model%cases(ci)%command_target)
-    if (allocated(model%cases(ci)%declared_targets)) then
-        do q = 1, size(model%cases(ci)%declared_targets)
-            call push_target(model%cases(ci)%declared_targets(q))
-        end do
-    end if
-    n_case = tail
-    do while (head <= tail)
-        t = g%queue(head)
-        head = head + 1
-        if (.not. allocated(model%targets(t)%link_deps)) cycle
-        do q = 1, size(model%targets(t)%link_deps)
-            call push_target(model%targets(t)%link_deps(q))
-        end do
-    end do
-    ! Roots of the module walk: every source of the case targets, and the
-    ! units of the other linked targets no module use leads to (programs,
-    ! submodules, external procedures), whose own `use` statements count.
-    do q = 1, tail
-        associate (tg => model%targets(g%queue(q)))
-            if (.not. allocated(tg%sources)) cycle
-            do p = 1, size(tg%sources)
-                r = index_lookup(g%unit_index, graph_relative(g%roots, tg%sources(p)%s))
-                if (r == 0) cycle
-                if (q > n_case .and. .not. g%plain_unit(r)) cycle
-                ! A listed case that names its own sources reaches the
-                ! modules those use, not everything its executable's driver
-                ! uses; the executable's own files still count as reached
-                ! (graph_reached), so editing the driver affects every case.
-                if (q <= n_case .and. narrowed) cycle
-                g%ustamp(r) = -g%token
+        n_case = tail
+        do while (head <= tail)
+            t = g%queue(head)
+            head = head + 1
+            if (.not. allocated(model%targets(t)%link_deps)) cycle
+            do q = 1, size(model%targets(t)%link_deps)
+                call push_target(model%targets(t)%link_deps(q))
             end do
-        end associate
-    end do
-    if (narrowed) then
-        do q = 1, size(model%cases(ci)%case_sources)
-            r = index_lookup(g%unit_index, &
-                graph_relative(g%roots, model%cases(ci)%case_sources(q)%s))
-            if (r > 0) g%ustamp(r) = -g%token
         end do
-    end if
-    ! Module-use closure over the root units.
-    head = 1
-    tail = 0
-    do r = 1, g%nu
-        if (g%ustamp(r) == -g%token) then
-            g%ustamp(r) = g%token
+        ! Roots of the module walk: every source of the case targets, and the
+        ! units of the other linked targets no module use leads to (programs,
+        ! submodules, external procedures), whose own `use` statements count.
+        do q = 1, tail
+            associate (tg => model%targets(g%queue(q)))
+                if (.not. allocated(tg%sources)) cycle
+                do p = 1, size(tg%sources)
+                    r = index_lookup(g%unit_index, graph_relative(g%roots, tg%sources(p)%s))
+                    if (r == 0) cycle
+                    if (q > n_case .and. .not. g%plain_unit(r)) cycle
+                    ! A listed case that names its own sources reaches the
+                    ! modules those use, not everything its executable's driver
+                    ! uses; the executable's own files still count as reached
+                    ! (graph_reached), so editing the driver affects every case.
+                    if (q <= n_case .and. narrowed) cycle
+                    g%ustamp(r) = -g%token
+                end do
+            end associate
+        end do
+        if (narrowed) then
+            do q = 1, size(model%cases(ci)%case_sources)
+                r = index_lookup(g%unit_index, &
+                    graph_relative(g%roots, model%cases(ci)%case_sources(q)%s))
+                if (r > 0) g%ustamp(r) = -g%token
+            end do
+        end if
+        ! Module-use closure over the root units.
+        head = 1
+        tail = 0
+        do r = 1, g%nu
+            if (g%ustamp(r) == -g%token) then
+                g%ustamp(r) = g%token
+                tail = tail + 1
+                g%queue(tail) = r
+            end if
+        end do
+        do while (head <= tail)
+            u = g%queue(head)
+            head = head + 1
+            do q = 1, size(units(u)%uses)
+                m = index_lookup(g%module_index, to_lower(units(u)%uses(q)%s))
+                if (m == 0) cycle
+                e = g%module_head(m)
+                do while (e > 0)
+                    r = g%provider_unit(e)
+                    if (g%ustamp(r) /= g%token) then
+                        g%ustamp(r) = g%token
+                        tail = tail + 1
+                        g%queue(tail) = r
+                    end if
+                    e = g%provider_next(e)
+                end do
+            end do
+        end do
+
+    contains
+
+        subroutine push_target(tg)
+            integer, intent(in) :: tg
+
+            if (tg < 1) return
+            if (g%tstamp(tg) == g%token) return
+            g%tstamp(tg) = g%token
             tail = tail + 1
-            g%queue(tail) = r
+            call grow_ints(g%queue, tail)
+            g%queue(tail) = tg
+        end subroutine push_target
+
+    end subroutine graph_closure
+
+    logical function graph_reached(g, unit_id, source_id) result(reached)
+        !! A file (unit_id, source_id) is in the module closure of the last
+        !! graph_closure, or a source without a used module in a linked target.
+        type(affect_graph_t), intent(in) :: g
+        integer, intent(in) :: unit_id, source_id
+        integer :: o
+
+        reached = .false.
+        if (unit_id > 0) then
+            if (g%ustamp(unit_id) == g%token) then
+                reached = .true.
+                return
+            end if
+            if (.not. g%plain_unit(unit_id)) return
         end if
-    end do
-    do while (head <= tail)
-        u = g%queue(head)
-        head = head + 1
-        do q = 1, size(units(u)%uses)
-            m = index_lookup(g%module_index, to_lower(units(u)%uses(q)%s))
-            if (m == 0) cycle
-            e = g%module_head(m)
-            do while (e > 0)
-                r = g%provider_unit(e)
-                if (g%ustamp(r) /= g%token) then
-                    g%ustamp(r) = g%token
-                    tail = tail + 1
-                    g%queue(tail) = r
+        if (source_id == 0) return
+        o = g%owner_head(source_id)
+        do while (o > 0)
+            if (g%tstamp(g%owner_target(o)) == g%token) then
+                reached = .true.
+                return
+            end if
+            o = g%owner_next(o)
+        end do
+    end function graph_reached
+
+    integer function graph_module_id(g, name, add) result(id)
+        type(affect_graph_t), intent(inout) :: g
+        character(len=*), intent(in) :: name
+        logical, intent(in) :: add
+        integer :: existing
+
+        id = index_lookup(g%module_index, to_lower(name))
+        if (id > 0 .or. .not. add) return
+        g%n_modules = g%n_modules + 1
+        call index_insert(g%module_index, to_lower(name), g%n_modules, existing)
+        call grow_ints(g%module_head, g%n_modules)
+        g%module_head(g%n_modules) = 0
+        id = g%n_modules
+    end function graph_module_id
+
+    function graph_relative(roots, path) result(out)
+        !! path without the first of roots it lies below.
+        type(string_t), intent(in) :: roots(:)
+        character(len=*), intent(in) :: path
+        character(len=:), allocatable :: out
+        integer :: r, n
+
+        out = path
+        do r = 1, size(roots)
+            n = len(roots(r)%s)
+            if (n == 0) cycle
+            if (len(path) <= n + 1) cycle
+            if (path(1:n + 1) /= roots(r)%s//'/') cycle
+            out = path(n + 2:)
+            return
+        end do
+    end function graph_relative
+
+    logical function case_mapped(model, ci) result(mapped)
+        type(project_model_t), intent(in) :: model
+        integer, intent(in) :: ci
+
+        mapped = model%cases(ci)%command_target > 0
+        if (allocated(model%cases(ci)%declared_targets)) &
+            mapped = mapped .or. size(model%cases(ci)%declared_targets) > 0
+    end function case_mapped
+
+    logical function case_input_covers(model, ci, roots, path) result(found)
+        !! path is a declared input of case ci (fpm `input`, CTest
+        !! REQUIRED_FILES) or lies below a declared directory.
+        type(project_model_t), intent(in) :: model
+        integer, intent(in) :: ci
+        type(string_t), intent(in) :: roots(:)
+        character(len=*), intent(in) :: path
+        integer :: a, pos, next
+        character(len=:), allocatable :: list, item
+
+        found = .false.
+        if (.not. allocated(model%cases(ci)%attrs)) return
+        do a = 1, size(model%cases(ci)%attrs)
+            associate (attr => model%cases(ci)%attrs(a))
+                if (attr%key /= 'input' .and. attr%key /= 'REQUIRED_FILES') cycle
+                list = attr%value
+            end associate
+            pos = 1
+            do while (pos <= len(list))
+                next = index(list(pos:), ';')
+                if (next == 0) next = len(list) - pos + 2
+                item = graph_relative(roots, list(pos:pos + next - 2))
+                pos = pos + next
+                if (len(item) == 0) cycle
+                if (item /= path) then
+                    if (len(path) <= len(item)) cycle
+                    if (path(1:len(item) + 1) /= item//'/') cycle
                 end if
-                e = g%provider_next(e)
+                found = .true.
+                return
             end do
         end do
-    end do
+    end function case_input_covers
 
-contains
+    logical function build_description(path) result(yes)
+        character(len=*), intent(in) :: path
+        character(len=:), allocatable :: base
 
-    subroutine push_target(tg)
-        integer, intent(in) :: tg
+        base = path(index(path, '/', back=.true.) + 1:)
+        yes = base == 'fpm.toml' .or. base == 'CMakeLists.txt' .or. &
+            base == 'CMakePresets.json' .or. base == 'CMakeUserPresets.json'
+        if (yes) return
+        if (len(base) > 6) yes = to_lower(base(len(base) - 5:)) == '.cmake'
+    end function build_description
 
-        if (tg < 1) return
-        if (g%tstamp(tg) == g%token) return
-        g%tstamp(tg) = g%token
-        tail = tail + 1
-        call grow_ints(g%queue, tail)
-        g%queue(tail) = tg
-    end subroutine push_target
+    logical function source_like(path) result(yes)
+        character(len=*), intent(in) :: path
+        character(len=:), allocatable :: ext
+        integer :: dot
 
-end subroutine graph_closure
+        yes = .false.
+        dot = index(path, '.', back=.true.)
+        if (dot == 0 .or. dot < index(path, '/', back=.true.)) return
+        ext = to_lower(path(dot + 1:))
+        select case (ext)
+        case ('f', 'for', 'ftn', 'f77', 'f90', 'f95', 'f03', 'f08', 'f18', &
+                'fpp', 'fi', 'inc', 'h', 'hh', 'hpp', 'hxx', 'c', 'cc', 'cpp', 'cxx', &
+                'fypp', 'pf')
+            yes = .true.
+        end select
+    end function source_like
 
-logical function graph_reached(g, unit_id, source_id) result(reached)
-    !! A file (unit_id, source_id) is in the module closure of the last
-    !! graph_closure, or a source without a used module in a linked target.
-    type(affect_graph_t), intent(in) :: g
-    integer, intent(in) :: unit_id, source_id
-    integer :: o
+    logical function header_like(path) result(yes)
+        !! A C or Fortran include file: its includers are not tracked.
+        character(len=*), intent(in) :: path
+        character(len=:), allocatable :: ext
+        integer :: dot
 
-    reached = .false.
-    if (unit_id > 0) then
-        if (g%ustamp(unit_id) == g%token) then
-            reached = .true.
-            return
-        end if
-        if (.not. g%plain_unit(unit_id)) return
-    end if
-    if (source_id == 0) return
-    o = g%owner_head(source_id)
-    do while (o > 0)
-        if (g%tstamp(g%owner_target(o)) == g%token) then
-            reached = .true.
-            return
-        end if
-        o = g%owner_next(o)
-    end do
-end function graph_reached
+        yes = .false.
+        dot = index(path, '.', back=.true.)
+        if (dot == 0 .or. dot < index(path, '/', back=.true.)) return
+        ext = to_lower(path(dot + 1:))
+        yes = any(ext == ['h  ', 'hh ', 'hpp', 'hxx', 'inc', 'fi '])
+    end function header_like
 
-integer function graph_module_id(g, name, add) result(id)
-    type(affect_graph_t), intent(inout) :: g
-    character(len=*), intent(in) :: name
-    logical, intent(in) :: add
-    integer :: existing
+    logical function documentation_like(path) result(yes)
+        !! A file no test reads: prose documentation, license files, repository
+        !! metadata and the doc directories.
+        character(len=*), intent(in) :: path
+        character(len=:), allocatable :: base, low, ext
+        integer :: dot, slash
 
-    id = index_lookup(g%module_index, to_lower(name))
-    if (id > 0 .or. .not. add) return
-    g%n_modules = g%n_modules + 1
-    call index_insert(g%module_index, to_lower(name), g%n_modules, existing)
-    call grow_ints(g%module_head, g%n_modules)
-    g%module_head(g%n_modules) = 0
-    id = g%n_modules
-end function graph_module_id
-
-function graph_relative(roots, path) result(out)
-    !! path without the first of roots it lies below.
-    type(string_t), intent(in) :: roots(:)
-    character(len=*), intent(in) :: path
-    character(len=:), allocatable :: out
-    integer :: r, n
-
-    out = path
-    do r = 1, size(roots)
-        n = len(roots(r)%s)
-        if (n == 0) cycle
-        if (len(path) <= n + 1) cycle
-        if (path(1:n + 1) /= roots(r)%s//'/') cycle
-        out = path(n + 2:)
-        return
-    end do
-end function graph_relative
-
-logical function case_mapped(model, ci) result(mapped)
-    type(project_model_t), intent(in) :: model
-    integer, intent(in) :: ci
-
-    mapped = model%cases(ci)%command_target > 0
-    if (allocated(model%cases(ci)%declared_targets)) &
-        mapped = mapped .or. size(model%cases(ci)%declared_targets) > 0
-end function case_mapped
-
-logical function case_input_covers(model, ci, roots, path) result(found)
-    !! path is a declared input of case ci (fpm `input`, CTest
-    !! REQUIRED_FILES) or lies below a declared directory.
-    type(project_model_t), intent(in) :: model
-    integer, intent(in) :: ci
-    type(string_t), intent(in) :: roots(:)
-    character(len=*), intent(in) :: path
-    integer :: a, pos, next
-    character(len=:), allocatable :: list, item
-
-    found = .false.
-    if (.not. allocated(model%cases(ci)%attrs)) return
-    do a = 1, size(model%cases(ci)%attrs)
-        associate (attr => model%cases(ci)%attrs(a))
-            if (attr%key /= 'input' .and. attr%key /= 'REQUIRED_FILES') cycle
-            list = attr%value
-        end associate
-        pos = 1
-        do while (pos <= len(list))
-            next = index(list(pos:), ';')
-            if (next == 0) next = len(list) - pos + 2
-            item = graph_relative(roots, list(pos:pos + next - 2))
-            pos = pos + next
-            if (len(item) == 0) cycle
-            if (item /= path) then
-                if (len(path) <= len(item)) cycle
-                if (path(1:len(item) + 1) /= item//'/') cycle
-            end if
-            found = .true.
-            return
-        end do
-    end do
-end function case_input_covers
-
-logical function build_description(path) result(yes)
-    character(len=*), intent(in) :: path
-    character(len=:), allocatable :: base
-
-    base = path(index(path, '/', back=.true.) + 1:)
-    yes = base == 'fpm.toml' .or. base == 'CMakeLists.txt' .or. &
-        base == 'CMakePresets.json' .or. base == 'CMakeUserPresets.json'
-    if (yes) return
-    if (len(base) > 6) yes = to_lower(base(len(base) - 5:)) == '.cmake'
-end function build_description
-
-logical function source_like(path) result(yes)
-    character(len=*), intent(in) :: path
-    character(len=:), allocatable :: ext
-    integer :: dot
-
-    yes = .false.
-    dot = index(path, '.', back=.true.)
-    if (dot == 0 .or. dot < index(path, '/', back=.true.)) return
-    ext = to_lower(path(dot + 1:))
-    select case (ext)
-    case ('f', 'for', 'ftn', 'f77', 'f90', 'f95', 'f03', 'f08', 'f18', &
-            'fpp', 'fi', 'inc', 'h', 'hh', 'hpp', 'hxx', 'c', 'cc', 'cpp', 'cxx', &
-            'fypp', 'pf')
+        slash = index(path, '/', back=.true.)
+        base = to_lower(path(slash + 1:))
         yes = .true.
-    end select
-end function source_like
+        if (path(1:min(len(path), 5)) == 'docs/' .or. &
+            path(1:min(len(path), 4)) == 'doc/') return
+        if (base(1:min(len(base), 4)) == '.git') return
+        if (path(1:min(len(path), 8)) == '.github/') return
+        dot = index(base, '.', back=.true.)
+        ext = ''
+        if (dot > 0) ext = base(dot + 1:)
+        if (ext == 'md' .or. ext == 'rst') return
+        low = base
+        if (low(1:min(len(low), 6)) == 'readme' .or. &
+            low(1:min(len(low), 7)) == 'license' .or. &
+            low(1:min(len(low), 7)) == 'copying' .or. &
+            low(1:min(len(low), 9)) == 'changelog') return
+        yes = .false.
+    end function documentation_like
 
-logical function header_like(path) result(yes)
-    !! A C or Fortran include file: its includers are not tracked.
-    character(len=*), intent(in) :: path
-    character(len=:), allocatable :: ext
-    integer :: dot
+    subroutine grow_ints(items, needed)
+        !! Ensure size(items) >= needed, doubling.
+        integer, allocatable, intent(inout) :: items(:)
+        integer, intent(in) :: needed
+        integer, allocatable :: grown(:)
 
-    yes = .false.
-    dot = index(path, '.', back=.true.)
-    if (dot == 0 .or. dot < index(path, '/', back=.true.)) return
-    ext = to_lower(path(dot + 1:))
-    yes = any(ext == ['h  ', 'hh ', 'hpp', 'hxx', 'inc', 'fi '])
-end function header_like
+        if (needed <= size(items)) return
+        allocate(grown(max(needed, 2*size(items))))
+        grown(1:size(items)) = items
+        call move_alloc(grown, items)
+    end subroutine grow_ints
 
-logical function documentation_like(path) result(yes)
-    !! A file no test reads: prose documentation, license files, repository
-    !! metadata and the doc directories.
-    character(len=*), intent(in) :: path
-    character(len=:), allocatable :: base, low, ext
-    integer :: dot, slash
+    function model_digest(model) result(digest)
+        !! Length-prefixed canonical serialization hashed with SHA-256.
+        type(project_model_t), intent(in) :: model
+        character(len=64) :: digest
+        type(builder_t) :: b
+        integer :: i, k
 
-    slash = index(path, '/', back=.true.)
-    base = to_lower(path(slash + 1:))
-    yes = .true.
-    if (path(1:min(len(path), 5)) == 'docs/' .or. &
-        path(1:min(len(path), 4)) == 'doc/') return
-    if (base(1:min(len(base), 4)) == '.git') return
-    if (path(1:min(len(path), 8)) == '.github/') return
-    dot = index(base, '.', back=.true.)
-    ext = ''
-    if (dot > 0) ext = base(dot + 1:)
-    if (ext == 'md' .or. ext == 'rst') return
-    low = base
-    if (low(1:min(len(low), 6)) == 'readme' .or. &
-        low(1:min(len(low), 7)) == 'license' .or. &
-        low(1:min(len(low), 7)) == 'copying' .or. &
-        low(1:min(len(low), 9)) == 'changelog') return
-    yes = .false.
-end function documentation_like
+        call field(b, 'fo-project-model-v1')
+        call field(b, model%cache_key)
+        call field(b, merge('complete  ', 'incomplete', model%complete))
+        call list('default-exclude', model%default_exclude)
+        do i = 1, model%n_targets
+            associate (t => model%targets(i))
+                call field(b, 'target')
+                call field(b, t%name)
+                call field(b, int_text(t%kind))
+                call field(b, int_text(t%origin))
+                call field(b, t%artifact)
+                call list('sources', t%sources)
+                call list('link', t%link_dep_names)
+            end associate
+        end do
+        do i = 1, model%n_layers
+            associate (l => model%layers(i))
+                call field(b, 'layer')
+                call field(b, l%name)
+                call list('uses', l%use_names)
+                call list('targets', l%target_names)
+                call list('sources', l%sources)
+            end associate
+        end do
+        do i = 1, model%n_cases
+            associate (c => model%cases(i))
+                call field(b, 'case')
+                call field(b, c%name)
+                call field(b, int_text(c%origin))
+                call field(b, int_text(c%command_target))
+                call field(b, int_text(c%mapping))
+                call list('declared', c%declared_target_names)
+                call field(b, int_text(c%layer))
+                call field(b, merge('excluded', 'default ', c%default_excluded))
+                call list('labels', c%labels)
+                call list('command', c%command)
+                call field(b, int_text(size(c%attrs)))
+                do k = 1, size(c%attrs)
+                    call field(b, c%attrs(k)%key)
+                    call field(b, c%attrs(k)%value)
+                end do
+                if (c%expanded) call field(b, 'expanded')
+                if (allocated(c%parent)) then
+                    call field(b, 'parent')
+                    call field(b, c%parent)
+                    call list('case-sources', c%case_sources)
+                end if
+            end associate
+        end do
+        digest = sha256_string(builder_to_string(b))
 
-subroutine grow_ints(items, needed)
-    !! Ensure size(items) >= needed, doubling.
-    integer, allocatable, intent(inout) :: items(:)
-    integer, intent(in) :: needed
-    integer, allocatable :: grown(:)
+    contains
 
-    if (needed <= size(items)) return
-    allocate(grown(max(needed, 2*size(items))))
-    grown(1:size(items)) = items
-    call move_alloc(grown, items)
-end subroutine grow_ints
+        subroutine list(tag, items)
+            character(len=*), intent(in) :: tag
+            type(string_t), intent(in) :: items(:)
+            integer :: j
 
-function model_digest(model) result(digest)
-    !! Length-prefixed canonical serialization hashed with SHA-256.
-    type(project_model_t), intent(in) :: model
-    character(len=64) :: digest
-    type(builder_t) :: b
-    integer :: i, k
-
-    call field(b, 'fo-project-model-v1')
-    call field(b, model%cache_key)
-    call field(b, merge('complete  ', 'incomplete', model%complete))
-    call list('default-exclude', model%default_exclude)
-    do i = 1, model%n_targets
-        associate (t => model%targets(i))
-            call field(b, 'target')
-            call field(b, t%name)
-            call field(b, int_text(t%kind))
-            call field(b, int_text(t%origin))
-            call field(b, t%artifact)
-            call list('sources', t%sources)
-            call list('link', t%link_dep_names)
-        end associate
-    end do
-    do i = 1, model%n_layers
-        associate (l => model%layers(i))
-            call field(b, 'layer')
-            call field(b, l%name)
-            call list('uses', l%use_names)
-            call list('targets', l%target_names)
-            call list('sources', l%sources)
-        end associate
-    end do
-    do i = 1, model%n_cases
-        associate (c => model%cases(i))
-            call field(b, 'case')
-            call field(b, c%name)
-            call field(b, int_text(c%origin))
-            call field(b, int_text(c%command_target))
-            call field(b, int_text(c%mapping))
-            call list('declared', c%declared_target_names)
-            call field(b, int_text(c%layer))
-            call field(b, merge('excluded', 'default ', c%default_excluded))
-            call list('labels', c%labels)
-            call list('command', c%command)
-            call field(b, int_text(size(c%attrs)))
-            do k = 1, size(c%attrs)
-                call field(b, c%attrs(k)%key)
-                call field(b, c%attrs(k)%value)
+            call field(b, tag)
+            call field(b, int_text(size(items)))
+            do j = 1, size(items)
+                call field(b, items(j)%s)
             end do
-            if (c%expanded) call field(b, 'expanded')
-            if (allocated(c%parent)) then
-                call field(b, 'parent')
-                call field(b, c%parent)
-                call list('case-sources', c%case_sources)
-            end if
-        end associate
-    end do
-    digest = sha256_string(builder_to_string(b))
+        end subroutine list
 
-contains
+    end function model_digest
 
-    subroutine list(tag, items)
-        character(len=*), intent(in) :: tag
-        type(string_t), intent(in) :: items(:)
-        integer :: j
+    subroutine field(b, text)
+        type(builder_t), intent(inout) :: b
+        character(len=*), intent(in) :: text
 
-        call field(b, tag)
-        call field(b, int_text(size(items)))
-        do j = 1, size(items)
-            call field(b, items(j)%s)
-        end do
-    end subroutine list
+        call builder_append(b, int_text(len(text))//':'//text)
+    end subroutine field
 
-end function model_digest
+    integer function first_unmatched(patterns, labels) result(index)
+        !! First regex matching none of labels (CTest AND semantics); 0 = all match.
+        type(pattern_t), intent(in) :: patterns(:)
+        type(string_t), intent(in) :: labels(:)
+        integer :: k, j
+        logical :: hit
 
-subroutine field(b, text)
-    type(builder_t), intent(inout) :: b
-    character(len=*), intent(in) :: text
-
-    call builder_append(b, int_text(len(text))//':'//text)
-end subroutine field
-
-integer function first_unmatched(patterns, labels) result(index)
-    !! First regex matching none of labels (CTest AND semantics); 0 = all match.
-    type(pattern_t), intent(in) :: patterns(:)
-    type(string_t), intent(in) :: labels(:)
-    integer :: k, j
-    logical :: hit
-
-    index = 0
-    do k = 1, size(patterns)
-        hit = .false.
-        do j = 1, size(labels)
-            if (pattern_matches(patterns(k), labels(j)%s)) then
-                hit = .true.
-                exit
+        index = 0
+        do k = 1, size(patterns)
+            hit = .false.
+            do j = 1, size(labels)
+                if (pattern_matches(patterns(k), labels(j)%s)) then
+                    hit = .true.
+                    exit
+                end if
+            end do
+            if (.not. hit) then
+                index = k
+                return
             end if
         end do
-        if (.not. hit) then
-            index = k
-            return
+    end function first_unmatched
+
+    subroutine note_duplicate(model, what, name)
+        type(project_model_t), intent(inout) :: model
+        character(len=*), intent(in) :: what, name
+
+        if (len(model%duplicate) == 0) &
+            model%duplicate = 'duplicate '//what//' name: '//name
+    end subroutine note_duplicate
+
+    subroutine index_insert(index, key, value, existing)
+        !! Map key to value unless already present; existing = previous value.
+        type(name_index_t), intent(inout) :: index
+        character(len=*), intent(in) :: key
+        integer, intent(in) :: value
+        integer, intent(out) :: existing
+        integer :: slot
+
+        if (.not. allocated(index%slots)) then
+            allocate(index%slots(64), index%keys(64))
+            index%slots = 0
         end if
-    end do
-end function first_unmatched
+        existing = index_lookup(index, key)
+        if (existing /= 0) return
+        if (2*(index%count + 1) > size(index%slots)) call index_grow(index)
+        if (value > size(index%keys)) call grow_keys(index%keys, value)
+        index%keys(value)%s = key
+        slot = index_probe(index, key)
+        index%slots(slot) = value
+        index%count = index%count + 1
+    end subroutine index_insert
 
-subroutine note_duplicate(model, what, name)
-    type(project_model_t), intent(inout) :: model
-    character(len=*), intent(in) :: what, name
+    integer function index_lookup(index, key) result(value)
+        type(name_index_t), intent(in) :: index
+        character(len=*), intent(in) :: key
 
-    if (len(model%duplicate) == 0) &
-        model%duplicate = 'duplicate '//what//' name: '//name
-end subroutine note_duplicate
+        value = 0
+        if (.not. allocated(index%slots)) return
+        value = index%slots(index_probe(index, key))
+    end function index_lookup
 
-subroutine index_insert(index, key, value, existing)
-    !! Map key to value unless already present; existing = previous value.
-    type(name_index_t), intent(inout) :: index
-    character(len=*), intent(in) :: key
-    integer, intent(in) :: value
-    integer, intent(out) :: existing
-    integer :: slot
+    integer function index_probe(index, key) result(slot)
+        !! Slot holding key, or the empty slot where it belongs.
+        type(name_index_t), intent(in) :: index
+        character(len=*), intent(in) :: key
+        integer :: mask
 
-    if (.not. allocated(index%slots)) then
-        allocate(index%slots(64), index%keys(64))
+        mask = size(index%slots) - 1
+        slot = int(iand(fnv1a_string(key), int(mask, int64))) + 1
+        do
+            if (index%slots(slot) == 0) return
+            if (index%keys(index%slots(slot))%s == key) return
+            slot = iand(slot, mask) + 1
+        end do
+    end function index_probe
+
+    subroutine index_grow(index)
+        type(name_index_t), intent(inout) :: index
+        integer, allocatable :: old(:)
+        integer :: k
+
+        call move_alloc(index%slots, old)
+        allocate(index%slots(2*size(old)))
         index%slots = 0
-    end if
-    existing = index_lookup(index, key)
-    if (existing /= 0) return
-    if (2*(index%count + 1) > size(index%slots)) call index_grow(index)
-    if (value > size(index%keys)) call grow_keys(index%keys, value)
-    index%keys(value)%s = key
-    slot = index_probe(index, key)
-    index%slots(slot) = value
-    index%count = index%count + 1
-end subroutine index_insert
+        do k = 1, size(old)
+            if (old(k) == 0) cycle
+            index%slots(index_probe(index, index%keys(old(k))%s)) = old(k)
+        end do
+    end subroutine index_grow
 
-integer function index_lookup(index, key) result(value)
-    type(name_index_t), intent(in) :: index
-    character(len=*), intent(in) :: key
+    subroutine grow_keys(keys, needed)
+        type(string_t), allocatable, intent(inout) :: keys(:)
+        integer, intent(in) :: needed
+        type(string_t), allocatable :: grown(:)
 
-    value = 0
-    if (.not. allocated(index%slots)) return
-    value = index%slots(index_probe(index, key))
-end function index_lookup
+        allocate(grown(max(needed, 2*size(keys))))
+        grown(1:size(keys)) = keys
+        call move_alloc(grown, keys)
+    end subroutine grow_keys
 
-integer function index_probe(index, key) result(slot)
-    !! Slot holding key, or the empty slot where it belongs.
-    type(name_index_t), intent(in) :: index
-    character(len=*), intent(in) :: key
-    integer :: mask
+    subroutine copy_strings(items, copy)
+        type(string_t), intent(in), optional :: items(:)
+        type(string_t), allocatable, intent(out) :: copy(:)
 
-    mask = size(index%slots) - 1
-    slot = int(iand(fnv1a_string(key), int(mask, int64))) + 1
-    do
-        if (index%slots(slot) == 0) return
-        if (index%keys(index%slots(slot))%s == key) return
-        slot = iand(slot, mask) + 1
-    end do
-end function index_probe
+        if (present(items)) then
+            allocate(copy(size(items)))
+            copy(:) = items
+        else
+            allocate(copy(0))
+        end if
+    end subroutine copy_strings
 
-subroutine index_grow(index)
-    type(name_index_t), intent(inout) :: index
-    integer, allocatable :: old(:)
-    integer :: k
+    subroutine append_string(items, text)
+        type(string_t), allocatable, intent(inout) :: items(:)
+        character(len=*), intent(in) :: text
+        type(string_t), allocatable :: grown(:)
+        integer :: n
 
-    call move_alloc(index%slots, old)
-    allocate(index%slots(2*size(old)))
-    index%slots = 0
-    do k = 1, size(old)
-        if (old(k) == 0) cycle
-        index%slots(index_probe(index, index%keys(old(k))%s)) = old(k)
-    end do
-end subroutine index_grow
+        n = size(items)
+        allocate(grown(n + 1))
+        grown(1:n) = items
+        grown(n + 1)%s = text
+        call move_alloc(grown, items)
+    end subroutine append_string
 
-subroutine grow_keys(keys, needed)
-    type(string_t), allocatable, intent(inout) :: keys(:)
-    integer, intent(in) :: needed
-    type(string_t), allocatable :: grown(:)
+    function joined(items) result(text)
+        type(string_t), intent(in) :: items(:)
+        character(len=:), allocatable :: text
+        integer :: k
 
-    allocate(grown(max(needed, 2*size(keys))))
-    grown(1:size(keys)) = keys
-    call move_alloc(grown, keys)
-end subroutine grow_keys
-
-subroutine copy_strings(items, copy)
-    type(string_t), intent(in), optional :: items(:)
-    type(string_t), allocatable, intent(out) :: copy(:)
-
-    if (present(items)) then
-        allocate(copy(size(items)))
-        copy(:) = items
-    else
-        allocate(copy(0))
-    end if
-end subroutine copy_strings
-
-subroutine append_string(items, text)
-    type(string_t), allocatable, intent(inout) :: items(:)
-    character(len=*), intent(in) :: text
-    type(string_t), allocatable :: grown(:)
-    integer :: n
-
-    n = size(items)
-    allocate(grown(n + 1))
-    grown(1:n) = items
-    grown(n + 1)%s = text
-    call move_alloc(grown, items)
-end subroutine append_string
-
-function joined(items) result(text)
-    type(string_t), intent(in) :: items(:)
-    character(len=:), allocatable :: text
-    integer :: k
-
-    text = ''
-    do k = 1, size(items)
-        if (k > 1) text = text//', '
-        text = text//items(k)%s
-    end do
-end function joined
+        text = ''
+        do k = 1, size(items)
+            if (k > 1) text = text//', '
+            text = text//items(k)%s
+        end do
+    end function joined
 
 end module fo_project_model
