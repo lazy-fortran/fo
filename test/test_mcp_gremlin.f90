@@ -180,6 +180,8 @@ program test_mcp_gremlin
         'MCP reconnects to the exact terminal owner')
     call assert_equal_string(gremlin_field(document, 'state'), 'stopped', &
         'MCP observes completed stop through terminal replay')
+    call assert_true(no_exited_children(server%pid), &
+        'the server collects the owner it started once that owner exits')
     call selection_and_quiescence()
     call receipt_pagination()
     call mcp_session_shutdown(server, status)
@@ -187,6 +189,38 @@ program test_mcp_gremlin
     call finish_assertions(retain_failed_scratch=.true.)
 
 contains
+
+    logical function no_exited_children(parent)
+        !! Within a few seconds no child of `parent` is an exited, uncollected
+        !! process (ps state Z).
+        integer, intent(in) :: parent
+        type(string_list_t) :: ps
+        type(process_result_t) :: listing
+        character(len=:), allocatable :: rest, line
+        integer :: attempt, eol, ppid, ios
+        character(len=16) :: stat
+
+        no_exited_children = .false.
+        call list_add(ps, 'ps')
+        call list_add(ps, '-axo')
+        call list_add(ps, 'ppid=,stat=')
+        do attempt = 1, 60
+            call run_process(ps, '.', listing)
+            no_exited_children = listing%exit_code == 0
+            rest = listing%stdout
+            do while (len(rest) > 0 .and. no_exited_children)
+                eol = index(rest, new_line('a'))
+                if (eol == 0) eol = len(rest) + 1
+                line = rest(:eol - 1)
+                rest = rest(min(eol + 1, len(rest) + 1):)
+                read (line, *, iostat=ios) ppid, stat
+                if (ios == 0 .and. ppid == parent .and. stat(1:1) == 'Z') &
+                    no_exited_children = .false.
+            end do
+            if (no_exited_children) return
+            call gremlin_wait_ms(100)
+        end do
+    end function no_exited_children
 
     subroutine reproduce_keeps_server_responsive()
         !! While a reproduction blocks inside its case, the server answers
