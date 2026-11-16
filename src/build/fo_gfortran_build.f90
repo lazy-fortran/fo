@@ -5684,8 +5684,11 @@ contains
             ! External absolute paths can exceed a filesystem component's limit.
             ! Keep project-relative names decodable for app/example targets.
             rel = source_path
-            if (fs_path_is_absolute(source_path)) &
+            if (fs_path_is_absolute(source_path)) then
                 rel = 'external_'//cache_digest([source_path], 1)
+                ! Link runtime selection still needs the source language.
+                if (is_cxx_source(source_path)) rel = trim(rel)//'.cpp'
+            end if
         end if
         do i = 1, len_trim(rel)
             if (rel(i:i) == '/') rel(i:i) = '_'

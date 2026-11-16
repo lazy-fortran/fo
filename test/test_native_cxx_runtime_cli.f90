@@ -1,11 +1,12 @@
 program test_native_cxx_runtime_cli
     use fo_test_harness, only: string_list_t, process_result_t, list_add, &
         make_scratch, write_text, assert_process_ok, assert_equal_string, &
-        finish_assertions
+        finish_assertions, make_symlink
     use fo_test_cli, only: resolve_driver, run_fo
     implicit none
     character(len=*), parameter :: nl = new_line('a')
     character(:), allocatable :: driver, scratch, project, manifest, source, owner
+    character(:), allocatable :: dependency_path, dependency_root
     character(len=6) :: mode
     type(string_list_t) :: arguments, environment
     type(process_result_t) :: result
@@ -15,22 +16,30 @@ program test_native_cxx_runtime_cli
     call make_scratch('fo-native-cxx-runtime', scratch)
     call list_add(environment, 'FO_JOBS=2')
     call list_add(environment, 'FO_BACKEND=fpm')
-    do dependency = 0, 1
+    do dependency = 0, 2
         owner = 'root'
         if (dependency == 1) owner = 'dependency'
+        if (dependency == 2) owner = 'external-dependency'
         do shared = 0, 1
             mode = 'static'
             if (shared == 1) mode = 'shared'
             project = scratch//'/'//owner//'-'//trim(mode)
+            dependency_path = 'dependency'
+            dependency_root = project//'/dependency'
+            if (dependency == 2) then
+                dependency_path = '../provider-link-'//trim(mode)
+                dependency_root = scratch//'/provider-'//trim(mode)
+                call make_symlink(dependency_root, scratch//'/provider-link-'//trim(mode))
+            end if
             manifest = 'name="cxx_runtime"'//nl//'[dependencies]'//nl// &
-                'cpp_dep={path="dependency"}'//nl//'[extra.fo]'//nl// &
+                'cpp_dep={path="'//dependency_path//'"}'//nl//'[extra.fo]'//nl// &
                 'link="'//trim(mode)//'"'//nl//'pic="true"'//nl
             call write_text(project//'/fpm.toml', manifest)
-            call write_text(project//'/dependency/fpm.toml', 'name="cpp_dep"'//nl)
+            call write_text(dependency_root//'/fpm.toml', 'name="cpp_dep"'//nl)
             source = '#include <string>'//nl// &
                 'extern "C" int cpp_value() { return std::stoi(std::string("42")); }'//nl
-            if (dependency == 1) then
-                call write_text(project//'/dependency/src/value.cpp', source)
+            if (dependency > 0) then
+                call write_text(dependency_root//'/src/value.cpp', source)
             else
                 call write_text(project//'/src/value.cpp', source)
                 call write_text(project//'/dependency/src/unused.c', &

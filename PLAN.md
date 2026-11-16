@@ -21,8 +21,10 @@ For fpm projects, Fo infers libc++ or libstdc++ from the C++ compiler's headers
 when linking compiled C++ sources from the project's library, dependency packages
 or test helpers. Explicit manifest libraries remain in the link; CMake's declared
 link arguments remain authoritative. `test_native_cxx_runtime_cli` covers C++
-sources in the project's library and in dependencies separately, using static
-and shared libraries with fresh and reused build outputs.
+sources in the project's library and in dependencies separately, including a
+symlinked dependency outside the project, using static and shared libraries with
+fresh and reused build outputs. Older build stamps are invalidated so external
+C++ objects are rebuilt with their source-language suffix.
 `test_test_c_helpers_cli` also exercises a C++ standard-library call alongside
 an explicit runtime library in the manifest.
 
