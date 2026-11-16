@@ -78,10 +78,40 @@ program test_cmake_capture_paths
     call assert_contains(message, '/opt/toolchain/custom.cmake', &
                          'CMake ownership never leaks to sibling inputs')
     call check_sdk_framework()
+    call check_interface_includes()
     call remove_tree(scratch)
     call finish_assertions()
 
 contains
+
+    subroutine check_interface_includes()
+        character(:), allocatable :: headers, digest
+
+        call make_scratch('fo-cmake-interface-includes', headers)
+        call write_text(headers//'/fixture.h', '#define FIXTURE_VALUE 17'//nl)
+        call write_text(reply//'/cmakeFiles-fixture.json', '{"inputs":[]}')
+        call write_text(reply//'/target-fixture.json', &
+            '{"interfaceIncludes":[{"path":"'//headers//'","isSystem":true}]}')
+        call cmake_capture_inventory(backend, inventory, ierr, message, &
+            configured=.true.)
+        call assert_equal_integer(ierr, 0, &
+            'interface include directory is captured: '//trim(message))
+        if (ierr == 0) then
+            digest = inventory%digest
+            call cmake_capture_cleanup(inventory, cleanup_status)
+            call write_text(headers//'/fixture.h', '#define FIXTURE_VALUE 23'//nl)
+            call cmake_capture_inventory(backend, inventory, ierr, message, &
+                configured=.true.)
+            call assert_equal_integer(ierr, 0, &
+                'updated interface header is captured: '//trim(message))
+            if (ierr == 0) then
+                call assert_true(inventory%digest /= digest, &
+                    'interface header content changes the generation')
+                call cmake_capture_cleanup(inventory, cleanup_status)
+            end if
+        end if
+        call remove_tree(headers)
+    end subroutine check_interface_includes
 
     subroutine check_sdk_framework()
         !! FindBLAS on macOS links Accelerate from the SDK as a framework.

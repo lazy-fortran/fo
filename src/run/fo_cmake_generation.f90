@@ -1566,7 +1566,8 @@ contains
                             end if
                             authored = normalized
                             call canonical_authored_path(normalized)
-                            include_path = any(ancestors(:depth) == 'includes')
+                            include_path = any(ancestors(:depth) == 'includes') .or. &
+                                any(ancestors(:depth) == 'interfaceIncludes')
                             implicit_include = .false.
                             if (include_path) then
                                 ! CMake permits absent search directories. The
