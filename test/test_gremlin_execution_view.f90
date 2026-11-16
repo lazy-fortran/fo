@@ -4,7 +4,7 @@ program test_gremlin_execution_view
     use fo_fs, only: fs_path_is_absolute
     use fo_gremlin_execution_view, only: execution_view_t, execution_view_create, &
         execution_view_release, execution_view_copy_app_outputs
-    use fo_gremlin_campaign, only: append_execution_provenance
+    use fo_gremlin_campaign, only: append_execution_provenance, build_command
     use fo_input_inventory, only: input_declaration_t, input_inventory_t, &
         input_inventory_discover, INPUT_FILE
     use fo_process, only: argv_push, process_getcwd, process_run_argv_logged
@@ -20,7 +20,7 @@ program test_gremlin_execution_view
     type(execution_view_t) :: build_view, runtime_view
     type(execution_view_t) :: reproduction_build_view, reproduction_runtime_view
     type(string_list_t) :: arguments, environment
-    type(process_result_t) :: build_result, run_result
+    type(process_result_t) :: run_result
     character(len=512) :: root, views, source_file, text, message
     character(len=512) :: first_fixture, second_output, escape_path, bundle_file
     character(len=512) :: build_source, build_binary, dependency_source
@@ -30,7 +30,7 @@ program test_gremlin_execution_view
     character(len=HASH_LEN) :: candidate_app_digest, candidate_app_after
     character(len=512) :: argument, executable, current_dir, probe_log
     character(len=512) :: runtime_output, unrelated_test, unrelated_build
-    character(len=:), allocatable :: packed, driver
+    character(len=:), allocatable :: packed, driver, build_environment
     integer :: n_args, probe_exit, cwd_status
     integer :: ierr, release_status, i
     character(len=4096) :: canonical_tmp, moved_scratch
@@ -357,12 +357,17 @@ program test_gremlin_execution_view
         call resolve_driver(driver)
         environment = string_list_t()
         call list_add(environment, 'FO_JOBS=1')
-        arguments = string_list_t()
-        call list_add(arguments, 'build')
-        call run_fo(driver, arguments, trim(build_view%cwd), &
-            trim(root)//'/build-view-cache', build_result, environment, 120000)
-        call check(build_result%exit_code == 0, &
-            'native Fo build succeeds in the candidate-owned view')
+        call build_command(driver, build_view, packed, n_args, build_environment, &
+            [character(len=23) :: 'test_app_execution_view'])
+        build_environment = build_environment//';FO_GREMLIN_EXECUTION_CWD='// &
+            ';FO_JOBS=1;FO_CACHE_DIR='// &
+            trim(root)//'/build-view-cache'
+        call make_tmpfile('fo-view-candidate-build', probe_log)
+        call process_run_argv_logged(trim(build_view%cwd), packed, n_args, &
+            trim(probe_log), .false., 120, probe_exit, env_extra=build_environment)
+        call check(probe_exit == 0, &
+            'named generation build succeeds in the candidate-owned view')
+        call delete_tmpfile(trim(probe_log))
         build_binary = trim(build_view%cwd)//'/build/fo/bin/candidate_build_probe'
         inquire(file=trim(build_binary), exist=exists)
         call check(exists, 'native executable is published in the candidate view')

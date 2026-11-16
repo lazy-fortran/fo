@@ -28,6 +28,15 @@ C++ objects are rebuilt with their source-language suffix.
 `test_test_c_helpers_cli` also exercises a C++ standard-library call alongside
 an explicit runtime library in the manifest.
 
+## Applications in frozen test generations
+
+Named native generation builds include application targets before tests run,
+so private test views receive applications compiled from the
+same frozen source as their tests. Ordinary focused `fo test` keeps its
+test-only build scope. `test_gremlin_execution_view` exercises the production
+generation command and independently runs the copied application;
+`test_targeted_materialization_cli` checks named-test selection.
+
 ## Relocatable fpm compile keys (2026-11-11)
 
 - With `FO_CACHE_RELOCATABLE=1`, gfortran compiles the library and program

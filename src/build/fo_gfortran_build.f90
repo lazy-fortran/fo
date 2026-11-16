@@ -975,6 +975,11 @@ contains
             status=status)
         requested = .false.
         if (status == 0) requested = len_trim(execution_cwd) > 0
+        if (requested) return
+        ! Generation builds must produce apps before case views copy them.
+        call get_environment_variable('FO_GREMLIN_FROZEN_ROOT', execution_cwd, &
+            status=status)
+        if (status == 0) requested = len_trim(execution_cwd) > 0
     end function gremlin_execution_view_requested
 
     integer function native_jobs() result(jobs)
