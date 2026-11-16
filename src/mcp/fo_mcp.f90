@@ -62,6 +62,8 @@ module fo_mcp
         integer :: next_run_id = 0
         character(len=512) :: last_output = ''
         type(mcp_deferred_t), allocatable :: deferred(:)
+        !! Gremlin owners this server launched; each is polled until it exits.
+        type(exec_job_t), allocatable :: owners(:)
     end type mcp_async_state_t
 
 contains
@@ -80,13 +82,17 @@ contains
         call process_suppress_heartbeats(.true.)
         call progress_mute()
         framing = MCP_FRAME_UNKNOWN
-        allocate (async_state%deferred(0))
+        allocate (async_state%deferred(0), async_state%owners(0))
         do
             call async_poll(async_state)
             call deferred_poll(async_state, framing)
+            call owners_poll(async_state)
             if (async_state%check%pid > 0 .or. size(async_state%deferred) > 0) then
                 call mcp_read_message(line, MAX_LINE, framing, eof_flag, read_status, &
                     timeout_ms=100)
+            else if (size(async_state%owners) > 0) then
+                call mcp_read_message(line, MAX_LINE, framing, eof_flag, read_status, &
+                    timeout_ms=1000)
             else
                 call mcp_read_message(line, MAX_LINE, framing, eof_flag, read_status)
             end if
@@ -423,6 +429,7 @@ contains
         character(len=256) :: message
         character(len=:), allocatable :: request_json, result_json
         type(json_builder_t) :: jb
+        type(exec_job_t) :: owner
         integer :: ierr, exitcode
 
         call normalize_gremlin_arguments(arguments, public_action, core_action, &
@@ -446,9 +453,23 @@ contains
             return
         end if
         call gremlin_handle(trim(core_action), fs_canonical_path(trim(project_dir)), &
-            trim(request_json), result_json, exitcode, own_client=.true.)
+            trim(request_json), result_json, exitcode, own_client=.true., owner=owner)
+        if (owner%pid > 0) async_state%owners = [async_state%owners, owner]
         call make_tool_text_response(id_str, result_json, exitcode, response)
     end subroutine handle_gremlin_action
+
+    subroutine owners_poll(state)
+        !! Collect the exit of every Gremlin owner this server launched, which
+        !! would otherwise stay an exited child of this server.
+        type(mcp_async_state_t), intent(inout) :: state
+        integer :: i, ierr
+        logical :: done
+
+        do i = size(state%owners), 1, -1
+            call exec_poll(state%owners(i), done, ierr)
+            if (done) state%owners = [state%owners(:i - 1), state%owners(i + 1:)]
+        end do
+    end subroutine owners_poll
 
     subroutine self_command(packed, n_args, ierr)
         !! argv of this server's own fo image, never a PATH fo.

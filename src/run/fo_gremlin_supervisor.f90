@@ -49,7 +49,7 @@ module fo_gremlin_supervisor
         json_merge, simple_response => gremlin_simple_response, &
         error_response => gremlin_error_response
     use fo_json_object, only: json_value_raw
-    use fo_process, only: argv_push, process_poll_pid, process_scope_t, &
+    use fo_process, only: argv_push, process_scope_t, &
         process_scope_begin, process_scope_end
     use fo_util, only: int_text
     use fx_dag, only: MAX_NODES
@@ -63,13 +63,16 @@ module fo_gremlin_supervisor
 contains
 
     subroutine gremlin_handle(action, project_dir, request_json, response_json, exitcode, &
-            own_client)
+            own_client, owner)
         !! own_client: the calling process is itself the client whose end stops a
         !! task-owned lane (an MCP server); by default that client is its parent.
+        !! owner: after a start, the owner process this process launched; a
+        !! process that outlives the owner polls it so that its exit is collected.
         character(len=*), intent(in) :: action, project_dir, request_json
         character(len=:), allocatable, intent(out) :: response_json
         integer, intent(out) :: exitcode
         logical, intent(in), optional :: own_client
+        type(exec_job_t), intent(out), optional :: owner
 
         type(gremlin_request_t), allocatable :: request
         type(gremlin_session_t) :: session
@@ -100,7 +103,7 @@ contains
             client_is_self = .false.
             if (present(own_client)) client_is_self = own_client
             call handle_start(project_dir, request, client_is_self, response_json, &
-                exitcode)
+                exitcode, owner)
         case ('run')
             call run_owner(project_dir, request, response_json, exitcode)
         case ('status')
@@ -145,12 +148,14 @@ contains
     end subroutine gremlin_handle
 
 
-    subroutine handle_start(project_dir, request, client_is_self, response, exitcode)
+    subroutine handle_start(project_dir, request, client_is_self, response, exitcode, &
+            owner)
         character(len=*), intent(in) :: project_dir
         type(gremlin_request_t), intent(in) :: request
         logical, intent(in) :: client_is_self
         character(len=:), allocatable, intent(out) :: response
         integer, intent(out) :: exitcode
+        type(exec_job_t), intent(out), optional :: owner
 
         type(gremlin_session_t) :: session
         type(driver_pin_t) :: driver_pin
@@ -314,6 +319,7 @@ contains
             exitcode = 2
             return
         end if
+        if (present(owner)) owner = launcher
         call simple_response('start', request%lane_id, trim(session_id), 'running', response)
     end subroutine handle_start
 
@@ -372,7 +378,6 @@ contains
         call gremlin_resolve_read_session(project_dir, request, session, status_text, &
             owner_pid, is_live, ierr, message)
         if (ierr /= 0) return
-        if (is_live) call poll_launcher(owner_pid)
         state_dir = ''
         call read_coverage()
         if (ierr == 0) call compute_readiness(session, trim(status_text), coverage_view, &
@@ -652,7 +657,6 @@ contains
             exitcode = 2
             return
         end if
-        if (is_live) call poll_launcher(owner_pid)
         call response_with_events('failures', status_text, session, request, .true., &
             response, ierr, message)
         if (ierr /= 0) then
@@ -1046,14 +1050,5 @@ contains
             message = ''
         end if
     end subroutine release_if_owner
-
-    subroutine poll_launcher(pid)
-        !! Reap this process's owner launcher once it exited.
-        integer, intent(in) :: pid
-        integer :: ignored_exit
-        logical :: done
-
-        if (pid > 0) call process_poll_pid(pid, done, ignored_exit)
-    end subroutine poll_launcher
 
 end module fo_gremlin_supervisor
