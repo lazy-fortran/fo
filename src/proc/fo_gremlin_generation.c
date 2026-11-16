@@ -435,6 +435,7 @@ static int copy_regular_file(int input, const char *target,
      * the clone as an event on the source, which the change watcher would
      * take for an edit and recapture. */
     if (share_blocks && !sync_output && clone_regular_file(input, target) == 0) {
+        errno = 0;
         if (fstat(input, &after) != 0 ||
             !same_content_stat(before, &after) ||
             chmod(target, output_mode & 0777) != 0) {
@@ -479,13 +480,15 @@ fail:
     {
         int saved = errno;
         close(output);
+        unlink(target);
         errno = saved;
         return -1;
     }
 }
 
 /* The caller supplies a digest-verified full stat key. Bind the private copy
- * to that same open inode, including nanosecond change time, across copying. */
+ * to that same open inode, including nanosecond change time, across copying.
+ * Return 1 for a changed snapshot so the caller can revalidate its digest. */
 int fo_c_generation_copy_verified_blob(const char *source, const char *target,
                                        const long long expected[5], int mode,
                                        int *cloned) {
@@ -496,9 +499,13 @@ int fo_c_generation_copy_verified_blob(const char *source, const char *target,
     int rc = -1;
     if (fstat(input, &before) == 0 && S_ISREG(before.st_mode)) {
         content_key(&before, actual);
-        if (memcmp(actual, expected, sizeof(actual)) == 0)
+        if (memcmp(actual, expected, sizeof(actual)) != 0) {
+            rc = 1;
+        } else {
             rc = copy_regular_file(input, target, &before,
                                    (mode & 0111) ? 0555 : 0444, 0, 1, cloned);
+            if (rc != 0 && errno == EAGAIN) rc = 1;
+        }
     }
     int saved = errno;
     close(input);

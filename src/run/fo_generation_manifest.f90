@@ -33,6 +33,7 @@ module fo_generation_manifest
 
     integer, parameter :: PATH_LEN = 4096
     integer, parameter :: MANIFEST_VERSION = 2
+    integer, parameter :: COPY_SOURCE_CHANGED = 1
     character(len=*), parameter :: HEADER = 'fo-generation-manifest'
 
     type :: materialized_entry_t
@@ -471,23 +472,23 @@ contains
                 hex_encode(value_or_empty(metadata%patch_digest))
         end if
         if (ios == 0) then
-        if (inventory%complete) then
-            flag = '1'
-        else
-            flag = '0'
-        end if
-        if (inventory%valid) then
-            valid_flag = '1'
-        else
-            valid_flag = '0'
-        end if
-        write (number, '(i0)') inventory%root_count
-        write (unit, '(A)', iostat=ios) 'S'//achar(9)//trim(number)//achar(9)// &
-            int_text(inventory%entry_count)//achar(9)// &
-            int_text(declaration_count)//achar(9)//valid_flag//achar(9)// &
-            flag//achar(9)// &
-            hex_encode(trim(inventory%diagnostic))//achar(9)// &
-            trim(inventory%digest)
+            if (inventory%complete) then
+                flag = '1'
+            else
+                flag = '0'
+            end if
+            if (inventory%valid) then
+                valid_flag = '1'
+            else
+                valid_flag = '0'
+            end if
+            write (number, '(i0)') inventory%root_count
+            write (unit, '(A)', iostat=ios) 'S'//achar(9)//trim(number)//achar(9)// &
+                int_text(inventory%entry_count)//achar(9)// &
+                int_text(declaration_count)//achar(9)//valid_flag//achar(9)// &
+                flag//achar(9)// &
+                hex_encode(trim(inventory%diagnostic))//achar(9)// &
+                trim(inventory%digest)
         end if
         if (allocated(inventory%declarations)) then
             do i = 1, declaration_count
@@ -849,7 +850,7 @@ contains
         character(len=*), intent(out) :: message
         type(immutable_store_t) :: store
         character(len=PATH_LEN) :: destination
-        integer :: status, i, j, root_index, n_files, task
+        integer :: status, i, j, root_index, n_files, task, attempt, mode
         integer, allocatable :: file_entries(:)
         type(blob_copy_t), allocatable :: files(:)
         integer(int64) :: destinations
@@ -962,6 +963,21 @@ contains
         end do
         !$omp end parallel do
         do task = 1, n_files
+            ! Identical publishers can refresh an immutable blob's timestamps.
+            do attempt = 1, 3
+                if (files(task)%status /= COPY_SOURCE_CHANGED) exit
+                i = file_entries(task)
+                destination = files(task)%destination(:len(files(task)%destination) - 1)
+                mode = int(files(task)%mode)
+                call prepare_blob_copy(store, &
+                    inventory%entries(i)%content_digest, trim(destination), &
+                    mode, files(task), status)
+                files(task)%status = -1
+                if (status /= IMMUTABLE_OK) exit
+                files(task)%status = copy_verified_blob(files(task)%source, &
+                    files(task)%destination, files(task)%key, files(task)%mode, &
+                    files(task)%cloned)
+            end do
             if (files(task)%status /= IMMUTABLE_OK) then
                 i = file_entries(task)
                 message = 'cannot materialize generation input blob: '// &
@@ -1196,7 +1212,7 @@ contains
         end select
         ierr = 0
         return
-900     message = 'generation manifest contains an invalid input entry'
+        900     message = 'generation manifest contains an invalid input entry'
     end subroutine decode_loaded_entry
 
     subroutine decode_loaded_declaration(fields, declaration, ierr, message)
@@ -1240,7 +1256,7 @@ contains
         declaration%writable_at_execution = logical_value == 1
         ierr = 0
         return
-900     message = 'generation manifest contains an invalid declaration'
+        900     message = 'generation manifest contains an invalid declaration'
     end subroutine decode_loaded_declaration
 
     subroutine inventory_source_path(inventory, entry, root_index, path, ierr, &

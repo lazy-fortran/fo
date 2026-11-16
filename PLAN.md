@@ -7,6 +7,14 @@ Issues define observable success and this plan orders delivery. Apply
 smallest complete change, and preserve supported behaviour and independent
 failure detection. The workspace master plan, when present, owns delivery order.
 
+## Concurrent immutable blob reuse
+
+Gremlin materialization revalidates and retries a blob whose metadata changes
+when another publisher reuses it. The content digest must still match; failed
+private copies are removed before retrying. `test_gremlin_manifest` refreshes a
+private blob between its stat snapshot and copying, then checks the resulting
+bytes and read-only mode.
+
 ## Native C++ runtime links
 
 For fpm projects, Fo infers libc++ or libstdc++ from the C++ compiler's headers

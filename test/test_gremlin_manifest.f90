@@ -1,4 +1,85 @@
+module generation_blob_freshen_oracle
+    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_ptr, c_funptr, &
+        c_intptr_t, c_null_char, c_associated, c_f_procpointer
+    use fx_immutable_store, only: immutable_store_t, immutable_store_blob_path, &
+        immutable_store_freshen, IMMUTABLE_OK
+    implicit none
+    private
+    public :: initialize_freshen_oracle, arm_freshen_oracle, freshen_observed
+    type(immutable_store_t), save :: freshen_store
+    character(len=:), allocatable :: freshen_path
+    character(len=64) :: freshen_digest
+    logical :: armed = .false., observed = .false.
+    integer :: freshen_count = 0
+    abstract interface
+        integer(c_int) function stat_reader(path, info) bind(C)
+            import :: c_char, c_int, c_ptr
+            character(kind=c_char), intent(in) :: path(*)
+            type(c_ptr), value :: info
+        end function stat_reader
+    end interface
+    procedure(stat_reader), pointer :: real_stat => null()
+    interface
+        function c_dlsym(handle, name) bind(C, name='dlsym') result(address)
+            import :: c_ptr, c_char
+            type(c_ptr), value :: handle
+            character(kind=c_char), intent(in) :: name(*)
+            type(c_ptr) :: address
+        end function c_dlsym
+    end interface
+contains
+    subroutine initialize_freshen_oracle()
+        type(c_ptr) :: next, address
+        type(c_funptr) :: function_address
+
+        if (associated(real_stat)) return
+        next = transfer(-1_c_intptr_t, next)
+        address = c_dlsym(next, 'stat'//c_null_char)
+        if (.not. c_associated(address)) error stop 'cannot resolve libc stat'
+        function_address = transfer(address, function_address)
+        call c_f_procpointer(function_address, real_stat)
+    end subroutine initialize_freshen_oracle
+
+    subroutine arm_freshen_oracle(store, digest)
+        type(immutable_store_t), intent(in) :: store
+        character(len=*), intent(in) :: digest
+
+        freshen_store = store
+        freshen_digest = digest
+        freshen_path = immutable_store_blob_path(store, digest)
+        observed = .false.
+        freshen_count = 0
+        armed = .true.
+    end subroutine arm_freshen_oracle
+
+    logical function freshen_observed()
+        freshen_observed = observed .and. freshen_count == 1
+    end function freshen_observed
+
+    recursive integer(c_int) function oracle_stat(path, info) &
+            bind(C, name='stat') result(status)
+        character(kind=c_char), intent(in) :: path(*)
+        type(c_ptr), value :: info
+        integer :: i, freshen_status
+
+        call initialize_freshen_oracle()
+        status = real_stat(path, info)
+        if (status /= 0 .or. .not. armed) return
+        do i = 1, len(freshen_path)
+            if (path(i) /= freshen_path(i:i)) return
+        end do
+        if (path(i) /= c_null_char) return
+        ! The returned stat predates a supported identical publisher refresh.
+        armed = .false.
+        freshen_count = freshen_count + 1
+        call immutable_store_freshen(freshen_store, 1, freshen_digest, freshen_status)
+        observed = freshen_status == IMMUTABLE_OK
+    end function oracle_stat
+end module generation_blob_freshen_oracle
+
 program test_gremlin_manifest
+    use generation_blob_freshen_oracle, only: initialize_freshen_oracle, &
+        arm_freshen_oracle, freshen_observed
     use fo_util, only: temporary_root
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_long, c_null_char, &
         c_size_t, c_long_long
@@ -748,6 +829,8 @@ contains
         type(generation_manifest_metadata_t) :: rebuilt_metadata
         type(input_inventory_t) :: rebuilt_inventory
         character(len=512) :: bundle_root, payload_path
+        type(immutable_store_t) :: store
+        character(len=HASH_LEN) :: digest
         integer :: local_status, remove_status
         integer(c_long_long) :: mt, ct, sz, dev, ino, before_ct
 
@@ -792,6 +875,27 @@ contains
             'recovered bundle preserves the manifest executable mode')
         remove_status = remove_tree(trim(bundle_root)//c_null_char)
         call require(remove_status == 0, 'remove temporary rebuilt bundle')
+
+        call immutable_store_init(store, generation%store_root, local_status)
+        call require(local_status == IMMUTABLE_OK, 'open private freshening store')
+        call sha256_file(trim(project)//'/fixture.dat', digest, local_status)
+        call require(local_status == 0, 'hash independently expected fixture bytes')
+        call initialize_freshen_oracle()
+        call arm_freshen_oracle(store, digest)
+        call fs_make_dir(trim(bundle_root))
+        call generation_manifest_materialize(trim(generation%store_root), &
+            generation%manifest_id, trim(bundle_root), rebuilt_metadata, &
+            rebuilt_inventory, local_status, message)
+        call require(freshen_observed(), &
+            'another publisher refreshes the blob after its stat key was read')
+        call require(local_status == 0, &
+            'materialization tolerates identical blob freshening: '//trim(message))
+        call require(file_equals(trim(payload_path), 'source-one'), &
+            'freshened blob materializes the expected bytes')
+        call require(c_access(trim(payload_path)//c_null_char, 2_c_int) /= 0, &
+            'freshened payload remains read-only')
+        remove_status = remove_tree(trim(bundle_root)//c_null_char)
+        call require(remove_status == 0, 'remove freshened rebuilt bundle')
     end subroutine verify_bundle_rebuild
 
     subroutine discover(result)
