@@ -937,6 +937,12 @@ contains
                 end if
             end if
         end if
+        if (allocated(context%capture_preload)) then
+            if (len_trim(context%capture_preload) > 0) then
+                call argv_push(packed, n_args, '-C')
+                call argv_push(packed, n_args, context%capture_preload)
+            end if
+        end if
         if (len_trim(context%configuration) > 0 .and. &
             .not. context%multi_config .and. &
             .not. generator_is_multi(context)) then

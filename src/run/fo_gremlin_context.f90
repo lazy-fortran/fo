@@ -3,7 +3,8 @@ module fo_gremlin_context
     use, intrinsic :: iso_c_binding, only: c_long_long
     use fo_cache, only: HASH_LEN, cache_digest
     use fo_build_backend, only: backend_t, detect_backend, BACKEND_CMAKE, BACKEND_NONE
-    use fo_cmake_generation, only: cmake_capture_inventory, cmake_capture_cleanup
+    use fo_cmake_generation, only: cmake_capture_inventory, cmake_capture_cleanup, &
+        cmake_capture_private_build
     use fo_fpm_config, only: fpm_config_t, fpm_config_parse, fpm_dep_t, &
         dep_kind, DEP_PATH
     use fo_dep_update, only: dep_acquire_sources
@@ -73,7 +74,7 @@ contains
         character(len=*), intent(out) :: message
         type(change_watch_t), intent(inout), optional :: change_watch
         type(input_inventory_t), intent(in), optional :: previous_inventory
-        !! The lane's private CMake build tree, used unless the user chose one.
+        !! The lane's private CMake build tree, seeded from any explicit caller tree.
         character(len=*), intent(in), optional :: build_root
 
         type(backend_t) :: backend
@@ -109,10 +110,19 @@ contains
             return
         end if
         if (backend%kind == BACKEND_CMAKE) then
-            ! Lanes of one checkout must not reconfigure each other's tree.
-            if (present(build_root) .and. .not. backend%cmake%build_root_hint .and. &
-                len_trim(backend%cmake%configure_preset) == 0) &
-                backend%cmake%build_root = build_root
+            if (present(build_root)) then
+                if (len_trim(backend%cmake%configure_preset) == 0) then
+                    if (backend%cmake%build_root_hint) then
+                        call cmake_capture_private_build(backend, build_root, ierr, message)
+                        if (ierr /= 0) then
+                            ok = .false.
+                            return
+                        end if
+                    else
+                        backend%cmake%build_root = build_root
+                    end if
+                end if
+            end if
             call capture_cmake_inventory(backend, input_inventory, ierr, message, &
                 previous_inventory)
             ! A failed configure is a project input failure, reported like a
@@ -202,7 +212,7 @@ contains
 
         ! Native configure may recreate source links without changing their inputs.
         ! Compare the complete current closure before invoking configure again.
-        if (present(previous)) then
+        if (present(previous) .and. .not. backend%cmake%capture_preload_changed) then
             if (previous%valid .and. previous%complete) then
                 call cmake_capture_inventory(backend, inventory, ierr, message, &
                     configured=.true.)
