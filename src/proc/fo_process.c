@@ -3301,6 +3301,44 @@ static int reap_adopted_scope_zombies(void) {
 #endif
 }
 
+/* Every async job runs in a session of its own, and starting one makes this
+   process a Linux subreaper, so descendants a job leaves behind are adopted
+   here. Collect those that exited: direct children outside this process's own
+   session that are not a registered job leader. Children this process starts
+   synchronously stay in its session and are left to the call that waits for
+   them. Rate-limited, as every job poll calls it. */
+static void reap_adopted_job_orphans(void) {
+#ifdef __linux__
+    static struct timespec last;
+    struct timespec now;
+    pid_t *pids = NULL, own_session;
+    size_t count = 0;
+    int subreaper = 0;
+
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    if ((last.tv_sec != 0 || last.tv_nsec != 0) &&
+        (now.tv_sec - last.tv_sec) * 1000L +
+            (now.tv_nsec - last.tv_nsec) / 1000000L < 200L) return;
+    last = now;
+    if (prctl(PR_GET_CHILD_SUBREAPER, &subreaper) != 0 || !subreaper) return;
+    if (own_child_pids(&pids, &count) != 0) return;
+    own_session = getsid(0);
+    for (size_t i = 0; i < count; i++) {
+        pid_t parent = 0, session, got;
+        int alive = 1;
+        if (find_async_process(pids[i]) != NULL) continue;
+        if (fo_sys_process_info(pids[i], &parent, NULL, NULL, NULL, &alive) != 0)
+            continue;
+        if (parent != getpid() || alive) continue;
+        session = getsid(pids[i]);
+        if (session < 0 || session == own_session) continue;
+        do { got = waitpid(pids[i], NULL, WNOHANG); }
+        while (got < 0 && errno == EINTR);
+    }
+    free(pids);
+#endif
+}
+
 static int reap_current_owner_scope_zombies(int reject_other_owner) {
     char state_dir[PATH_MAX], owner_start[64];
     pid_t owner_pid = 0;
@@ -3773,6 +3811,7 @@ void fo_c_poll_pid(int pid, int *done, int *exitcode) {
 
     *done = 0;
     *exitcode = 0;
+    reap_adopted_job_orphans();
     item = pid > 0 ? find_async_process((pid_t)pid) : NULL;
     if (item == NULL) {
         *done = 1;
