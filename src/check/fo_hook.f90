@@ -14,6 +14,7 @@ module fo_hook
     use fo_cmake_generation, only: cmake_stage_git, cmake_populated_dependency_args, &
         cmake_unpopulated_dependency, cmake_cache_compiler_args
     use fo_cmake_context, only: cmake_context_build_path
+    use fo_dep_update, only: dep_acquire_sources
     use fo_hook_presets, only: hook_stage_presets
     use fo_hook_evidence, only: hook_input_key, hook_receipt_read, &
         hook_receipt_write, hook_slow_case, hook_prepared_key
@@ -34,6 +35,19 @@ module fo_hook
         json_key, json_array_start, json_array_end, json_value_string, json_to_string
     implicit none
     private
+
+    ! `git commit` exports its repository and index to the hook, and the
+    ! staged view restricts Git to file transport and CMake to offline
+    ! arguments. A dependency fetch must see none of them.
+    character(len=*), parameter :: hook_context(*) = [character(len=34) :: &
+        'GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_COMMON_DIR', &
+        'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_PREFIX', &
+        'GIT_ALLOW_PROTOCOL', 'FO_CMAKE_ARGS']
+
+    type :: hook_saved_env_t
+        logical :: kept(size(hook_context)) = .false.
+        type(string_t) :: text(size(hook_context))
+    end type hook_saved_env_t
     public :: hook_cli
     real(dp), save :: commit_deadline = 0.0_dp
     interface
@@ -418,6 +432,10 @@ contains
             if (backend%kind == BACKEND_NONE) then
                 message = 'no supported staged Fortran project'
                 exit validation
+            end if
+            if (has_fpm .and. backend%kind /= BACKEND_CMAKE) then
+                call refresh_fpm_dependencies(snapshot, status, message)
+                if (status /= 0) exit validation
             end if
             if (backend%kind == BACKEND_CMAKE) then
                 backend_name = 'cmake'
@@ -957,42 +975,19 @@ contains
         character(len=1024) :: log_file
         character(len=:), allocatable :: text, names
         integer :: exitcode, status, length, i
-        character(len=*), parameter :: git_context(*) = [character(len=34) :: &
-            'GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_COMMON_DIR', &
-            'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_PREFIX', &
-            'GIT_ALLOW_PROTOCOL', 'FO_CMAKE_ARGS']
-        type :: saved_value_t
-            character(len=:), allocatable :: text
-        end type saved_value_t
-        type(saved_value_t) :: saved(size(git_context))
-        logical :: kept(size(git_context))
+        type(hook_saved_env_t) :: saved
 
         message = ''
         build_dir = ''
         found = .false.
-        ! `git commit` exports its repository and index to the hook, and the
-        ! staged view restricts Git to file transport and CMake to offline
-        ! arguments. This online configure, including backend detection, must
-        ! see none of them; the hook needs them back afterwards.
-        do i = 1, size(git_context)
-            call get_environment_variable(trim(git_context(i)), length=length, &
-                status=status)
-            kept(i) = status == 0
-            if (.not. kept(i)) cycle
-            allocate(character(len=length) :: saved(i)%text)
-            if (length > 0) call get_environment_variable(trim(git_context(i)), &
-                saved(i)%text)
-            status = c_unsetenv(trim(git_context(i))//c_null_char)
-        end do
+        call hide_hook_environment(saved)
         if (present(compilers_from)) then
             call process_setenv_default('FO_CMAKE_ARGS', &
                 cmake_cache_compiler_args(compilers_from))
         end if
         call populate()
         status = c_unsetenv('FO_CMAKE_ARGS'//c_null_char)
-        do i = 1, size(git_context)
-            if (kept(i)) call process_setenv_default(trim(git_context(i)), saved(i)%text)
-        end do
+        call restore_hook_environment(saved)
     contains
         subroutine populate()
             backend = detect_backend(root, authority_dir=root)
@@ -1027,6 +1022,51 @@ contains
             message = message//new_line('a')//trim(configure_error_excerpt(text))
         end subroutine populate
     end subroutine populate_cmake_dependencies
+
+    subroutine hide_hook_environment(saved)
+        type(hook_saved_env_t), intent(out) :: saved
+        integer :: i, length, status
+
+        do i = 1, size(hook_context)
+            call get_environment_variable(trim(hook_context(i)), length=length, &
+                status=status)
+            saved%kept(i) = status == 0
+            if (.not. saved%kept(i)) cycle
+            allocate(character(len=length) :: saved%text(i)%s)
+            if (length > 0) call get_environment_variable(trim(hook_context(i)), &
+                saved%text(i)%s)
+            status = c_unsetenv(trim(hook_context(i))//c_null_char)
+        end do
+    end subroutine hide_hook_environment
+
+    subroutine restore_hook_environment(saved)
+        type(hook_saved_env_t), intent(in) :: saved
+        integer :: i
+
+        do i = 1, size(hook_context)
+            if (saved%kept(i)) call process_setenv_default(trim(hook_context(i)), &
+                saved%text(i)%s)
+        end do
+    end subroutine restore_hook_environment
+
+    subroutine refresh_fpm_dependencies(view, status, message)
+        !! The staged view builds offline against the checkout's fpm dependency
+        !! cache (build/dependencies, linked into the view). A pin this commit
+        !! adds or moves is fetched here, online, into that cache, replacing a
+        !! stale checkout; current pins are reused without network access.
+        character(len=*), intent(in) :: view
+        integer, intent(out) :: status
+        character(len=:), allocatable, intent(out) :: message
+        type(hook_saved_env_t) :: saved
+
+        message = ''
+        call hide_hook_environment(saved)
+        call dep_acquire_sources(view, status)
+        call restore_hook_environment(saved)
+        if (status /= 0) message = 'cannot fetch the fpm dependencies this commit '// &
+            'pins (the Git error is above); check their URLs and network access, '// &
+            'or run `fo build` here once, then commit again'
+    end subroutine refresh_fpm_dependencies
 
     function dependency_names(text) result(names)
         !! Dependencies a failed configure names by their FetchContent or

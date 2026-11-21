@@ -125,6 +125,7 @@ program test_hook_precommit
     call assert_contains(result%stdout, '"fast_passed":0', 'slow test never passed implicitly')
 
     call markerless_git_dependency()
+    call stale_git_dependency()
     call preparation_fixture()
 
     ! CTest's external command gives an independent deterministic budget oracle.
@@ -546,8 +547,8 @@ program test_hook_precommit
         'hook names the dependency it cannot fetch')
     call assert_contains(result%stdout, 'CMake Error', 'hook shows the CMake error')
 
-    ! A fresh checkout whose Git dependency was never populated cannot build in
-    ! the offline hook; the diagnostic names the step that populates it.
+    ! A fresh checkout's Git dependency is fetched by the hook; one it cannot
+    ! reach blocks the commit, and the diagnostic names the step that populates it.
     project = join_path(scratch, 'unpopulated-dependency')
     call write_text(project//'/fpm.toml', 'name = "hook_unpopulated"'//nl// &
         '[dependencies]'//nl//'hookdep = { git = "https://example.invalid/hookdep.git" }'//nl)
@@ -556,7 +557,7 @@ program test_hook_precommit
     call git([character(len=64) :: 'add', 'fpm.toml', 'src/answer.f90'])
     call hook()
     call assert_true(result%exit_code /= 0, 'unpopulated dependency blocks the commit')
-    call assert_contains(result%stdout, 'dependencies are not populated in this checkout', &
+    call assert_contains(result%stdout, 'cannot fetch the fpm dependencies this commit pins', &
         'hook explains the missing dependency checkout')
     call assert_contains(result%stdout, 'run `fo build` here once', &
         'hook names the command that populates dependencies')
@@ -955,6 +956,58 @@ contains
         project = join_path(scratch, 'project')
     end subroutine markerless_git_dependency
 
+    subroutine stale_git_dependency()
+        !! A commit that moves a Git pin must refresh the checkout's dependency
+        !! cache over the dependency's own transport, not the staged view's
+        !! file-only one. ext:: stands in for https without a network.
+        character(len=:), allocatable :: provider, consumer, checkout, first, second
+
+        provider = join_path(scratch, 'stale-provider')
+        consumer = join_path(scratch, 'stale-consumer')
+        checkout = consumer//'/build/dependencies/hookdep'
+        project = provider
+        call write_text(provider//'/fpm.toml', 'name = "hookdep"'//nl)
+        call write_text(provider//'/src/answer.f90', original)
+        call git([character(len=64) :: 'init', '-q', '-b', 'main'])
+        call git([character(len=64) :: 'add', 'fpm.toml', 'src/answer.f90'])
+        call git([character(len=64) :: 'commit', '-qm', 'First provider'])
+        call git([character(len=64) :: 'rev-parse', 'HEAD'])
+        first = result%stdout(:index(result%stdout, nl) - 1)
+        call write_text(provider//'/src/answer.f90', original//'! Second revision'//nl)
+        call git([character(len=64) :: 'commit', '-qam', 'Second provider'])
+        call git([character(len=64) :: 'rev-parse', 'HEAD'])
+        second = result%stdout(:index(result%stdout, nl) - 1)
+        call make_directory(consumer//'/build/dependencies')
+        call git([character(len=1024) :: 'clone', '-q', provider, checkout])
+        project = checkout
+        call git([character(len=128) :: 'remote', 'set-url', 'origin', &
+            'https://example.invalid/hookdep.git'])
+        call git([character(len=64) :: 'checkout', '-q', '--detach', first])
+        project = consumer
+        call write_text(consumer//'/test/test_answer.f90', &
+            'program test_answer'//nl//'    use answer_mod, only: answer'//nl// &
+            '    implicit none'//nl//'    if (answer /= 42) stop 1'//nl// &
+            'end program test_answer'//nl)
+        call git([character(len=64) :: 'init', '-q'])
+        call dependency_manifest('rev = "'//first//'"')
+        call git([character(len=64) :: 'add', 'test/test_answer.f90'])
+        call git_hook()
+        call assert_process_ok(result, 'current pin builds offline')
+        ! git -c reaches the hook and its children as GIT_CONFIG_PARAMETERS;
+        ! the harness isolates the global configuration.
+        call dependency_manifest('rev = "'//second//'"')
+        call git_hook('url.ext::git %s '//provider//'.insteadOf=https://example.invalid/hookdep.git', &
+            'protocol.ext.allow=always')
+        call assert_process_ok(result, 'moved pin refreshes the stale cache')
+        call assert_contains(result%stdout//result%stderr, '"fast_passed":1', &
+            'moved pin test runs')
+        project = checkout
+        call git([character(len=64) :: 'rev-parse', 'HEAD'])
+        call assert_equal_string(result%stdout(:index(result%stdout, nl) - 1), second, &
+            'checkout cache holds the moved pin')
+        project = join_path(scratch, 'project')
+    end subroutine stale_git_dependency
+
     subroutine dependency_manifest(selector)
         character(len=*), intent(in) :: selector
 
@@ -974,13 +1027,22 @@ contains
         call run_external('git', args, project, result)
         call assert_process_ok(result, 'git fixture command')
     end subroutine git
-    subroutine git_hook()
+    subroutine git_hook(config, more)
+        character(len=*), intent(in), optional :: config, more
         call write_text(scratch//'/hooks/pre-commit', '#!/bin/sh'//nl// &
             'exec "$FO_TEST_HOOK_DRIVER" hook pre-commit --json'//nl)
         call set_mode(scratch//'/hooks/pre-commit', int(o'755'))
         args = string_list_t()
         call list_add(args, '-c')
         call list_add(args, 'core.hooksPath='//scratch//'/hooks')
+        if (present(config)) then
+            call list_add(args, '-c')
+            call list_add(args, config)
+        end if
+        if (present(more)) then
+            call list_add(args, '-c')
+            call list_add(args, more)
+        end if
         call list_add(args, '--git-dir='//project//'/.git')
         call list_add(args, '--work-tree='//project)
         call list_add(args, 'hook')
