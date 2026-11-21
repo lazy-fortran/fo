@@ -35,8 +35,13 @@ contains
             if (status /= 0 .or. len_trim(home) == 0) return
             state = trim(home)//'/.cache/fy-tools'
         end if
-        script = state//'/src/fortyard/scripts/follow-tools.sh'
+        ! The stable copy beside the state, else the one in its clone.
+        script = state//'/follow-tools.sh'
         call fs_stat(script, mtime_ns, bytes, found)
+        if (.not. found) then
+            script = state//'/src/fortyard/scripts/follow-tools.sh'
+            call fs_stat(script, mtime_ns, bytes, found)
+        end if
         if (.not. found) return
         call fs_stat(state//'/checked', mtime_ns, bytes, found)
         if (found) then

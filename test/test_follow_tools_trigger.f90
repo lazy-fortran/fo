@@ -33,6 +33,14 @@ program test_follow_tools_trigger
     call assert_true(.not. file_exists(join_path(state, 'ran')), &
         'FO_NO_FOLLOW=1 starts nothing')
 
+    ! The stable copy beside the state is preferred to the clone's.
+    call remove_path(join_path(state, 'checked'))
+    call write_text(join_path(state, 'follow-tools.sh'), &
+        ': > "'//state//'/ran-stable"; : > "'//state//'/checked"'//new_line('a'))
+    call invoke('')
+    call assert_true(appears(join_path(state, 'ran-stable')), 'the stable copy runs')
+    call assert_true(.not. file_exists(join_path(state, 'ran')), 'the clone''s copy does not')
+
     call remove_tree(scratch)
     call finish_assertions()
     write (*, '(a)') 'follow-tools-trigger: started when due, otherwise not'
