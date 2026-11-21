@@ -44,6 +44,7 @@ program test_test_since
         'an unknown revision is named')
 
     call pin_bump()
+    call cmake_pin_bump()
 
     call remove_tree(scratch)
     call finish_assertions()
@@ -112,6 +113,78 @@ contains
             'another manifest change widens')
         call assert_contains(result%stdout, 'test_2', 'and selects every case')
     end subroutine pin_bump
+
+    subroutine cmake_pin_bump()
+        !! The same for a CMake FetchContent pin held in a variable, as MILCA's
+        !! MILCA_*_REVISION: the moved hash selects the users of what the
+        !! dependency changed, through its own uses.
+        character(:), allocatable :: dep, app, first, second
+        dep = join_path(scratch, 'cmake-dep')
+        app = join_path(scratch, 'cmake-app')
+        project = dep
+        call write_text(join_path(dep, 'CMakeLists.txt'), &
+            'cmake_minimum_required(VERSION 3.20)'//nl//'project(dep LANGUAGES Fortran)'//nl// &
+            'add_library(dep src/m1.f90 src/m2.f90 src/m3.f90)'//nl// &
+            'set_target_properties(dep PROPERTIES Fortran_MODULE_DIRECTORY '// &
+            '${CMAKE_CURRENT_BINARY_DIR}/mod)'//nl// &
+            'target_include_directories(dep PUBLIC ${CMAKE_CURRENT_BINARY_DIR}/mod)'//nl)
+        call write_text(join_path(dep, 'src/m1.f90'), 'module m1'//nl// &
+            '    implicit none'//nl//'    integer, parameter :: v1 = 1'//nl//'end module m1'//nl)
+        call write_text(join_path(dep, 'src/m2.f90'), 'module m2'//nl// &
+            '    implicit none'//nl//'    integer, parameter :: v2 = 1'//nl//'end module m2'//nl)
+        call write_text(join_path(dep, 'src/m3.f90'), 'module m3'//nl//'    use m1'//nl// &
+            '    implicit none'//nl//'    integer, parameter :: v3 = v1'//nl//'end module m3'//nl)
+        call git([character(len=32) :: 'init', '-q'])
+        call git([character(len=32) :: 'add', '-A'])
+        call git([character(len=32) :: 'commit', '-qm', 'One'])
+        first = head()
+        call write_text(join_path(dep, 'src/m1.f90'), 'module m1'//nl// &
+            '    implicit none'//nl//'    integer, parameter :: v1 = 1 + 0'//nl// &
+            'end module m1'//nl)
+        call git([character(len=32) :: 'commit', '-qam', 'Two'])
+        second = head()
+
+        project = app
+        call write_text(join_path(app, '.gitignore'), 'build/'//nl)
+        call cmake_lists(dep, first)
+        call write_text(join_path(app, 'test/test_1.f90'), 'program test_1'//nl// &
+            '    use m1'//nl//'    if (v1 /= 1) error stop 1'//nl//'end program test_1'//nl)
+        call write_text(join_path(app, 'test/test_2.f90'), 'program test_2'//nl// &
+            '    use m2'//nl//'    if (v2 /= 1) error stop 1'//nl//'end program test_2'//nl)
+        call write_text(join_path(app, 'test/test_3.f90'), 'program test_3'//nl// &
+            '    use m3'//nl//'    if (v3 /= 1) error stop 1'//nl//'end program test_3'//nl)
+        call git([character(len=32) :: 'init', '-q'])
+        call git([character(len=32) :: 'add', '-A'])
+        call git([character(len=32) :: 'commit', '-qm', 'Base'])
+        call fo([character(len=32) :: 'build'])
+        call assert_process_ok(result, 'the CMake app builds at the first pin')
+        call cmake_lists(dep, second)
+        call git([character(len=32) :: 'commit', '-qam', 'Bump'])
+        call fo([character(len=32) :: 'build'])
+        call assert_process_ok(result, 'the CMake app builds at the second pin')
+        call fo([character(len=32) :: 'test', '--since', 'HEAD~1', '--list'])
+        call assert_process_ok(result, 'fo test --since lists after a CMake pin bump')
+        call assert_contains(result%stdout, 'test_1', 'CMake: a user of the changed module')
+        call assert_contains(result%stdout, 'test_3', 'CMake: a user through the dependency')
+        call assert_not_contains(result%stdout, 'test_2', 'CMake: not a user of the unchanged one')
+        call assert_not_contains(result%stdout//result%stderr, 'affected selection widened', &
+            'a CMake pin bump does not widen')
+    end subroutine cmake_pin_bump
+
+    subroutine cmake_lists(dep, rev)
+        character(len=*), intent(in) :: dep, rev
+        call write_text(join_path(project, 'CMakeLists.txt'), &
+            'cmake_minimum_required(VERSION 3.20)'//nl//'project(app LANGUAGES Fortran)'//nl// &
+            'enable_testing()'//nl//'include(FetchContent)'//nl// &
+            'set(DEP_REVISION "'//rev//'")'//nl// &
+            'FetchContent_Declare(dep GIT_REPOSITORY '//dep// &
+            ' GIT_TAG ${DEP_REVISION} GIT_SHALLOW FALSE)'//nl// &
+            'FetchContent_MakeAvailable(dep)'//nl// &
+            'foreach(t 1 2 3)'//nl// &
+            '    add_executable(test_${t} test/test_${t}.f90)'//nl// &
+            '    target_link_libraries(test_${t} PRIVATE dep)'//nl// &
+            '    add_test(NAME test_${t} COMMAND test_${t})'//nl//'endforeach()'//nl)
+    end subroutine cmake_lists
 
     subroutine manifest(rev, extra)
         character(len=*), intent(in) :: rev, extra

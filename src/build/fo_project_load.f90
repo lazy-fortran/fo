@@ -494,6 +494,7 @@ contains
             kept(n)%s = strip_root(changed(k)%s, roots)
             ! Dependency checkouts below build/ are sources (moved pins).
             if (index(kept(n)%s, 'build/dependencies/') == 1) cycle
+            if (index(kept(n)%s, '/_deps/') > 0 .and. index(kept(n)%s, '-src/') > 0) cycle
             if (below_any(kept(n)%s, ignored)) n = n - 1
         end do
         call model_layering_sources(model, extra, paths)
@@ -706,21 +707,150 @@ contains
         character(len=*), intent(in) :: project_dir
         type(string_t), allocatable, intent(inout) :: changed(:)
         type(string_t), allocatable :: kept(:), files(:)
-        integer :: k
+        integer :: k, i
         logical :: ok
 
-        if (.not. any_path(changed, 'fpm.toml')) return
-        call pin_changes(project_dir, files, ok)
-        if (.not. ok) return
         allocate (kept(0))
         do k = 1, size(changed)
-            if (changed(k)%s /= 'fpm.toml') call push_text(kept, changed(k)%s)
-        end do
-        do k = 1, size(files)
-            call push_text(kept, files(k)%s)
+            ok = .false.
+            if (changed(k)%s == 'fpm.toml') then
+                call pin_changes(project_dir, files, ok)
+            else if (cmake_listfile(changed(k)%s)) then
+                ! A CMake pin is a commit hash (GIT_TAG or a variable set to it).
+                call cmake_pin_changes(project_dir, changed(k)%s, files, ok)
+            end if
+            if (ok) then
+                do i = 1, size(files)
+                    call push_text(kept, files(i)%s)
+                end do
+            else
+                call push_text(kept, changed(k)%s)
+            end if
         end do
         call move_alloc(kept, changed)
     end subroutine narrow_pin_bumps
+
+    subroutine cmake_pin_changes(project_dir, path, files, ok)
+        !! A listfile whose lines differ only in 40-hex commit hashes: for each
+        !! moved hash, the files a FetchContent checkout (a _deps/NAME-src
+        !! directory of a build tree)
+        !! holding both commits changed between them, spelled absolute.
+        character(len=*), intent(in) :: project_dir, path
+        type(string_t), allocatable, intent(out) :: files(:)
+        logical, intent(out) :: ok
+        character(len=:), allocatable :: old_text, new_text, old_sha, new_sha, dir, out
+        type(string_t), allocatable :: old_lines(:), new_lines(:), diff(:)
+        integer :: k, status, i
+
+        ok = .false.
+        allocate (files(0))
+        call git_output(project_dir, git_args3('show', base_ref()//':'//path, ''), &
+            old_text, status)
+        if (status /= 0) return
+        call read_text_file_alloc(project_dir//'/'//path, new_text, status)
+        if (status /= 0) return
+        call split_lines(old_text, old_lines)
+        call split_lines(new_text, new_lines)
+        if (size(old_lines) /= size(new_lines)) return
+        do k = 1, size(new_lines)
+            if (old_lines(k)%s == new_lines(k)%s) cycle
+            if (unhashed(old_lines(k)%s) /= unhashed(new_lines(k)%s)) return
+            old_sha = first_hash(old_lines(k)%s)
+            new_sha = first_hash(new_lines(k)%s)
+            if (len(old_sha) == 0 .or. len(new_sha) == 0) return
+            dir = checkout_with(project_dir, old_sha, new_sha)
+            if (len(dir) == 0) return
+            call git_output(dir, git_args3('diff', '--name-only', old_sha//'..'//new_sha), &
+                out, status)
+            if (status /= 0) return
+            call split_lines(out, diff)
+            do i = 1, size(diff)
+                if (len(diff(i)%s) > 0) call push_text(files, dir//'/'//diff(i)%s)
+            end do
+        end do
+        ok = .true.
+    end subroutine cmake_pin_changes
+
+    function checkout_with(project_dir, old_sha, new_sha) result(dir)
+        !! The FetchContent source checkout below the project (a _deps/NAME-src
+        !! directory of a build tree) that has both commits, or ''.
+        character(len=*), intent(in) :: project_dir, old_sha, new_sha
+        character(len=:), allocatable :: dir, packed, text
+        character(len=1024) :: out_file
+        integer :: n_args, status
+
+        dir = ''
+        packed = ''
+        n_args = 0
+        call argv_push(packed, n_args, 'sh')
+        call argv_push(packed, n_args, '-c')
+        ! fo preprocesses sources, and a slash followed by a star would open a
+        ! C comment.
+        call argv_push(packed, n_args, 'cd "$1" && for d in build*/_deps/'//'*-src; do '// &
+            '[ -d "$d" ] && git -C "$d" cat-file -e "$2^{commit}" 2>/dev/null && '// &
+            'git -C "$d" cat-file -e "$3^{commit}" 2>/dev/null && '// &
+            '{ printf "%s" "$d"; exit 0; }; done; exit 1')
+        call argv_push(packed, n_args, 'checkout-with')
+        call argv_push(packed, n_args, project_dir)
+        call argv_push(packed, n_args, old_sha)
+        call argv_push(packed, n_args, new_sha)
+        call make_tmpfile('fo-checkout-with', out_file)
+        call process_run_argv_logged('', packed, n_args, trim(out_file), .false., 0, status)
+        if (status == 0) then
+            call read_text_file_alloc(trim(out_file), text, status)
+            if (status == 0 .and. len_trim(text) > 0) dir = project_dir//'/'//trim(text)
+        end if
+        call delete_tmpfile(trim(out_file))
+    end function checkout_with
+
+    logical function ends_with(text, tail)
+        character(len=*), intent(in) :: text, tail
+        ends_with = .false.
+        if (len(text) >= len(tail)) ends_with = text(len(text) - len(tail) + 1:) == tail
+    end function ends_with
+
+    function unhashed(line) result(text)
+        !! line with every 40-hex commit hash emptied.
+        character(len=*), intent(in) :: line
+        character(len=:), allocatable :: text
+        integer :: at
+        text = line
+        do
+            at = hash_at(text)
+            if (at == 0) exit
+            text = text(:at - 1)//text(at + 40:)
+        end do
+    end function unhashed
+
+    function first_hash(line) result(sha)
+        character(len=*), intent(in) :: line
+        character(len=:), allocatable :: sha
+        integer :: at
+        sha = ''
+        at = hash_at(line)
+        if (at > 0) sha = line(at:at + 39)
+    end function first_hash
+
+    integer function hash_at(text) result(at)
+        !! Start of the first run of exactly 40 hex digits, or 0.
+        character(len=*), intent(in) :: text
+        integer :: i, run
+        at = 0
+        run = 0
+        do i = 1, len(text) + 1
+            if (i <= len(text)) then
+                if (index('0123456789abcdef', text(i:i)) > 0) then
+                    run = run + 1
+                    cycle
+                end if
+            end if
+            if (run == 40) then
+                at = i - 40
+                return
+            end if
+            run = 0
+        end do
+    end function hash_at
 
     subroutine add_dependency_sources(project_dir, changed, paths)
         !! The Fortran sources of every dependency checkout with a changed
@@ -738,6 +868,7 @@ contains
         integer :: k, slash, s, n_found, i
 
         allocate (done(0))
+        call add_fetchcontent_sources(project_dir, changed, paths)
         do k = 1, size(changed)
             if (index(changed(k)%s, prefix) /= 1) cycle
             slash = index(changed(k)%s(len(prefix) + 1:), '/')
@@ -758,6 +889,39 @@ contains
             deallocate (found)
         end do
     end subroutine add_dependency_sources
+
+    subroutine add_fetchcontent_sources(project_dir, changed, paths)
+        !! As add_dependency_sources, for FetchContent checkouts
+        !! (BUILD/_deps/NAME-src/...).
+        character(len=*), intent(in) :: project_dir
+        type(string_t), intent(in) :: changed(:)
+        type(string_t), allocatable, intent(inout) :: paths(:)
+        type(string_t), allocatable :: done(:)
+        character(len=4096), allocatable :: found(:)
+        character(len=:), allocatable :: root
+        character(len=4), parameter :: suffixes(2) = ['.f90', '.F90']
+        integer :: k, at, finish, s, n_found, i
+
+        allocate (done(0))
+        do k = 1, size(changed)
+            at = index(changed(k)%s, '/_deps/')
+            if (at == 0) cycle
+            finish = index(changed(k)%s(at + 7:), '-src/')
+            if (finish == 0) cycle
+            root = changed(k)%s(:at + 7 + finish + 2)
+            if (any_path(done, root)) cycle
+            call push_text(done, root)
+            allocate (found(20000))
+            do s = 1, size(suffixes)
+                call fs_collect_files(project_dir//'/'//root, '', suffixes(s), '', &
+                    found, n_found)
+                do i = 1, n_found
+                    call push_text(paths, trim(found(i)))
+                end do
+            end do
+            deallocate (found)
+        end do
+    end subroutine add_fetchcontent_sources
 
     logical function any_path(list, path)
         type(string_t), intent(in) :: list(:)
