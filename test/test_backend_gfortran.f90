@@ -44,7 +44,7 @@ program test_backend_gfortran
         call test_gfortran_parallel_test_loop_restores_cached_objects()
         call test_gfortran_parallel_warm_restore()
         call test_gfortran_multiple_modules()
-        call test_gfortran_test_skips_app_but_build_restores_it()
+        call test_gfortran_test_builds_current_apps()
         call test_gfortran_test_links_helper_modules_and_lib()
         call test_gfortran_named_test_links_helper_modules()
         call test_gfortran_named_test_links_external_helpers()
@@ -1204,13 +1204,16 @@ contains
         call fs_remove_file(log_file)
     end subroutine test_gfortran_app_links_only_reachable_library_objects
 
-    subroutine test_gfortran_test_skips_app_but_build_restores_it()
+    subroutine test_gfortran_test_builds_current_apps()
+        ! Tests may run the project's apps: a test build links them from the
+        ! current sources, and removes one that no longer builds instead of
+        ! leaving its old binary, without failing the tests.
         character(len=512) :: project_dir, log_file, app_path
         integer :: u, exitcode, run_exit
         logical :: app_exists
 
-        call make_tmp_path('fo_test_without_app', project_dir)
-        call make_tmp_path('fo_test_without_app_log', log_file)
+        call make_tmp_path('fo_test_with_app', project_dir)
+        call make_tmp_path('fo_test_with_app_log', log_file)
         call make_simple_fpm_project(project_dir)
         call make_dir(trim(project_dir)//'/app')
         open (newunit=u, file=trim(project_dir)//'/app/main.f90', status='replace')
@@ -1222,19 +1225,24 @@ contains
 
         call native_test_run(project_dir, log_file, exitcode)
         inquire (file=trim(app_path), exist=app_exists)
-        call assert(exitcode == 0 .and. .not. app_exists, &
-            'test-only build does not link an unrelated application')
-
-        call gfortran_build(project_dir, log_file, exitcode)
-        inquire (file=trim(app_path), exist=app_exists)
         run_exit = 1
         if (app_exists) call run_backend_program(app_path, log_file, run_exit)
         call assert(exitcode == 0 .and. app_exists .and. run_exit == 0, &
-            'normal build after tests creates a runnable application')
+            'a test build creates a runnable application')
+
+        open (newunit=u, file=trim(project_dir)//'/app/main.f90', status='replace')
+        write (u, '(a)') 'program main'
+        write (u, '(a)') 'print *, missing_symbol'
+        write (u, '(a)') 'end program main'
+        close (u)
+        call native_test_run(project_dir, log_file, exitcode)
+        inquire (file=trim(app_path), exist=app_exists)
+        call assert(exitcode == 0 .and. .not. app_exists, &
+            'an application that no longer builds is removed and the tests run')
 
         call remove_tree(project_dir)
         call fs_remove_file(log_file)
-    end subroutine test_gfortran_test_skips_app_but_build_restores_it
+    end subroutine test_gfortran_test_builds_current_apps
 
     subroutine test_array_temporary_warning_flag_policy()
         character(len=128) :: flags

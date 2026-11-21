@@ -966,22 +966,6 @@ contains
         memo%chains(memo%n_chains)%d = chain
     end subroutine compiler_include_chain
 
-    logical function gremlin_execution_view_requested() result(requested)
-        character(len=MAX_PATH) :: execution_cwd
-        integer :: status
-
-        execution_cwd = ''
-        call get_environment_variable('FO_GREMLIN_EXECUTION_CWD', execution_cwd, &
-            status=status)
-        requested = .false.
-        if (status == 0) requested = len_trim(execution_cwd) > 0
-        if (requested) return
-        ! Generation builds must produce apps before case views copy them.
-        call get_environment_variable('FO_GREMLIN_FROZEN_ROOT', execution_cwd, &
-            status=status)
-        if (status == 0) requested = len_trim(execution_cwd) > 0
-    end function gremlin_execution_view_requested
-
     integer function native_jobs() result(jobs)
         character(len=32) :: value
         integer :: status, iostat
@@ -1297,12 +1281,22 @@ contains
         if (present(names) .and. present(n_names)) n_sel = n_names
         if (present(n_compiled)) n_compiled = 0
 
+        ! Tests may run the project's apps, so they are built from the current
+        ! sources too. When only the apps do not build, their old binaries are
+        ! removed and the tests that do not need them still run.
         call gfortran_build(project_dir, lf, exitcode, flags=flag_text, &
             use_cache=use_cache, up_to_date=build_current, &
             tests_ready=tests_current, &
-            build_apps=gremlin_execution_view_requested(), &
-            apps_ready=apps_current, cached_test_dir=test_dir)
-        if (exitcode /= 0) return
+            build_apps=.true., apps_ready=apps_current, cached_test_dir=test_dir)
+        if (exitcode /= 0) then
+            call gfortran_build(project_dir, lf, exitcode, flags=flag_text, &
+                use_cache=use_cache, up_to_date=build_current, &
+                tests_ready=tests_current, &
+                build_apps=.false., apps_ready=apps_current, cached_test_dir=test_dir)
+            if (exitcode /= 0) return
+            call remove_stale_apps(project_dir, request_flags)
+            apps_current = .false.
+        end if
 
         bin_dir = native_output_dir(project_dir, request_flags, 'bin')
         if (build_current .and. tests_current) then
@@ -1356,6 +1350,27 @@ contains
             config%test_dir, use_cache)
         call memo_save()
     end subroutine gfortran_test
+
+    subroutine remove_stale_apps(project_dir, request_flags)
+        !! The apps do not build: their binaries from an earlier build are
+        !! removed, so no test runs an app older than its sources.
+        character(len=*), intent(in) :: project_dir, request_flags
+        character(len=:), allocatable :: app_dir, bin_dir
+        character(len=MAX_PATH), allocatable :: stale(:)
+        integer :: n_stale, i, slash
+
+        app_dir = native_output_dir(project_dir, request_flags, 'app')
+        bin_dir = native_output_dir(project_dir, request_flags, 'bin')
+        allocate (stale(MAX_SRC_OBJS))
+        call fs_collect_files(app_dir, '', '', '', stale, n_stale, recursive=.false.)
+        do i = 1, n_stale
+            slash = index(stale(i), '/', back=.true.)
+            call fs_remove_file(bin_dir//'/'//trim(stale(i)(slash + 1:)))
+            call fs_remove_file(trim(stale(i)))
+        end do
+        write (error_unit, '(a)') 'fo: warning: the apps do not build; their old '// &
+            'binaries were removed and tests that run them fail (see the build log)'
+    end subroutine remove_stale_apps
 
     subroutine gfortran_run_tests(project_dir, log_file, exitcode, include_slow, &
             names, n_names, flags)

@@ -5,7 +5,8 @@ module fo_test_cli
     use fo_test_harness, only: make_scratch, join_path, make_symlink, remove_tree
     use fo_test_harness, only: file_exists, remove_path, read_text, sleep_ms
     use fo_test_process_identity, only: mcp_kill_owned_tree, mcp_process_identity_running
-    use fo_fs, only: fs_is_windows
+    use fo_fs, only: fs_is_windows, fs_stat
+    use, intrinsic :: iso_c_binding, only: c_long_long
     use fo_process, only: process_self_executable
     use, intrinsic :: iso_fortran_env, only: error_unit
     use fo_test_harness, only: assert_equal_string, assert_equal_integer
@@ -45,6 +46,10 @@ contains
                 deallocate(driver)
             end if
         end if
+        ! The driver this build made comes before $FO, which `fo test` sets to
+        ! itself: usually an installed release older than the code under test.
+        call newest_built_driver(driver)
+        if (len(driver) > 0) return
         call get_environment_variable('FO', length=env_length, status=status)
         if (status == 0 .and. env_length > 0) then
             allocate(character(len=env_length) :: driver)
@@ -59,27 +64,44 @@ contains
     end subroutine resolve_driver
 
     subroutine built_driver(driver)
-        !! The fo built next to this test (by fo in the same bin, by fpm in ../app),
-        !! never one from PATH, which would test an installed release instead.
+        !! The fo built next to this test, never one from PATH, which would test
+        !! an installed release instead.
         character(:), allocatable, intent(out) :: driver
-        character(len=4096) :: self
-        character(:), allocatable :: directory
-        logical :: found
-        integer :: slash
 
-        call process_self_executable(self, found)
-        if (found) then
-            slash = index(trim(self), '/', back=.true.)
-            directory = self(:max(1, slash - 1))
-            driver = directory//'/fo'
-            if (file_exists(driver)) return
-            driver = directory//'/../app/fo'
-            if (file_exists(driver)) return
-        end if
+        call newest_built_driver(driver)
+        if (len(driver) > 0) return
         write (error_unit, '(a)') 'FAIL: no fo driver built next to this test; '// &
             'pass the driver as the first argument or set FO'
         error stop 2
     end subroutine built_driver
+
+    subroutine newest_built_driver(driver)
+        !! The newer of the drivers next to this test (../app/fo from fo, fo in
+        !! the same bin from older layouts), or '' without either: a leftover
+        !! from an earlier build never wins over the current one.
+        character(:), allocatable, intent(out) :: driver
+        character(len=4096) :: self
+        character(:), allocatable :: directory, candidate
+        character(len=*), parameter :: names(2) = [character(len=7) :: '/../app', '']
+        integer(c_long_long) :: mtime, bytes, best
+        logical :: found
+        integer :: slash, i
+
+        driver = ''
+        call process_self_executable(self, found)
+        if (.not. found) return
+        slash = index(trim(self), '/', back=.true.)
+        directory = self(:max(1, slash - 1))
+        best = -1
+        do i = 1, size(names)
+            candidate = directory//trim(names(i))//'/fo'
+            call fs_stat(candidate, mtime, bytes, found)
+            if (found .and. mtime > best) then
+                best = mtime
+                driver = candidate
+            end if
+        end do
+    end subroutine newest_built_driver
 
     subroutine run_arguments(executable, arguments, cwd, result, environment, timeout_ms)
         character(len=*), intent(in) :: executable, cwd

@@ -8,7 +8,7 @@ program test_dev_dependency_c_cli
     use fo_test_cli, only: resolve_driver, run_fo, run_external
     implicit none
 
-    character(:), allocatable :: driver, scratch, consumer, dependency, cache, regular
+    character(:), allocatable :: driver, scratch, consumer, dependency, cache, regular, cold_log
     type(process_result_t) :: result
     type(string_list_t) :: arguments, environment
     character(len=88) :: test_lines(8), production_lines(11)
@@ -62,7 +62,12 @@ program test_dev_dependency_c_cli
     call expect_value('21', '', 'cold static dev dependency')
     call assert_contains(result%stderr, 'test-support_dev_src_devshim.c.o', &
         'cold link explicitly includes the C shim')
-    call assert_archive_members(result%stderr, .true.)
+    ! fo test links the app as well; each check reads its target's link line.
+    cold_log = result%stderr
+    call assert_archive_members(cold_log, .true., 'test_probe')
+    call assert_not_contains(link_line(cold_log, 'production'), 'test-support_dev_src_', &
+        'the app linked with the tests excludes all dev dependency objects')
+    call assert_archive_members(cold_log, .false., 'production')
     call expect_value('21', '', 'warm static dev dependency')
 
     call write_text(join_path(dependency, 'include/value.h'), '#define DEV_VALUE 27' // nl)
@@ -100,7 +105,6 @@ program test_dev_dependency_c_cli
     call assert_equal_string(result%stdout, 'production' // nl, 'production behavior')
     call assert_not_contains(result%stderr, 'test-support_dev_src_', &
         'production link excludes all dev dependency objects')
-    call assert_archive_members(result%stderr, .false.)
     call symbols(join_path(consumer, 'build/fo/bin/production'))
     call assert_not_contains(result%stdout, 'dev_shim', 'production has no C test symbols')
     call assert_not_contains(result%stdout, 'devhelper', 'production has no Fortran test symbols')
@@ -172,14 +176,39 @@ contains
         call assert_file_equals(join_path(consumer, 'dev.receipt'), expected // nl, context)
     end subroutine expect_value
 
-    subroutine assert_archive_members(link_log, include_dev)
-        character(len=*), intent(in) :: link_log
+    function link_line(log, target) result(line)
+        !! The line of log that links target's program object and an archive, or ''.
+        character(len=*), intent(in) :: log, target
+        character(:), allocatable :: line
+        integer :: start, finish
+
+        line = ''
+        start = 1
+        do while (start <= len(log))
+            finish = index(log(start:), nl)
+            if (finish == 0) then
+                finish = len(log) + 1
+            else
+                finish = start + finish - 1
+            end if
+            if (index(log(start:finish - 1), '_'//target//'.f90.o ') > 0 .and. &
+                index(log(start:finish - 1), '.a ') > 0) then
+                line = log(start:finish - 1)//' '
+                return
+            end if
+            start = finish + 1
+        end do
+    end function link_line
+
+    subroutine assert_archive_members(full_log, include_dev, target)
+        character(len=*), intent(in) :: full_log, target
         logical, intent(in) :: include_dev
-        character(:), allocatable :: archive, members
+        character(:), allocatable :: archive, members, link_log
         type(process_result_t) :: inventory
         type(string_list_t) :: tool_arguments
         integer :: last, first, i, count
 
+        link_log = link_line(full_log, target)
         last = index(link_log, '.a ')
         call assert_true(last > 0, 'selected link has its regular dependency archive')
         if (last == 0) return
