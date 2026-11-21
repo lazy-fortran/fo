@@ -1663,6 +1663,9 @@ static int run_argv(const char *cwd, char *const argv[], const char *log_file,
 #endif
             if (heartbeat_s > 0 &&
                 timespec_at_or_after(&now, &next_heartbeat)) {
+                /* A truncated log is output the caller parses (ar t, compiler
+                   probes), so progress goes to stderr only. */
+                const char *progress_log = append ? log_file : NULL;
                 if (budget != NULL && has_text(budget->slow_label)) {
                     char message[512];
                     int n = snprintf(message, sizeof(message),
@@ -1670,9 +1673,9 @@ static int run_argv(const char *cwd, char *const argv[], const char *log_file,
                                      budget->slow_label,
                                      (long)(now.tv_sec - start.tv_sec));
                     if (n > 0 && n < (int)sizeof(message))
-                        emit_heartbeat_text(log_file, message, (size_t)n);
+                        emit_heartbeat_text(progress_log, message, (size_t)n);
                 } else {
-                    emit_heartbeat(log_file);
+                    emit_heartbeat(progress_log);
                 }
                 do {
                     add_seconds(&next_heartbeat, heartbeat_s);

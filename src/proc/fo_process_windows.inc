@@ -425,7 +425,7 @@ static int run_windows(const char *cwd, const char *packed, int packed_len, int 
             *timeout_kind = 2; code = 124; break;
         }
         if (heartbeat_s > 0 && GetTickCount64() - heartbeat >= (ULONGLONG)heartbeat_s * 1000) {
-            emit_windows_heartbeat(log); heartbeat = GetTickCount64();
+            emit_windows_heartbeat(append ? log : NULL); heartbeat = GetTickCount64();
         }
     }
     int drainage = drain_job(item, *timeout_kind == 0);

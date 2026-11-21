@@ -13,6 +13,7 @@ program test_fmt_deep
     call test_fmt_deep_check_misformatted()
     call test_process_run_argv_logged_passes_env()
     call test_process_run_argv_logged_reports_heartbeat()
+    call test_process_capture_has_no_heartbeat()
     call test_process_run_argv_logged_times_out()
     call test_process_argv_many_tokens()
 
@@ -153,7 +154,7 @@ contains
         call argv_push(packed, n_args, '2')
         t0 = wall_time_seconds()
         call process_run_argv_logged('', packed, n_args, trim(log_file), &
-            .false., 5, exitcode, heartbeat_s=1)
+            .true., 5, exitcode, heartbeat_s=1)
         t1 = wall_time_seconds()
 
         found = .false.
@@ -173,6 +174,37 @@ contains
             'wall time includes time waiting for a child process')
         call delete_tmpfile(log_file)
     end subroutine test_process_run_argv_logged_reports_heartbeat
+
+    subroutine test_process_capture_has_no_heartbeat()
+        ! A fresh capture is parsed (ar t member lists), so a slow command
+        ! must leave exactly its own output there.
+        character(len=512) :: log_file, line
+        character(len=:), allocatable :: packed
+        integer :: n_args, exitcode, u, ios, lines
+
+        call make_tmpfile('test_process_capture_log', log_file)
+        n_args = 0
+        packed = ''
+        call argv_push(packed, n_args, 'sh')
+        call argv_push(packed, n_args, '-c')
+        call argv_push(packed, n_args, 'sleep 2; echo member.o')
+        call process_run_argv_logged('', packed, n_args, trim(log_file), &
+            .false., 5, exitcode, heartbeat_s=1)
+        lines = 0
+        open (newunit=u, file=trim(log_file), status='old', iostat=ios)
+        if (ios == 0) then
+            do
+                read (u, '(a)', iostat=ios) line
+                if (ios /= 0) exit
+                lines = lines + 1
+                call assert(trim(line) == 'member.o', 'capture: only the output: '//trim(line))
+            end do
+            close (u)
+        end if
+        call assert(exitcode == 0, 'capture: child exits zero')
+        call assert(lines == 1, 'capture: one output line')
+        call delete_tmpfile(log_file)
+    end subroutine test_process_capture_has_no_heartbeat
 
     subroutine test_process_run_argv_logged_times_out()
         character(len=512) :: log_file
