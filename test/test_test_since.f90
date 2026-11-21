@@ -43,11 +43,88 @@ program test_test_since
     call assert_contains(result%stdout//result%stderr, 'no-such-ref', &
         'an unknown revision is named')
 
+    call pin_bump()
+
     call remove_tree(scratch)
     call finish_assertions()
     write (*, '(a)') 'test-since: --since selects the cases affected since REF'
 
 contains
+
+    subroutine pin_bump()
+        !! A commit that only moves a Git dependency's pin selects the cases
+        !! whose module closure reaches what the dependency changed between
+        !! the pins, through the dependency's own uses; any other manifest
+        !! change widens to all.
+        character(:), allocatable :: dep, app, first, second
+        dep = join_path(scratch, 'dep')
+        app = join_path(scratch, 'app')
+        project = dep
+        call write_text(join_path(dep, 'fpm.toml'), 'name = "dep"'//nl)
+        call write_text(join_path(dep, 'src/m1.f90'), 'module m1'//nl// &
+            '    implicit none'//nl//'    integer, parameter :: v1 = 1'//nl//'end module m1'//nl)
+        call write_text(join_path(dep, 'src/m2.f90'), 'module m2'//nl// &
+            '    implicit none'//nl//'    integer, parameter :: v2 = 1'//nl//'end module m2'//nl)
+        call write_text(join_path(dep, 'src/m3.f90'), 'module m3'//nl//'    use m1'//nl// &
+            '    implicit none'//nl//'    integer, parameter :: v3 = v1'//nl//'end module m3'//nl)
+        call git([character(len=32) :: 'init', '-q'])
+        call git([character(len=32) :: 'add', '-A'])
+        call git([character(len=32) :: 'commit', '-qm', 'One'])
+        first = head()
+        call write_text(join_path(dep, 'src/m1.f90'), 'module m1'//nl// &
+            '    implicit none'//nl//'    integer, parameter :: v1 = 1 + 0'//nl// &
+            'end module m1'//nl)
+        call git([character(len=32) :: 'commit', '-qam', 'Two'])
+        second = head()
+
+        project = app
+        call write_text(join_path(app, '.gitignore'), 'build/'//nl)
+        call manifest(first, '')
+        call write_text(join_path(app, 'test/test_1.f90'), 'program test_1'//nl// &
+            '    use m1'//nl//'    if (v1 /= 1) error stop 1'//nl//'end program test_1'//nl)
+        call write_text(join_path(app, 'test/test_2.f90'), 'program test_2'//nl// &
+            '    use m2'//nl//'    if (v2 /= 1) error stop 1'//nl//'end program test_2'//nl)
+        call write_text(join_path(app, 'test/test_3.f90'), 'program test_3'//nl// &
+            '    use m3'//nl//'    if (v3 /= 1) error stop 1'//nl//'end program test_3'//nl)
+        call git([character(len=32) :: 'init', '-q'])
+        call git([character(len=32) :: 'add', '-A'])
+        call git([character(len=32) :: 'commit', '-qm', 'Base'])
+        call fo([character(len=32) :: 'build'])
+        call assert_process_ok(result, 'the app builds at the first pin')
+        call manifest(second, '')
+        call git([character(len=32) :: 'commit', '-qam', 'Bump'])
+        call fo([character(len=32) :: 'build'])
+        call assert_process_ok(result, 'the app builds at the second pin')
+        call fo([character(len=32) :: 'test', '--since', 'HEAD~1', '--list'])
+        call assert_process_ok(result, 'fo test --since lists after a pin bump')
+        call assert_contains(result%stdout, 'test_1', 'a user of the changed module is selected')
+        call assert_contains(result%stdout, 'test_3', &
+            'a user of a dependency module that uses it is selected')
+        call assert_not_contains(result%stdout, 'test_2', &
+            'a user of an unchanged dependency module is not')
+        call assert_not_contains(result%stdout//result%stderr, 'affected selection widened', &
+            'a pin bump does not widen')
+
+        call manifest(second, '[build]'//nl//'auto-executables = true'//nl)
+        call git([character(len=32) :: 'commit', '-qam', 'Edit'])
+        call fo([character(len=32) :: 'test', '--since', 'HEAD~1', '--list'])
+        call assert_contains(result%stdout//result%stderr, 'affected selection widened', &
+            'another manifest change widens')
+        call assert_contains(result%stdout, 'test_2', 'and selects every case')
+    end subroutine pin_bump
+
+    subroutine manifest(rev, extra)
+        character(len=*), intent(in) :: rev, extra
+        call write_text(join_path(project, 'fpm.toml'), 'name = "app"'//nl//extra// &
+            '[dependencies]'//nl//'dep = { git = "'//join_path(scratch, 'dep')// &
+            '", rev = "'//rev//'" }'//nl)
+    end subroutine manifest
+
+    function head() result(sha)
+        character(:), allocatable :: sha
+        call git([character(len=32) :: 'rev-parse', 'HEAD'])
+        sha = trim(result%stdout(:index(result%stdout, nl) - 1))
+    end function head
 
     subroutine module_source(name, value)
         character(len=*), intent(in) :: name

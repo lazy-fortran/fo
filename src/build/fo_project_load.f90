@@ -32,7 +32,7 @@ module fo_project_load
     use fo_build_tree, only: native_output_dir
     use fo_test_cases, only: CASE_SEP, case_list, case_listing_t, case_matches
     use fo_process, only: argv_push, process_run_argv_logged
-    use fo_fs, only: fs_realpath
+    use fo_fs, only: fs_realpath, fs_collect_files
     use fo_ctest_run, only: ctest_native_select, ctest_native_run, ctest_log_note
     use fo_scan, only: scan_unit_t, scan_file_cached
     use fo_process, only: process_has_fortran_source_ext
@@ -417,6 +417,7 @@ contains
             return
         end if
         call project_changed_files(trim(b%project_dir), changed, git_ok, reason)
+        if (git_ok) call narrow_pin_bumps(trim(b%project_dir), changed)
         if (git_ok) then
             call project_cmake_delta(trim(b%project_dir), base_ref(), &
                 trim(b%project_dir), changed, delta)
@@ -491,9 +492,12 @@ contains
         do k = 1, size(changed)
             n = n + 1
             kept(n)%s = strip_root(changed(k)%s, roots)
+            ! Dependency checkouts below build/ are sources (moved pins).
+            if (index(kept(n)%s, 'build/dependencies/') == 1) cycle
             if (below_any(kept(n)%s, ignored)) n = n - 1
         end do
         call model_layering_sources(model, extra, paths)
+        call add_dependency_sources(trim(b%project_dir), kept(1:n), paths)
         call scan_units(paths, units, unscanned)
         call attach_recorded_failures(b, model, request, local)
         call filter_flags(request, uses_affected, uses_failed)
@@ -691,6 +695,224 @@ contains
             call push_text(changed, prefix//more(k)%s)
         end do
     end subroutine add_prefixed
+
+    subroutine narrow_pin_bumps(project_dir, changed)
+        !! A change of fpm.toml that only moves Git dependency pins (rev, tag
+        !! or branch) affects what the moved dependencies changed between the
+        !! two pins, not the whole build: fpm.toml is replaced by those files,
+        !! spelled absolute below build/dependencies, so the module graph
+        !! finds the cases that use them. Anything else in fpm.toml, or a pin
+        !! whose two commits the checkout lacks, keeps fpm.toml and widens.
+        character(len=*), intent(in) :: project_dir
+        type(string_t), allocatable, intent(inout) :: changed(:)
+        type(string_t), allocatable :: kept(:), files(:)
+        integer :: k
+        logical :: ok
+
+        if (.not. any_path(changed, 'fpm.toml')) return
+        call pin_changes(project_dir, files, ok)
+        if (.not. ok) return
+        allocate (kept(0))
+        do k = 1, size(changed)
+            if (changed(k)%s /= 'fpm.toml') call push_text(kept, changed(k)%s)
+        end do
+        do k = 1, size(files)
+            call push_text(kept, files(k)%s)
+        end do
+        call move_alloc(kept, changed)
+    end subroutine narrow_pin_bumps
+
+    subroutine add_dependency_sources(project_dir, changed, paths)
+        !! The Fortran sources of every dependency checkout with a changed
+        !! file (build/dependencies/NAME/...), so the module graph reaches
+        !! from a changed dependency module through the dependency's own uses
+        !! to the project's cases.
+        character(len=*), intent(in) :: project_dir
+        type(string_t), intent(in) :: changed(:)
+        type(string_t), allocatable, intent(inout) :: paths(:)
+        type(string_t), allocatable :: done(:)
+        character(len=4096), allocatable :: found(:)
+        character(len=:), allocatable :: name
+        character(len=*), parameter :: prefix = 'build/dependencies/'
+        character(len=4), parameter :: suffixes(2) = ['.f90', '.F90']
+        integer :: k, slash, s, n_found, i
+
+        allocate (done(0))
+        do k = 1, size(changed)
+            if (index(changed(k)%s, prefix) /= 1) cycle
+            slash = index(changed(k)%s(len(prefix) + 1:), '/')
+            if (slash <= 1) cycle
+            name = changed(k)%s(len(prefix) + 1:len(prefix) + slash - 1)
+            if (any_path(done, name)) cycle
+            call push_text(done, name)
+            allocate (found(20000))
+            do s = 1, size(suffixes)
+                call fs_collect_files(project_dir//'/'//prefix//name, '', suffixes(s), &
+                    '', found, n_found)
+                do i = 1, n_found
+                    ! A dependency's own build tree is not its source.
+                    if (index(found(i), '/'//prefix//name//'/build/') > 0) cycle
+                    call push_text(paths, trim(found(i)))
+                end do
+            end do
+            deallocate (found)
+        end do
+    end subroutine add_dependency_sources
+
+    logical function any_path(list, path)
+        type(string_t), intent(in) :: list(:)
+        character(len=*), intent(in) :: path
+        integer :: k
+        any_path = .false.
+        do k = 1, size(list)
+            if (list(k)%s == path) any_path = .true.
+        end do
+    end function any_path
+
+    subroutine pin_changes(project_dir, files, ok)
+        !! The files of each Git dependency whose pin moved between the base
+        !! and the working tree's fpm.toml; ok only when the manifests differ
+        !! in pin values alone and every moved pin can be diffed.
+        character(len=*), intent(in) :: project_dir
+        type(string_t), allocatable, intent(out) :: files(:)
+        logical, intent(out) :: ok
+        character(len=:), allocatable :: old_text, new_text, name, old_pin, new_pin, dir
+        type(string_t), allocatable :: old_lines(:), new_lines(:), diff(:)
+        integer :: k, status
+
+        ok = .false.
+        allocate (files(0))
+        call git_output(project_dir, git_args3('show', base_ref()//':fpm.toml', ''), &
+            old_text, status)
+        if (status /= 0) return
+        call read_text_file_alloc(project_dir//'/fpm.toml', new_text, status)
+        if (status /= 0) return
+        call split_lines(old_text, old_lines)
+        call split_lines(new_text, new_lines)
+        if (size(old_lines) /= size(new_lines)) return
+        do k = 1, size(new_lines)
+            if (old_lines(k)%s == new_lines(k)%s) cycle
+            ! Only the pin value of a git dependency line may differ.
+            if (unpinned(old_lines(k)%s) /= unpinned(new_lines(k)%s)) return
+            if (index(new_lines(k)%s, 'git') == 0) return
+            name = trim(adjustl(new_lines(k)%s(:max(1, index(new_lines(k)%s, '=') - 1))))
+            if (len(name) == 0) return
+            old_pin = pin_value(old_lines(k)%s)
+            new_pin = pin_value(new_lines(k)%s)
+            if (len(old_pin) == 0 .or. len(new_pin) == 0) return
+            dir = project_dir//'/build/dependencies/'//name
+            call git_output(dir, git_args3('diff', '--name-only', old_pin//'..'//new_pin), &
+                old_text, status)
+            if (status /= 0) return
+            call split_lines(old_text, diff)
+            do status = 1, size(diff)
+                if (len(diff(status)%s) > 0) call push_text(files, dir//'/'//diff(status)%s)
+            end do
+        end do
+        ok = .true.
+    end subroutine pin_changes
+
+    function unpinned(line) result(text)
+        !! line with the values of rev, tag and branch emptied.
+        character(len=*), intent(in) :: line
+        character(len=:), allocatable :: text
+        character(len=6), parameter :: keys(3) = [character(len=6) :: 'rev', 'tag', 'branch']
+        integer :: k, at, open_quote, close_quote
+
+        text = line
+        do k = 1, size(keys)
+            at = index(text, trim(keys(k))//' =')
+            if (at == 0) at = index(text, trim(keys(k))//'=')
+            if (at == 0) cycle
+            open_quote = index(text(at:), '"')
+            if (open_quote == 0) cycle
+            open_quote = at + open_quote - 1
+            close_quote = index(text(open_quote + 1:), '"')
+            if (close_quote == 0) cycle
+            close_quote = open_quote + close_quote
+            text = text(:open_quote)//text(close_quote:)
+        end do
+    end function unpinned
+
+    function pin_value(line) result(value)
+        !! The rev, else tag, else branch value of a dependency line.
+        character(len=*), intent(in) :: line
+        character(len=:), allocatable :: value
+        character(len=6), parameter :: keys(3) = [character(len=6) :: 'rev', 'tag', 'branch']
+        integer :: k, at, open_quote, close_quote
+
+        value = ''
+        do k = 1, size(keys)
+            at = index(line, trim(keys(k))//' =')
+            if (at == 0) at = index(line, trim(keys(k))//'=')
+            if (at == 0) cycle
+            open_quote = index(line(at:), '"')
+            if (open_quote == 0) cycle
+            open_quote = at + open_quote - 1
+            close_quote = index(line(open_quote + 1:), '"')
+            if (close_quote == 0) cycle
+            value = line(open_quote + 1:open_quote + close_quote - 1)
+            return
+        end do
+    end function pin_value
+
+    function git_args3(a, b, c) result(packed)
+        character(len=*), intent(in) :: a, b, c
+        character(len=:), allocatable :: packed
+        integer :: n
+        packed = ''
+        n = 0
+        call argv_push(packed, n, a)
+        call argv_push(packed, n, b)
+        if (len(c) > 0) call argv_push(packed, n, c)
+    end function git_args3
+
+    subroutine git_output(dir, args, text, status)
+        !! Output of git -C dir args (args packed by argv_push).
+        character(len=*), intent(in) :: dir, args
+        character(len=:), allocatable, intent(out) :: text
+        integer, intent(out) :: status
+        character(len=1024) :: out_file
+        character(len=:), allocatable :: packed
+        integer :: n_args, i, read_status
+
+        text = ''
+        packed = ''
+        n_args = 0
+        call argv_push(packed, n_args, 'git')
+        call argv_push(packed, n_args, '-C')
+        call argv_push(packed, n_args, dir)
+        ! argv_push pads its buffer; the packed words end at the last NUL.
+        packed = trim(packed)//trim(args)
+        do i = 1, len(args)
+            if (args(i:i) == achar(0)) n_args = n_args + 1
+        end do
+        call make_tmpfile('fo-git-output', out_file)
+        call process_run_argv_logged('', packed, n_args, trim(out_file), .false., 0, status)
+        if (status == 0) then
+            call read_text_file_alloc(trim(out_file), text, read_status)
+            if (read_status /= 0) status = 1
+        end if
+        call delete_tmpfile(trim(out_file))
+    end subroutine git_output
+
+    subroutine split_lines(text, lines)
+        character(len=*), intent(in) :: text
+        type(string_t), allocatable, intent(out) :: lines(:)
+        integer :: start, finish
+        allocate (lines(0))
+        start = 1
+        do while (start <= len(text))
+            finish = index(text(start:), achar(10))
+            if (finish == 0) then
+                finish = len(text) + 1
+            else
+                finish = start + finish - 1
+            end if
+            call push_text(lines, text(start:finish - 1))
+            start = finish + 1
+        end do
+    end subroutine split_lines
 
     subroutine project_set_changed_base(ref)
         !! Compare the project against ref instead of HEAD; '' restores HEAD.
