@@ -500,6 +500,7 @@ contains
         call model_layering_sources(model, extra, paths)
         call add_dependency_sources(trim(b%project_dir), kept(1:n), paths)
         call scan_units(paths, units, unscanned)
+        call replace_included(units, roots, kept, n)
         call attach_recorded_failures(b, model, request, local)
         call filter_flags(request, uses_affected, uses_failed)
         if (uses_affected) then
@@ -1349,6 +1350,145 @@ contains
             return
         end do
     end function strip_root
+
+    subroutine replace_included(units, roots, kept, n)
+        !! A changed file that scanned units include (#include "f" or
+        !! include 'f') is no source of its own: it stands for the units that
+        !! include it, which replace it in kept(1:n). A file no unit includes
+        !! stays as it is.
+        type(model_unit_t), intent(in) :: units(:)
+        type(string_t), intent(in) :: roots(:)
+        type(string_t), allocatable, intent(inout) :: kept(:)
+        integer, intent(inout) :: n
+        type :: names_t
+            type(string_t), allocatable :: names(:)
+        end type names_t
+        type(names_t), allocatable :: includes(:)
+        type(string_t), allocatable :: out(:), rels(:)
+        integer :: k, u, i
+        logical :: found, read_done
+
+        allocate (out(0), rels(size(units)))
+        do u = 1, size(units)
+            rels(u)%s = strip_root(units(u)%path, roots)
+        end do
+        read_done = .false.
+        do k = 1, n
+            found = .false.
+            if (.not. any_path(rels, kept(k)%s)) then
+                if (.not. read_done) then
+                    allocate (includes(size(units)))
+                    do u = 1, size(units)
+                        call included_names(units(u)%path, includes(u)%names)
+                    end do
+                    read_done = .true.
+                end if
+                do u = 1, size(units)
+                    do i = 1, size(includes(u)%names)
+                        if (.not. path_ends_with(kept(k)%s, includes(u)%names(i)%s)) cycle
+                        if (.not. any_path(out, rels(u)%s)) out = [out, rels(u)]
+                        found = .true.
+                    end do
+                end do
+            end if
+            if (.not. found .and. .not. any_path(out, kept(k)%s)) out = [out, kept(k)]
+        end do
+        n = size(out)
+        kept = out
+    contains
+        logical function any_path(list, path)
+            type(string_t), intent(in) :: list(:)
+            character(len=*), intent(in) :: path
+            integer :: j
+            any_path = .false.
+            do j = 1, size(list)
+                if (list(j)%s == path) any_path = .true.
+            end do
+        end function any_path
+    end subroutine replace_included
+
+    subroutine included_names(path, names)
+        !! The file names in the preprocessor (#include "f" or <f>) and
+        !! Fortran (include 'f' or "f") include lines of a source.
+        character(len=*), intent(in) :: path
+        type(string_t), allocatable, intent(out) :: names(:)
+        character(len=:), allocatable :: text, line
+        integer :: ierr, start, stop_, q, e
+        character :: close
+
+        allocate (names(0))
+        call read_text_file_alloc(path, text, ierr)
+        if (ierr /= 0) return
+        start = 1
+        do while (start <= len(text))
+            stop_ = index(text(start:), new_line('a'))
+            if (stop_ == 0) then
+                stop_ = len(text) + 1
+            else
+                stop_ = start + stop_ - 1
+            end if
+            line = adjustl(text(start:stop_ - 1))
+            start = stop_ + 1
+            if (len(line) > 0) then
+                if (line(1:1) == '#') line = adjustl(line(2:))
+            end if
+            if (len(line) < 9) cycle
+            if (lower(line(1:7)) /= 'include') cycle
+            line = adjustl(line(8:))
+            if (len(line) < 2) cycle
+            select case (line(1:1))
+            case ('"')
+                close = '"'
+            case ("'")
+                close = "'"
+            case ('<')
+                close = '>'
+            case default
+                cycle
+            end select
+            q = index(line(2:), close)
+            if (q < 2) cycle
+            e = q
+            names = [names, string_t(line(2:e))]
+        end do
+    contains
+        pure function lower(word) result(low)
+            character(len=*), intent(in) :: word
+            character(len=len(word)) :: low
+            integer :: j, c
+            low = word
+            do j = 1, len(word)
+                c = iachar(word(j:j))
+                if (c >= iachar('A') .and. c <= iachar('Z')) low(j:j) = achar(c + 32)
+            end do
+        end function lower
+    end subroutine included_names
+
+    logical function path_ends_with(path, name) result(ends)
+        !! path names the included file name: equal to it, or ending in
+        !! /name, with leading ./ and ../ of name dropped.
+        character(len=*), intent(in) :: path, name
+        character(len=:), allocatable :: tail
+        tail = name
+        do
+            if (len(tail) > 2) then
+                if (tail(1:2) == './') then
+                    tail = tail(3:)
+                    cycle
+                end if
+            end if
+            if (len(tail) > 3) then
+                if (tail(1:3) == '../') then
+                    tail = tail(4:)
+                    cycle
+                end if
+            end if
+            exit
+        end do
+        ends = path == tail
+        if (.not. ends .and. len(path) > len(tail)) &
+            ends = path(len(path) - len(tail):) == '/'//tail
+    end function path_ends_with
 
     logical function below_any(path, dirs) result(below)
         character(len=*), intent(in) :: path
