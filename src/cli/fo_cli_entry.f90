@@ -23,6 +23,7 @@ module fo_cli_entry
     use fo_project_model, only: model_request_t, model_selection_t, &
         project_model_t, model_find_case, model_select, SELECT_EMPTY, SELECT_OK, &
         CASE_SELECTED
+    use fo_project_load, only: project_set_changed_base
     use fo_project_load, only: project_has_model, &
         project_run_cases, project_list_text, project_list_json, &
         project_select, project_run_affected, &
@@ -534,6 +535,7 @@ contains
             write (out, '(a)') ''
             write (out, '(a)') 'options:'
             write (out, '(a)') '  --only-changed  cases affected by changes since Git HEAD'
+            write (out, '(a)') '  --since REF     cases affected by changes since Git revision REF'
             write (out, '(a)') '  --all           include slow tests'
             write (out, '(a)') '  --registered-only'
             write (out, '(a)') '                  skip named tests this build does not register'
@@ -1386,6 +1388,13 @@ contains
                     no_build = .true.
                 case ('--only-changed')
                     only_changed = .true.
+                case ('--since')
+                    ! Changes since REF, such as a landing's base, instead of
+                    ! the working tree's against HEAD.
+                    call test_option_value(i, '--since needs REF', arg)
+                    call project_set_changed_base(trim(arg))
+                    only_changed = .true.
+                    skip_next = .true.
                 case ('--all')
                     include_all = .true.
                 case ('--registered-only')

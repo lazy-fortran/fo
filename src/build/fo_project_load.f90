@@ -47,6 +47,11 @@ module fo_project_load
     public :: project_has_model, project_load, project_resolve, project_run_cases
     public :: project_affected, project_changed_files, project_run_affected
     public :: project_select, project_list_expand, project_expand_cases
+    public :: project_set_changed_base
+
+    !! The revision the project's changed files are compared against: HEAD
+    !! (working tree changes), or a landing's base with `fo test --since`.
+    character(len=:), allocatable :: changed_base
     public :: project_load_configured, project_inventory_cases, project_build_cases
     public :: project_model_units, project_affected_cases
     public :: project_list_text, project_list_json
@@ -413,7 +418,7 @@ contains
         end if
         call project_changed_files(trim(b%project_dir), changed, git_ok, reason)
         if (git_ok) then
-            call project_cmake_delta(trim(b%project_dir), 'HEAD', &
+            call project_cmake_delta(trim(b%project_dir), base_ref(), &
                 trim(b%project_dir), changed, delta)
             call project_affected(b, flags, request, changed, model, selection, &
                 widen_reasons, ierr, message, restrict=only_changed, &
@@ -642,7 +647,7 @@ contains
         character(len=:), allocatable :: dep_reason
         integer :: n_deps, n_devs, n_unresolved, ierr, k
 
-        call git_changed_files(project_dir, changed, ok, reason)
+        call git_changed_files(project_dir, changed, ok, reason, base_ref())
         if (.not. ok) return
         inquire (file=trim(project_dir)//'/fpm.toml', exist=resolved)
         if (.not. resolved) return
@@ -687,7 +692,21 @@ contains
         end do
     end subroutine add_prefixed
 
-    subroutine git_changed_files(project_dir, changed, ok, reason)
+    subroutine project_set_changed_base(ref)
+        !! Compare the project against ref instead of HEAD; '' restores HEAD.
+        character(len=*), intent(in) :: ref
+        changed_base = trim(ref)
+    end subroutine project_set_changed_base
+
+    function base_ref() result(ref)
+        character(len=:), allocatable :: ref
+        ref = 'HEAD'
+        if (allocated(changed_base)) then
+            if (len(changed_base) > 0) ref = changed_base
+        end if
+    end function base_ref
+
+    subroutine git_changed_files(project_dir, changed, ok, reason, base)
         !! Files that differ from the Git HEAD of the repository holding
         !! project_dir: tracked changes (staged or not, deletions included)
         !! and untracked files that are not ignored, relative to project_dir
@@ -697,9 +716,14 @@ contains
         type(string_t), allocatable, intent(out) :: changed(:)
         logical, intent(out) :: ok
         character(len=:), allocatable, intent(out) :: reason
+        !! The revision to compare against (default HEAD).
+        character(len=*), intent(in), optional :: base
         character(len=1024) :: out_file
-        character(len=:), allocatable :: packed, text
+        character(len=:), allocatable :: packed, text, ref
         integer :: n_args, exitcode, status
+
+        ref = 'HEAD'
+        if (present(base)) ref = base
 
         ok = .false.
         reason = ''
@@ -713,11 +737,11 @@ contains
         call argv_push(packed, n_args, 'rev-parse')
         call argv_push(packed, n_args, '--verify')
         call argv_push(packed, n_args, '--quiet')
-        call argv_push(packed, n_args, 'HEAD')
+        call argv_push(packed, n_args, ref//'^{commit}')
         call process_run_argv_logged('', packed, n_args, trim(out_file), .false., &
             0, exitcode)
         if (exitcode /= 0) then
-            reason = 'no Git HEAD to compare against'
+            reason = 'no Git revision '//ref//' to compare against'
             call delete_tmpfile(trim(out_file))
             return
         end if
@@ -731,7 +755,7 @@ contains
         call argv_push(packed, n_args, '--no-renames')
         call argv_push(packed, n_args, '--relative')
         call argv_push(packed, n_args, '-z')
-        call argv_push(packed, n_args, 'HEAD')
+        call argv_push(packed, n_args, ref)
         call argv_push(packed, n_args, '--')
         call process_run_argv_logged('', packed, n_args, trim(out_file), .false., &
             0, exitcode)
