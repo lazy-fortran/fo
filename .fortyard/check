@@ -7,4 +7,14 @@ dir=$(mktemp -d "${TMPDIR:-/tmp}/fo-check.XXXXXX")
 trap 'rm -rf "$dir"' EXIT
 cp build/fo/app/fo "$dir/fo"
 chmod 555 "$dir/fo"
-PATH="$dir:$PATH" "$dir/fo" test "$@"
+# The cases the landing affects (its first parent is the main it lands on);
+# all of them for a first commit or a fo without --since.
+since=
+if git rev-parse -q --verify HEAD^ >/dev/null &&
+    "$dir/fo" test --help 2>/dev/null | grep -q -- --since; then
+    since="--since HEAD^"
+fi
+# Named cases run as asked.
+if [ $# -gt 0 ]; then since=; fi
+# shellcheck disable=SC2086
+PATH="$dir:$PATH" "$dir/fo" test $since "$@"
