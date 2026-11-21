@@ -1,4 +1,5 @@
 module fo_cli_entry
+    use fo_follow_tools, only: follow_tools_trigger
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit, real64
     use, intrinsic :: iso_c_binding, only: c_long_long
     use fo_scan, only: scan_unit_t, scan_dir, MAX_UNITS, MAX_PATH
@@ -73,6 +74,8 @@ contains
         ! command dispatcher configures the process environment or any handler can
         ! acquire a project lock, build, refresh, or install.
         if (dispatch_help(nargs, trim(action))) stop
+        ! Keeps the installed fo and fy at main, in the background.
+        call follow_tools_trigger()
         ! Build/test pipelines benefit from sleeping compiler workers, but an
         ! executable launched by `fo exec` (or its `fo run` alias) must inherit
         ! the caller's OpenMP policy.  Injecting OMP_WAIT_POLICY=PASSIVE here
