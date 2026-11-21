@@ -121,10 +121,14 @@ program test_native_git_dependency_cli
         'name = "native_git_probe"' // new_line('a') // '[dependencies]' // &
         new_line('a') // 'git_provider = { git = "file://' // dependency // &
         '", tag = "provider-v1" }' // new_line('a'))
+    ! A lock left by a process that died (pid 2^30 exceeds every pid_max)
+    ! must not block the acquisition.
+    call make_directory(checkout//'.fo-acquire-lock')
+    call write_text(checkout//'.fo-acquire-lock/pid', '1073741824'//new_line('a'))
     args = string_list_t()
     call list_add(args, 'build')
     call run_fo(driver, args, consumer, join_path(scratch, 'cache'), result, &
-        environment)
+        environment, timeout_ms=120000)
     call assert_process_ok(result, 'Fo acquires a Git dependency pinned by tag')
     call assert_checkout_commit(commit)
     args = string_list_t()

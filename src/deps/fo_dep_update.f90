@@ -28,11 +28,11 @@ module fo_dep_update
     use fo_registry, only: registry_resolve
     use fo_fs, only: fs_remove_tree, fs_remove_file, fs_stat, fs_make_dir, &
         fs_rename, fs_write_text, &
-        fs_collect_git_checkouts, fs_mkdir_excl, fs_sleep_ms
+        fs_collect_git_checkouts, fs_mkdir_excl, fs_sleep_ms, fs_lock_stale
     use fo_dep_resolve, only: normalize_path, join_path
-    use fo_process, only: process_run_argv_logged, argv_push
+    use fo_process, only: process_run_argv_logged, argv_push, process_getpid
     use fo_util, only: make_tmpfile, make_sibling_tmpfile, delete_tmpfile, &
-        read_text_file, read_text_file_alloc
+        read_text_file, read_text_file_alloc, int_text
     use, intrinsic :: iso_c_binding, only: c_long_long
     use, intrinsic :: iso_fortran_env, only: error_unit
     implicit none
@@ -195,6 +195,12 @@ contains
                     return
                 end if
                 call fs_stat(trim(lock_path), mtime, bytes, lock_present)
+                if (lock_present) then
+                    if (fs_lock_stale(trim(lock_path), 60)) then
+                        call fs_remove_tree(trim(lock_path))
+                        lock_present = .false.
+                    end if
+                end if
                 if (.not. lock_present) then
                     lock_state = fs_mkdir_excl(trim(lock_path))
                     if (lock_state == 0) exit
@@ -208,6 +214,7 @@ contains
             ierr = 1
             return
         end if
+        call fs_write_text(trim(lock_path)//'/pid', int_text(process_getpid()))
         call acquire_git_checkout_locked(dep, package_dir, package_key, destination, &
             ierr)
         call fs_remove_tree(trim(lock_path))

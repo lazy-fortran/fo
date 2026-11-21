@@ -1,7 +1,7 @@
 module fo_build_backend
     use, intrinsic :: iso_fortran_env, only: error_unit
     use fo_fs, only: fs_make_dir, fs_remove_tree, fs_mkdir_excl, fs_sleep_ms, &
-        fs_pid_alive, fs_native_path, fs_is_windows, fs_realpath, &
+        fs_lock_stale, fs_native_path, fs_is_windows, fs_realpath, &
         fs_canonical_path, fs_path_is_absolute, fs_parent_path, fs_find_executable
     use fo_process, only: process_detect_nproc, process_getpid, &
         process_getcwd, process_run_argv_logged, argv_push
@@ -1387,7 +1387,7 @@ contains
         integer, intent(out) :: ierr
 
         character(len=:), allocatable :: base, pid_file
-        integer :: state, u, ios, owner
+        integer :: state, u, ios
 
         base = trim(project_dir)//'/build/fo'
         lock_dir = trim(base)//'/.lock'
@@ -1402,14 +1402,7 @@ contains
                 ierr = 1
                 return
             end if
-            owner = 0
-            open (newunit=u, file=pid_file, status='old', action='read', &
-                iostat=ios)
-            if (ios == 0) then
-                read (u, *, iostat=ios) owner
-                close (u)
-            end if
-            if (owner > 0 .and. .not. fs_pid_alive(owner)) then
+            if (fs_lock_stale(lock_dir, 60)) then
                 call fs_remove_tree(lock_dir)
                 cycle
             end if

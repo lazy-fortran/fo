@@ -10,7 +10,7 @@ module fo_fs
     public :: fs_remove_tree, fs_remove_file, fs_make_dir, fs_dir_entry_count
     public :: fs_delete_suffix, fs_append_file, fs_write_text
     public :: fs_collect_files, fs_collect_mod_dirs
-    public :: fs_mkdir_excl, fs_sleep_ms, fs_pid_alive
+    public :: fs_mkdir_excl, fs_sleep_ms, fs_pid_alive, fs_lock_stale
     public :: fs_copy_exec, fs_copy_mode, fs_rename, fs_stat, fs_identity
     public :: fs_tree_fingerprint, fs_touch_if_older, fs_dir_trim_lru
     public :: fs_realpath, fs_find_executable, fs_canonical_path
@@ -418,6 +418,38 @@ contains
         integer, intent(in) :: pid
         fs_pid_alive = fo_c_pid_alive(int(pid, c_int)) /= 0
     end function fs_pid_alive
+
+    logical function fs_lock_stale(lock_dir, max_age) result(stale)
+        !! True when the owner of an fs_mkdir_excl lock is gone: the pid in
+        !! lock_dir/pid names no running process, or there is no pid and the
+        !! lock is older than max_age seconds (its owner died between creating
+        !! it and writing the pid). The age is read on the lock's filesystem
+        !! clock, from a probe file written beside it.
+        character(len=*), intent(in) :: lock_dir
+        integer, intent(in) :: max_age
+        integer(c_long_long) :: born, now, bytes
+        integer :: u, ios, owner
+        logical :: ok
+
+        stale = .false.
+        open (newunit=u, file=trim(lock_dir)//'/pid', status='old', action='read', &
+            iostat=ios)
+        if (ios == 0) then
+            read (u, *, iostat=ios) owner
+            close (u)
+            if (ios == 0 .and. owner > 0) then
+                stale = .not. fs_pid_alive(owner)
+                return
+            end if
+        end if
+        call fs_stat(trim(lock_dir), born, bytes, ok)
+        if (.not. ok) return
+        call fs_write_text(trim(lock_dir)//'.clock', '')
+        call fs_stat(trim(lock_dir)//'.clock', now, bytes, ok)
+        call fs_remove_file(trim(lock_dir)//'.clock')
+        if (.not. ok) return
+        stale = now - born > int(max_age, c_long_long)*1000000000_c_long_long
+    end function fs_lock_stale
 
     integer function fs_copy_exec(src, dst) result(rc)
         !! Copy src over dst and make dst executable (0755). 0 on success.
