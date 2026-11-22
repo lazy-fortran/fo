@@ -111,5 +111,10 @@ jobs:
           if [ "$kind" = verify ]; then
             fo build && FO_TEST_RERUN=1 fo test
           else
-            fo build && fo test
+            fo build || exit 1
+            if git rev-parse -q --verify HEAD^ >/dev/null && fo test --help 2>/dev/null | grep -q -- --since; then
+              fo test --since HEAD^
+            else
+              fo test
+            fi
           fi
