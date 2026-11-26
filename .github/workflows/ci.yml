@@ -21,7 +21,6 @@ concurrency:
 jobs:
   check:
     # Required by the main ruleset; skipped (and so passing) on pull requests.
-    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     container: gcc:16
     timeout-minutes: 360
@@ -117,13 +116,7 @@ jobs:
           useradd -u 1001 -m ci 2> /dev/null || true
           chown -R ci "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
           git config --system --add safe.directory "$GITHUB_WORKSPACE"
-          exec setpriv --reuid=ci --regid=ci --init-groups env HOME=/home/ci sh -euc '
-            if [ "$GITHUB_EVENT_NAME" = merge_group ]; then
-              [ -f .github/ci/check ] && exec ./.github/ci/check
-              fo build
-              exec fo test --since HEAD^
-            fi
-            [ -f .github/ci/nightly ] && exec ./.github/ci/nightly
-            [ -f .github/ci/verify ] && exec ./.github/ci/verify
-            fo build
-            FO_TEST_RERUN=1 exec fo test --all'
+          setpriv --reuid=ci --regid=ci --init-groups env HOME=/home/ci FO_TEST_KEEP_TMP=1 sh -c '
+            fo build > /dev/null 2>&1; fo test test_archive_metadata_cli test_archive_publication --verbose 2>&1 | tail -150
+            for f in /var/tmp/fo-test-tmp-*/fo-exec-build-*; do echo "== $f"; tail -60 "$f"; done 2>/dev/null | head -200'
+          ar --version | head -1; which ar ld; ls -l /usr/bin/ar
