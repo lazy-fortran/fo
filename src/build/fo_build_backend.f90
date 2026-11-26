@@ -978,7 +978,7 @@ contains
             cmake_context_build_path(context), packed, n_args, log_file, selected_preload)
         call process_run_argv_logged(context%source_root, packed, n_args, &
             log_file, .false., environment_timeout('FO_BUILD_TIMEOUT', 3600), &
-            exitcode)
+            exitcode, env_extra=cmake_fortran_environment())
         if (exitcode /= 0) then
             call cmake_diagnostic_finish(diagnostic, exitcode, log_file)
             return
@@ -1018,6 +1018,29 @@ contains
         call cmake_diagnostic_finish(diagnostic, 0, log_file)
 
     end subroutine cmake_configure
+
+    function cmake_fortran_environment() result(env)
+        !! CMake's own search takes flang, ifx and others before gfortran, and
+        !! an unusable one breaks the configure. Fo's compiler choice goes in as
+        !! FC, so a cache, preset or toolchain file still decides first.
+        character(len=:), allocatable :: env
+        character(len=4096) :: compiler
+        logical :: found
+        integer :: length
+
+        env = ''
+        call get_environment_variable('FC', length=length)
+        if (length > 0) return
+        call get_environment_variable('CMAKE_Fortran_COMPILER', compiler, length=length)
+        if (length == 0) call get_environment_variable('FO_FC', compiler, length=length)
+        if (length == 0) then
+            ! Without gfortran, CMake's own search is the only choice left.
+            call fs_find_executable(selected_compiler_command(), compiler, found)
+            if (.not. found) return
+        end if
+        if (scan(trim(compiler), ';') > 0) return
+        env = 'FC='//trim(compiler)
+    end function cmake_fortran_environment
 
     subroutine cmake_cache_compiler(context, compiler)
         type(cmake_context_t), intent(in) :: context
