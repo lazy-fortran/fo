@@ -20,7 +20,7 @@ program test_test_filter_cli
     implicit none
 
     character(len=1), parameter :: nl = achar(10)
-    character(:), allocatable :: driver, scratch, layered, failing, delta, cache
+    character(:), allocatable :: driver, scratch, layered, failing, delta, cache, costed
     type(string_list_t) :: env
 
     call resolve_driver(driver)
@@ -29,10 +29,12 @@ program test_test_filter_cli
     layered = join_path(scratch, 'layered')
     failing = join_path(scratch, 'failing')
     delta = join_path(scratch, 'delta')
+    costed = join_path(scratch, 'costed')
     call list_add(env, 'FO_JOBS=2')
     call list_add(env, 'FO_TEST_RERUN=0')
     call write_layered()
     call write_failing()
+    call write_costed()
 
     call check_expressions()
     call check_partitions()
@@ -73,6 +75,17 @@ contains
         call put(layered, 'test/test_lay_slow.f90', 'program test_lay_slow'//nl// &
             'end program'//nl)
     end subroutine write_layered
+
+    subroutine write_costed()
+        !! CTest cases whose declared costs (TIMEOUT times PROCESSORS, else
+        !! the regular budget of 10 s) are 100, 100, 10 and 10.
+        call put(costed, 'CMakeLists.txt', 'cmake_minimum_required(VERSION 3.22)'//nl// &
+            'project(costed NONE)'//nl//'enable_testing()'//nl// &
+            'foreach(name a b c d)'//nl// &
+            '  add_test(NAME ${name} COMMAND true)'//nl//'endforeach()'//nl// &
+            'set_tests_properties(a PROPERTIES TIMEOUT 100)'//nl// &
+            'set_tests_properties(b PROPERTIES TIMEOUT 50 PROCESSORS 2)'//nl)
+    end subroutine write_costed
 
     subroutine write_failing()
         call put(failing, 'fpm.toml', 'name = "bad"'//nl)
@@ -209,6 +222,19 @@ contains
         call fo_in(layered, [character(len=160) :: 'test', '--partition', 'mod:1/3'], &
             result)
         call assert_true(result%exit_code /= 0, 'unknown partition kind is rejected')
+        ! cost: the slow case (budget 300 s) against the four regular ones
+        ! (10 s each), where count would split three against two.
+        call assert_equal_string(listing(layered, [character(len=160) :: '--all', &
+            '--partition', 'cost:1/2']), 'test_lay_slow;', 'cost part 1 holds the slow case')
+        call assert_equal_string(listing(layered, [character(len=160) :: '--all', &
+            '--partition', 'cost:2/2']), 'test_base;test_free;test_mid;test_top;', &
+            'cost part 2 holds the regular cases')
+        ! Declared CTest TIMEOUT times PROCESSORS: a and b cost 100 each and
+        ! go apart, c and d (10 each) fill up; count would pair a with b.
+        call assert_equal_string(listing(costed, [character(len=160) :: '--all', &
+            '--partition', 'cost:1/2']), 'a;c;', 'cost part 1 of the CTest cases')
+        call assert_equal_string(listing(costed, [character(len=160) :: '--all', &
+            '--partition', 'cost:2/2']), 'b;d;', 'cost part 2 of the CTest cases')
         ! Running a partition runs exactly its cases.
         call fo_in(layered, [character(len=160) :: 'test', '--partition', 'count:2/2', &
             '--all', '--rerun', '--verbose'], result)

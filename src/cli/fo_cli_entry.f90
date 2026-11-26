@@ -1,6 +1,6 @@
 module fo_cli_entry
     use fo_follow_tools, only: follow_tools_trigger
-    use, intrinsic :: iso_fortran_env, only: output_unit, error_unit, real64
+    use, intrinsic :: iso_fortran_env, only: output_unit, error_unit, real64, int64
     use, intrinsic :: iso_c_binding, only: c_long_long
     use fo_scan, only: scan_unit_t, scan_dir, MAX_UNITS, MAX_PATH
     use fx_dag, only: dag_t, dag_topo_sort, MAX_NODES
@@ -22,7 +22,7 @@ module fo_cli_entry
     use fx_string, only: string_t
     use fo_project_model, only: model_request_t, model_selection_t, &
         project_model_t, model_find_case, model_select, SELECT_EMPTY, SELECT_OK, &
-        CASE_SELECTED
+        CASE_SELECTED, model_case_t
     use fo_project_load, only: project_set_changed_base
     use fo_project_load, only: project_has_model, &
         project_run_cases, project_list_text, project_list_json, &
@@ -552,8 +552,9 @@ contains
             write (out, '(a)') '  --rerun         run every selected case, reuse no recorded PASS'
             write (out, '(a)') '  --no-cache      neither reuse nor record PASS results (Gremlin cases)'
             write (out, '(a)') '  --junit PATH    also write JUnit XML of the results to PATH'
-            write (out, '(a)') '  --partition hash:K/N | count:K/N'
-            write (out, '(a)') '                  run only part K of N of the selected cases'
+            write (out, '(a)') '  --partition hash:K/N | count:K/N | cost:K/N'
+            write (out, '(a)') '                  run only part K of N of the selected cases; cost'
+            write (out, '(a)') '                  balances declared time limits times processors'
             write (out, '(a)') '  --cases FILE    run exactly the cases of a --list --json object'
             write (out, '(a)') '                  (- reads standard input); with --json=full every'
             write (out, '(a)') '                  result carries its closure_digest'
@@ -1217,7 +1218,8 @@ contains
             character(len=64) :: profile
             character(len=1024) :: all_flags
             character(len=:), allocatable :: filter_text, partition_text, junit_path
-            logical :: rerun, by_hash, no_cache
+            logical :: rerun, no_cache
+            integer :: partition_kind
             integer :: part, parts
             character(len=64), allocatable :: digests(:)
             character(len=:), allocatable :: cases_path
@@ -1309,7 +1311,8 @@ contains
                         cycle
                     case ('--partition')
                         if (len_trim(arg) <= eq) &
-                            call test_usage_error('--partition needs hash:K/N or count:K/N')
+                            call test_usage_error('--partition needs hash:K/N, '// &
+                                'count:K/N or cost:K/N')
                         partition_text = trim(arg(eq + 1:))
                         cycle
                     end select
@@ -1367,7 +1370,8 @@ contains
                     cases_path = trim(arg)
                     skip_next = .true.
                 case ('--partition')
-                    call test_option_value(i, '--partition needs hash:K/N or count:K/N', arg)
+                    call test_option_value(i, '--partition needs hash:K/N, count:K/N '// &
+                        'or cost:K/N', arg)
                     partition_text = trim(arg)
                     skip_next = .true.
                 case ('--rerun')
@@ -1451,7 +1455,7 @@ contains
                 size(request%exclude_labels) > 0 .or. size(request%layers) > 0 .or. &
                 len(filter_text) > 0
             if (len(partition_text) > 0) then
-                call partition_parse(partition_text, by_hash, part, parts, ierr, message)
+                call partition_parse(partition_text, partition_kind, part, parts, ierr, message)
                 if (ierr /= 0) call test_usage_error(message)
             end if
             if (random_count > 0) then
@@ -1576,7 +1580,7 @@ contains
                     i=1, n_arg_names)]
             end if
             if (len(partition_text) > 0 .and. selection%status /= SELECT_EMPTY) &
-                call narrow_to_partition(model, selection, by_hash, part, parts)
+                call narrow_to_partition(model, selection, partition_kind, part, parts)
             ! After the partition: a changed case is reported in its part only.
             allocate (changed(0))
             if (len(cases_path) > 0) call drop_changed_cases(b, model, selection, &
@@ -1771,23 +1775,64 @@ contains
             selection%cases = pack(selection%cases, keep)
         end subroutine drop_changed_cases
 
-        subroutine narrow_to_partition(model, selection, by_hash, part, parts)
+        subroutine narrow_to_partition(model, selection, kind, part, parts)
             !! Keep the selected cases of partition part of parts (--partition).
+            !! The cost of a case is its declared time limit (CTest TIMEOUT,
+            !! else fo's budget for a slow or a regular case) times the
+            !! processors it declares: known from the build description
+            !! alone, so every runner of a split run computes the same parts.
+            use fo_test_budget, only: test_budget_seconds
             type(project_model_t), intent(in) :: model
             type(model_selection_t), intent(inout) :: selection
-            logical, intent(in) :: by_hash
+            integer, intent(in) :: kind
             integer, intent(in) :: part, parts
             type(string_t), allocatable :: names(:)
             logical, allocatable :: keep(:)
+            integer(int64), allocatable :: costs(:)
             integer :: k
 
             allocate (names(size(selection%cases)), keep(size(selection%cases)))
+            allocate (costs(size(selection%cases)))
             do k = 1, size(names)
-                names(k)%s = model%cases(selection%cases(k))%name
+                associate (c => model%cases(selection%cases(k)))
+                    names(k)%s = c%name
+                    costs(k) = attr_number(c, 'TIMEOUT')
+                    if (costs(k) <= 0) costs(k) = test_budget_seconds(slow=has_label(c, 'slow'))
+                    costs(k) = costs(k)*max(1_int64, attr_number(c, 'PROCESSORS'))
+                end associate
             end do
-            call partition_keep(by_hash, part, parts, names, keep)
+            call partition_keep(kind, part, parts, names, keep, costs)
             selection%cases = pack(selection%cases, keep)
         end subroutine narrow_to_partition
+
+        integer(int64) function attr_number(c, key) result(value)
+            !! The whole seconds or count of property key; 0 when absent.
+            type(model_case_t), intent(in) :: c
+            character(len=*), intent(in) :: key
+            real(real64) :: x
+            integer :: a, ios
+
+            value = 0
+            if (.not. allocated(c%attrs)) return
+            do a = 1, size(c%attrs)
+                if (c%attrs(a)%key /= key) cycle
+                read (c%attrs(a)%value, *, iostat=ios) x
+                if (ios == 0 .and. x > 0) value = ceiling(x, int64)
+                return
+            end do
+        end function attr_number
+
+        logical function has_label(c, label) result(found)
+            type(model_case_t), intent(in) :: c
+            character(len=*), intent(in) :: label
+            integer :: j
+
+            found = .false.
+            if (.not. allocated(c%labels)) return
+            do j = 1, size(c%labels)
+                if (c%labels(j)%s == label) found = .true.
+            end do
+        end function has_label
 
         subroutine write_junit(path, log_file)
             !! JUnit XML of the results in log_file; a failed write is an error.

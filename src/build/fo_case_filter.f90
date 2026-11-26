@@ -41,6 +41,8 @@ module fo_case_filter
     end type case_filter_t
 
     public :: filter_parse, filter_eval, partition_parse, partition_keep
+    integer, parameter, public :: PARTITION_COUNT = 0, PARTITION_HASH = 1, &
+        PARTITION_COST = 2
 
 contains
 
@@ -113,49 +115,75 @@ contains
 
     end function filter_eval
 
-    subroutine partition_parse(spec, by_hash, part, parts, ierr, message)
-        !! `hash:K/N` or `count:K/N` (1 <= K <= N) for partition_keep.
+    subroutine partition_parse(spec, kind, part, parts, ierr, message)
+        !! `hash:K/N`, `count:K/N` or `cost:K/N` (1 <= K <= N) for
+        !! partition_keep; kind is one of the PARTITION_* values.
         character(len=*), intent(in) :: spec
-        logical, intent(out) :: by_hash
+        integer, intent(out) :: kind
         integer, intent(out) :: part, parts, ierr
         character(len=:), allocatable, intent(out) :: message
         integer :: colon, slash, ios1, ios2
 
         ierr = 1
-        by_hash = .false.
+        kind = PARTITION_COUNT
         part = 0
         parts = 0
-        message = 'invalid partition '''//spec//''': expected hash:K/N or count:K/N'
+        message = 'invalid partition '''//spec//''': expected hash:K/N, count:K/N or cost:K/N'
         colon = index(spec, ':')
         slash = index(spec, '/')
         if (colon < 2 .or. slash < colon + 2 .or. slash >= len(spec)) return
-        if (spec(1:colon - 1) /= 'hash' .and. spec(1:colon - 1) /= 'count') return
+        select case (spec(1:colon - 1))
+        case ('hash')
+            kind = PARTITION_HASH
+        case ('count')
+            kind = PARTITION_COUNT
+        case ('cost')
+            kind = PARTITION_COST
+        case default
+            return
+        end select
         read (spec(colon + 1:slash - 1), *, iostat=ios1) part
         read (spec(slash + 1:), *, iostat=ios2) parts
         if (ios1 /= 0 .or. ios2 /= 0) return
         if (part < 1 .or. parts < 1 .or. part > parts) return
-        by_hash = spec(1:colon - 1) == 'hash'
         ierr = 0
         message = ''
     end subroutine partition_parse
 
-    subroutine partition_keep(by_hash, part, parts, names, keep)
+    subroutine partition_keep(kind, part, parts, names, keep, costs)
         !! The cases of partition part of parts over the ordered case list
         !! names: hash assigns a case by the SHA-256 of its name alone, so a
         !! case keeps its partition when the list changes; count gives each
-        !! partition a contiguous, balanced block of the list. The
-        !! partitions are disjoint and together cover the list.
-        logical, intent(in) :: by_hash
+        !! partition a contiguous, balanced block of the list; cost balances
+        !! the summed costs (largest first into the least loaded partition,
+        !! equal costs by name, equal loads to the lower partition), so one
+        !! expensive case does not hold up a whole partition. The partitions
+        !! are disjoint and together cover the list.
+        integer, intent(in) :: kind
         integer, intent(in) :: part, parts
         type(string_t), intent(in) :: names(:)
         logical, intent(out) :: keep(size(names))
+        integer(int64), intent(in), optional :: costs(:)
         character(len=64) :: digest
         integer(int64) :: value
-        integer :: i, k, total
+        integer(int64), allocatable :: load(:)
+        integer, allocatable :: order(:)
+        integer :: i, k, total, best
 
         total = size(names)
+        if (kind == PARTITION_COST .and. present(costs)) then
+            order = cost_order(names, costs)
+            allocate (load(parts), source=0_int64)
+            keep = .false.
+            do i = 1, total
+                best = minloc(load, 1)
+                load(best) = load(best) + max(1_int64, costs(order(i)))
+                keep(order(i)) = best == part
+            end do
+            return
+        end if
         do i = 1, total
-            if (by_hash) then
+            if (kind == PARTITION_HASH) then
                 digest = sha256_string(names(i)%s)
                 value = 0_int64
                 do k = 1, 8
@@ -168,6 +196,36 @@ contains
             end if
         end do
     end subroutine partition_keep
+
+    function cost_order(names, costs) result(order)
+        !! Indices of names by decreasing cost, equal costs by name.
+        type(string_t), intent(in) :: names(:)
+        integer(int64), intent(in) :: costs(:)
+        integer, allocatable :: order(:)
+        integer :: i, j, t
+
+        order = [(i, i=1, size(names))]
+        do i = 2, size(order)
+            t = order(i)
+            j = i - 1
+            do while (j >= 1)
+                if (.not. before(t, order(j))) exit
+                order(j + 1) = order(j)
+                j = j - 1
+            end do
+            order(j + 1) = t
+        end do
+    contains
+        logical function before(a, b)
+            integer, intent(in) :: a, b
+
+            if (costs(a) /= costs(b)) then
+                before = costs(a) > costs(b)
+            else
+                before = llt(names(a)%s, names(b)%s)
+            end if
+        end function before
+    end function cost_order
 
     recursive subroutine parse_or(text, pos, filter, node, ierr, message)
         character(len=*), intent(in) :: text
