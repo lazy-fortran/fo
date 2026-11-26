@@ -519,7 +519,7 @@ contains
         ! the target listing it (B15).
         call expect_affected(m, units, '', 'src/api.h', 'c1 c2 c3 c4', .true., &
             'header')
-        call expect_affected(m, units, '', 'LICENSE docs/y.txt .github/ci.yml .fortyard/check', '', &
+        call expect_affected(m, units, '', 'LICENSE docs/y.txt .github/ci.yml .github/ci/check', '', &
             .false., 'documentation and metadata')
         call expect_affected(m, units, 'n=c1', 'src/b.f90', '', .false., &
             'unselected case stays unselected')
