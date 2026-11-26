@@ -112,12 +112,18 @@ jobs:
       - name: Check
         if: steps.stale.outputs.skip != '1'
         run: |
-          if [ "$GITHUB_EVENT_NAME" = merge_group ]; then
-            [ -f .github/ci/check ] && exec ./.github/ci/check
+          # Tests of permission errors need a user that file modes bind, so
+          # they do not run as the container's root.
+          useradd -u 1001 -m ci 2> /dev/null || true
+          chown -R ci "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
+          git config --system --add safe.directory "$GITHUB_WORKSPACE"
+          exec setpriv --reuid=ci --regid=ci --init-groups env HOME=/home/ci sh -euc '
+            if [ "$GITHUB_EVENT_NAME" = merge_group ]; then
+              [ -f .github/ci/check ] && exec ./.github/ci/check
+              fo build
+              exec fo test --since HEAD^
+            fi
+            [ -f .github/ci/nightly ] && exec ./.github/ci/nightly
+            [ -f .github/ci/verify ] && exec ./.github/ci/verify
             fo build
-            exec fo test --since HEAD^
-          fi
-          [ -f .github/ci/nightly ] && exec ./.github/ci/nightly
-          [ -f .github/ci/verify ] && exec ./.github/ci/verify
-          fo build
-          FO_TEST_RERUN=1 exec fo test --all
+            FO_TEST_RERUN=1 exec fo test --all'
