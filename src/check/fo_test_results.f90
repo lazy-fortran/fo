@@ -9,6 +9,7 @@ module fo_test_results
     implicit none
     private
     public :: test_result_entry_t, MAX_TEST_RESULTS_ENTRIES
+    public :: test_results_set_durations
     public :: parse_test_results, format_test_results_json
     public :: format_test_results_text, read_logical_line
     public :: extract_captured_stdout
@@ -36,6 +37,9 @@ module fo_test_results
         !! Input closure digest of the case in this run; '' when unknown.
         character(len=64) :: digest = ''
     end type test_result_entry_t
+
+    !! `fo test --durations N`: the text report lists the N slowest cases run.
+    integer, save :: report_durations = 0
 
 contains
 
@@ -125,8 +129,8 @@ contains
                         if (len(pending_reason) == 0) entries(n_entries)%reason = &
                             'CTest did not run this test'
                     else if (status == 'SKIP' .and. &
-                        index(line, 'Not Run (Disabled)', back=.true.) > &
-                        index(line, '...', back=.true.)) then
+                            index(line, 'Not Run (Disabled)', back=.true.) > &
+                            index(line, '...', back=.true.)) then
                         entries(n_entries)%reason = 'CTest test is disabled'
                     end if
                     pending_reason = ''
@@ -139,7 +143,7 @@ contains
                         entries(n_entries)%exit_code = 1
                     end if
                 else if (index(line, 'Unable to find executable:') > 0 .or. &
-                    index(line, 'Could not find executable ') > 0) then
+                        index(line, 'Could not find executable ') > 0) then
                     pending_reason = line
                 else if (looks_like_ctest_result_line(line)) then
                     ierr = 1
@@ -525,10 +529,55 @@ contains
             end if
         end do
         if (len(handle) > 0) output = output//'log: '//handle//achar(10)
+        if (report_durations > 0) call slowest_cases(entries(1:n_entries), &
+            report_durations, output)
         output = output//verdict_line(n_pass, n_fail, n_skip, n_untested, &
             n_flaky, read_wall_seconds(log_file), total_secs, &
             count_reused(entries, n_entries))
     end subroutine format_test_results_text
+
+    subroutine test_results_set_durations(n)
+        integer, intent(in) :: n
+
+        report_durations = max(0, n)
+    end subroutine test_results_set_durations
+
+    subroutine slowest_cases(entries, most, output)
+        !! Appends the `most` slowest cases that ran (a reused PASS did not),
+        !! slowest first, so that a truncated log still ends with them.
+        type(test_result_entry_t), intent(in) :: entries(:)
+        integer, intent(in) :: most
+        character(len=:), allocatable, intent(inout) :: output
+        logical :: taken(size(entries))
+        character(len=16) :: secs
+        integer :: k, i, best
+
+        taken = trim_status(entries) == 'REUSED'
+        if (all(taken)) return
+        output = output//'slowest cases:'//achar(10)
+        do k = 1, most
+            best = 0
+            do i = 1, size(entries)
+                if (taken(i)) cycle
+                if (best == 0) then
+                    best = i
+                else if (entries(i)%seconds > entries(best)%seconds) then
+                    best = i
+                end if
+            end do
+            if (best == 0) exit
+            taken(best) = .true.
+            write (secs, '(f10.2)') entries(best)%seconds
+            output = output//'  '//trim(adjustl(secs))//'s '//entries(best)%name//achar(10)
+        end do
+    contains
+        elemental function trim_status(e) result(st)
+            type(test_result_entry_t), intent(in) :: e
+            character(len=10) :: st
+
+            st = e%status
+        end function trim_status
+    end subroutine slowest_cases
 
     subroutine format_single_test_entry(entry, line)
         type(test_result_entry_t), intent(in) :: entry

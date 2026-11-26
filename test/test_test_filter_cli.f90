@@ -38,6 +38,7 @@ program test_test_filter_cli
 
     call check_expressions()
     call check_partitions()
+    call check_durations()
     call check_failed_and_junit()
     call check_affected()
     call check_mcp_filter()
@@ -179,6 +180,30 @@ contains
             result)
         call assert_true(result%exit_code /= 0, 'an empty filter result is an error')
     end subroutine check_expressions
+
+    subroutine check_durations()
+        !! --durations 2 ends the report with the two slowest cases that ran.
+        type(process_result_t) :: result
+        character(:), allocatable :: tail
+        integer :: at, lines, k
+
+        call fo_in(layered, [character(len=160) :: 'test', '--all', '--rerun', &
+            '--durations', '2'], result)
+        call assert_equal_integer(result%exit_code, 0, '--durations run passes: '// &
+            result%stderr)
+        at = index(result%stdout, 'slowest cases:'//nl)
+        call assert_true(at > 0, 'the report lists the slowest cases: '//result%stdout)
+        if (at == 0) return
+        tail = result%stdout(at + 15:)
+        lines = 0
+        do k = 1, len(tail)
+            if (tail(k:k) == nl) lines = lines + 1
+        end do
+        call assert_equal_integer(lines, 3, 'two cases, then the verdict line: '//tail)
+        call assert_contains(tail, 's test_', 'each line gives seconds and a case')
+        call fo_in(layered, [character(len=160) :: 'test', '--durations', 'x'], result)
+        call assert_true(result%exit_code /= 0, 'a count that is no number is rejected')
+    end subroutine check_durations
 
     subroutine check_partitions()
         character(len=16) :: hash_part

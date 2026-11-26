@@ -17,7 +17,8 @@ module fo_cli_entry
     use fo_fs, only: fs_stat, fs_canonical_path
     use fo_build_tree, only: native_output_dir
     use fo_test_results, only: test_result_entry_t, &
-        parse_test_results, format_test_results_text, format_test_results_json
+        parse_test_results, format_test_results_text, format_test_results_json, &
+        test_results_set_durations
     use fo_test_random, only: select_random_tests
     use fx_string, only: string_t
     use fo_project_model, only: model_request_t, model_selection_t, &
@@ -561,6 +562,7 @@ contains
             write (out, '(a)') '  --list          print the selection and build plan; no build'
             write (out, '(a)') '                  (cases of built executables are listed)'
             write (out, '(a)') '  --retries N     retry a failed test N times; pass after fail is FLAKY'
+            write (out, '(a)') '  --durations N   end the report with the N slowest cases that ran'
             write (out, '(a)') '  --strict-flaky  a FLAKY test fails the run'
             write (out, '(a)') '  --random N      sample N tests without replacement'
             write (out, '(a)') '  --seed S        replay a random sample with seed S'
@@ -1206,7 +1208,7 @@ contains
             logical :: json_full, quiet
             logical :: end_options, flags_seen, list_mode, filtered, no_build
             logical :: strict_flaky
-            integer :: retries
+            integer :: retries, durations
             type(string_t), allocatable :: widen_reasons(:)
             type(model_request_t) :: request
             type(model_selection_t) :: selection
@@ -1254,6 +1256,7 @@ contains
             no_build = .false.
             strict_flaky = .false.
             retries = -1
+            durations = 0
             allocate (request%include_labels(0), request%exclude_labels(0), &
                 request%layers(0))
             do i = 2, command_argument_count()
@@ -1388,6 +1391,12 @@ contains
                     if (ierr /= 0 .or. retries < 0) &
                         call test_usage_error('invalid --retries N')
                     skip_next = .true.
+                case ('--durations')
+                    call test_option_value(i, '--durations needs N', arg)
+                    read (arg, *, iostat=ierr) durations
+                    if (ierr /= 0 .or. durations < 0) &
+                        call test_usage_error('invalid --durations N')
+                    skip_next = .true.
                 case ('--no-build')
                     no_build = .true.
                 case ('--only-changed')
@@ -1429,6 +1438,7 @@ contains
                 end select
             end do
             call test_set_retry_options(retries, strict_flaky)
+            call test_results_set_durations(durations)
             ! Agent-facing and summary modes get the report only, no live lines.
             if (use_json .or. quiet) call progress_suppress(.true.)
 
