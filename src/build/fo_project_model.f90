@@ -2173,7 +2173,7 @@ contains
 
     logical function documentation_like(path) result(yes)
         !! A file no test reads: prose documentation, license files, repository
-        !! metadata and the doc directories.
+        !! metadata, the doc directories and the forge's CI scripts.
         character(len=*), intent(in) :: path
         character(len=:), allocatable :: base, low, ext
         integer :: dot, slash
@@ -2185,6 +2185,7 @@ contains
             path(1:min(len(path), 4)) == 'doc/') return
         if (base(1:min(len(base), 4)) == '.git') return
         if (path(1:min(len(path), 8)) == '.github/') return
+        if (path(1:min(len(path), 10)) == '.fortyard/') return
         dot = index(base, '.', back=.true.)
         ext = ''
         if (dot > 0) ext = base(dot + 1:)
