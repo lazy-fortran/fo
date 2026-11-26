@@ -133,6 +133,14 @@ program test_hook_reuse
     call git('config', 'fo.hookPrepare', 'echo 1.0 > version')
     call hook()
     call assert_process_ok(result, 'fo.hookPrepare writes the generated file first')
+    ! Git commits onto the HEAD it read before the hook, so a HEAD that
+    ! another process moves meanwhile fails the hook.
+    call git('config', 'fo.hookPrepare', 'echo 1.0 > version; git -C "'//project// &
+        '" checkout -q --detach HEAD')
+    call hook()
+    call assert_true(result%exit_code /= 0, 'a HEAD moved during the hook fails it')
+    call assert_contains(result%stdout//result%stderr, 'moved while the hook ran', &
+        'the failure names the moved HEAD')
 
     call remove_tree(scratch)
     call finish_assertions()

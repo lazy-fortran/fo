@@ -232,7 +232,7 @@ contains
         logical :: fortran, refreshed, has_fpm, shared
         logical, allocatable :: added(:)
         integer(c_int) :: lock_fd
-        character(len=:), allocatable :: state, previous
+        character(len=:), allocatable :: state, previous, head
 
         code = 1
         message = ''
@@ -265,6 +265,7 @@ contains
                 exit validation
             end if
             root = fs_canonical_path(root)
+            head = head_state(root)
             call git_text(root, git_words('write-tree'), tree, status)
             if (status /= 0) then
                 message = 'cannot snapshot the index (resolve conflicts first)'
@@ -694,6 +695,16 @@ contains
             end if
         end if
         if (lock_fd >= 0) call c_hook_unlock(lock_fd)
+        ! Git commits onto the HEAD it read before the hook; a HEAD moved by
+        ! another process meanwhile makes that commit fail or land elsewhere.
+        if (allocated(head)) then
+            if (head_state(root) /= head) then
+                code = 1
+                message = 'HEAD of '//root//' moved while the hook ran, from '// &
+                    head//' to '//head_state(root)//'; another process changed '// &
+                    'this checkout (see git reflog)'
+            end if
+        end if
         if (code /= 0) then
             call read_text_file_alloc(trim(logfile), text, status)
             if (status == 0) then
@@ -1304,6 +1315,20 @@ contains
             pos = pos + eol
         end do
     end subroutine merge_parent_lines
+
+    function head_state(root) result(state)
+        !! The branch HEAD names, if any, and the commit it resolves to.
+        character(len=*), intent(in) :: root
+        character(len=:), allocatable :: state
+        character(len=:), allocatable :: ref, commit
+        integer :: status
+
+        call git_text(root, git_words('symbolic-ref', '-q', 'HEAD'), ref, status)
+        if (status /= 0) ref = 'detached'
+        call git_text(root, git_words('rev-parse', '-q', '--verify', 'HEAD'), commit, status)
+        if (status /= 0) commit = 'unborn'
+        state = ref//' at '//commit
+    end function head_state
 
     subroutine git_text(root, args, text, status, strip)
         character(len=*), intent(in) :: root, args

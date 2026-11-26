@@ -9,6 +9,10 @@ module fo_follow_tools
     public :: follow_tools_trigger
 
     integer, parameter :: INTERVAL_S = 300
+    character(len=*), parameter :: GIT_CONTEXT = 'GIT_DIR GIT_WORK_TREE '// &
+        'GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY '// &
+        'GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PREFIX GIT_SHALLOW_FILE '// &
+        'GIT_GRAFT_FILE GIT_IMPLICIT_WORK_TREE GIT_NAMESPACE'
     interface
         integer(c_long) function c_time(t) bind(C, name='time')
             import :: c_long, c_ptr
@@ -48,7 +52,11 @@ contains
             if (int(c_time(c_null_ptr), c_long_long) - mtime_ns / 1000000000_c_long_long &
                 < INTERVAL_S) return
         end if
-        call execute_command_line('{ if command -v setsid >/dev/null 2>&1; then '// &
+        ! A Git hook runs fo with its repository in GIT_DIR and its index in
+        ! GIT_INDEX_FILE. The follower's Git commands would otherwise check out
+        ! and clean in that repository instead of its own clones.
+        call execute_command_line('unset '//GIT_CONTEXT//'; '// &
+            '{ if command -v setsid >/dev/null 2>&1; then '// &
             'setsid sh "'//script//'"; else sh "'//script//'"; fi; } '// &
             '</dev/null >/dev/null 2>&1 &', wait=.true., exitstat=status)
     end subroutine follow_tools_trigger
