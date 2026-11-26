@@ -3,7 +3,9 @@
 # ones before it, so HEAD^ is the state it lands on and `fo test --since HEAD^`
 # runs the cases it affects. The nightly run tests everything, slow cases
 # included, and is skipped when main has not moved since the last green
-# nightly run of less than a week ago.
+# nightly run of less than a week ago. Everything runs in the gcc:16 image
+# (GNU Fortran 16 on Debian), with the Debian packages that
+# .github/ci/apt-packages lists, one per line.
 name: ci
 on:
   pull_request:
@@ -21,6 +23,7 @@ jobs:
     # Required by the main ruleset; skipped (and so passing) on pull requests.
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
+    container: gcc:16
     timeout-minutes: 360
     permissions:
       contents: read
@@ -29,18 +32,24 @@ jobs:
       FPM_VERSION: 0.13.0
       GIT_TERMINAL_PROMPT: 0
       MPLBACKEND: Agg
+      DEBIAN_FRONTEND: noninteractive
     defaults:
       run:
         shell: bash
     steps:
+      - name: Base packages
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends cmake ninja-build curl ca-certificates ccache jq python3 > /dev/null
       - name: Skip a nightly run of an unchanged main
         id: stale
         if: github.event_name == 'schedule'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          last=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?event=schedule&status=success&per_page=1" \
-            --jq '.workflow_runs[0] | "\(.head_sha) \(.created_at)"' 2>/dev/null || true)
+          last=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?event=schedule&status=success&per_page=1" |
+            jq -r '.workflow_runs[0] | "\(.head_sha) \(.created_at)"' 2>/dev/null || true)
           sha=${last%% *} when=${last#* }
           if [ "$sha" = "$GITHUB_SHA" ] && [ -n "$when" ] &&
             [ "$(date -d "$when" +%s)" -gt "$(date -d '7 days ago' +%s)" ]; then
@@ -52,9 +61,13 @@ jobs:
         with:
           fetch-depth: 2
           persist-credentials: false
+      - name: Repository packages
+        if: steps.stale.outputs.skip != '1' && hashFiles('.github/ci/apt-packages') != ''
+        run: grep -v '^#' .github/ci/apt-packages | xargs apt-get install -y -qq --no-install-recommends > /dev/null
       - name: Places
         if: steps.stale.outputs.skip != '1'
         run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           fo=$(git ls-remote https://github.com/lazy-fortran/fo.git refs/heads/main | cut -f1)
           test -n "$fo"
           echo "FO_COMMIT=$fo" >> "$GITHUB_ENV"
@@ -66,7 +79,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ env.FO_TOOLS }}
-          key: fo-${{ runner.os }}-${{ runner.arch }}-${{ env.FO_COMMIT }}-fpm-${{ env.FPM_VERSION }}
+          key: fo-gcc16-${{ env.FO_COMMIT }}-fpm-${{ env.FPM_VERSION }}
       - name: Build cache
         if: steps.stale.outputs.skip != '1'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
