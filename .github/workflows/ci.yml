@@ -41,6 +41,11 @@ jobs:
         run: |
           apt-get update -qq
           apt-get install -y -qq --no-install-recommends cmake ninja-build curl ca-certificates ccache jq python3 > /dev/null
+          # The image installs GCC under /usr/local; tests that run with a
+          # minimal PATH expect a distribution's /usr/bin.
+          for t in gcc g++ gfortran cpp gcc-ar gcc-nm gcc-ranlib gcov; do
+            ln -sf "/usr/local/bin/$t" "/usr/bin/$t"
+          done
       - name: Skip a nightly run of an unchanged main
         id: stale
         if: github.event_name == 'schedule'
